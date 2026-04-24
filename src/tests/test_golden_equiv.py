@@ -10,7 +10,7 @@ import torch
 
 from src.quantize.elemwise import quantize_elemwise_op
 from src.quantize.mx_quantize import quantize_mx_op
-from src.quantize.bfloat_quantize import quantize_bfloat
+from src.quantize.bfloat_quantize import quantize_bfloat_from_specs
 from src.specs.specs import finalize_mx_specs
 
 GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "golden")
@@ -54,7 +54,7 @@ BFLOAT_FORMATS = [
 @pytest.mark.parametrize("cfg_name", BFLOAT_FORMATS)
 def test_quantize_bfloat_golden(cfg_name):
     golden = _load_golden(f"quantize_bfloat_{cfg_name}.pt")
-    new_out = quantize_bfloat(
+    new_out = quantize_bfloat_from_specs(
         golden["input"].clone(),
         mx_specs=finalize_mx_specs(golden["mx_specs"]),
     )
