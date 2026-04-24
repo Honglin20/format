@@ -1,7 +1,7 @@
 # Current Task
 
-**Task ID**: P2F-7（Phase 2 收口补丁，随后进入 Phase 3）
-**Plan**: `docs/plans/2026-04-24-p2f7-findings.md` → `docs/plans/2026-04-24-phase3.md`
+**Task ID**: P3.1（Matmul 家族 + Phase 3 基础设施）
+**Plan**: `docs/plans/2026-04-24-phase3.md`
 **Branch**: `feature/refactor-src`
 
 ---
@@ -33,8 +33,12 @@
 
 计划文档：`docs/plans/2026-04-24-phase3.md`。子阶段（按依赖推进）：
 
-- [ ] P3.0：P2F-7 收口（见上）
-- [ ] P3.1：Matmul 家族（Linear / Matmul / BMM）+ Phase 3 基础设施
+- [x] P3.0：P2F-7 收口（commit `bcf4031` + `04fb902`）
+- [x] **P3.1-a：`OpQuantConfig` 数据类** — commit `e1e6800` + review fix `012eea5`
+- [ ] P3.1-b：`ObservableMixin` no-op 骨架 + `QuantEvent` + `ObserverBase` / `SliceAwareObserver` + `iter_slices`
+- [ ] P3.1-c：`_compat.py::op_config_from_mx_specs` Linear 适配器
+- [ ] P3.1-d：`QuantizedLinear` + `LinearFunction`
+- [ ] P3.1-e：`quantized_matmul` / `quantized_bmm`
 - [ ] P3.2：Conv 家族（Conv1d/2d/3d + TransposeConv{1,2,3}d）
 - [ ] P3.3：Norm 家族（BatchNorm / LayerNorm / GroupNorm）
 - [ ] P3.4：激活 / Softmax / AdaptiveAvgPool
@@ -60,17 +64,17 @@
 
 ## 下一步（具体动作）
 
-P2F-7 已完成。进入 **P3.1-a**（`OpQuantConfig` 数据类实现），详见 `docs/plans/2026-04-24-phase3.md`。
+进入 **P3.1-b**：`ObservableMixin` no-op 骨架 + `QuantEvent` + `ObserverBase` / `SliceAwareObserver` 抽象 + `iter_slices`（3 个 mode），详见 `docs/plans/2026-04-24-phase3.md` §P3.1-b。
 
 ---
 
 ## 断点续传必读文件
 
-1. `docs/plans/2026-04-24-p2f7-findings.md`（全文）— P2F-7 具体改法与测试清单
-2. `docs/plans/2026-04-24-phase3.md`（全文）— Phase 3 子阶段定义与验收门
-3. `docs/architecture/005-op-quant-config.md`（全文）— OpQuantConfig 设计（P3.1 起手必读）
-4. `docs/architecture/002-observer-analysis.md`（全文）— Observer 设计（P3.1 基础设施必读）
-5. `src/scheme/quant_scheme.py`（全文）— P2F-7 修改目标文件
+1. `docs/plans/2026-04-24-phase3.md`（全文）— Phase 3 子阶段定义与验收门
+2. `docs/architecture/005-op-quant-config.md`（全文）— OpQuantConfig 设计
+3. `docs/architecture/002-observer-analysis.md`（全文）— Observer 设计（P3.1-b 必读）
+4. `src/scheme/op_config.py`（全文）— OpQuantConfig 实现
+5. `src/scheme/quant_scheme.py`（全文）— QuantScheme 三轴核心
 
 ---
 
