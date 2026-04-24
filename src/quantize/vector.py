@@ -22,6 +22,16 @@ LOG2_E_BF16 = 1.4453125  # 1 + 2**-2 + 2**-3 + 2**-4 + 2**-7
 def _dispatch_quantize(input, scheme=None, mx_specs=None, round_mode=None):
     """Internal: dispatch to quantize() or quantize_elemwise_op()."""
     if scheme is not None:
+        if mx_specs is not None:
+            raise TypeError(
+                "Cannot specify both scheme and mx_specs. "
+                "Use scheme for QuantScheme-driven API, or mx_specs for compat."
+            )
+        if round_mode is not None:
+            raise TypeError(
+                "round_mode is ignored when scheme is provided. "
+                "Set round_mode in the QuantScheme instead."
+            )
         return quantize(input, scheme)
     return quantize_elemwise_op(input, mx_specs=mx_specs, round_mode=round_mode)
 

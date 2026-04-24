@@ -208,22 +208,48 @@ def quantize_mx(
 ):
     """Quantize tensor A using a QuantScheme (MX block quantization).
 
-    Primary QuantScheme-driven API for shared-exponent block quantization.
+    Specialized API for shared-exponent block quantization that does NOT
+    follow the ADR-001 three-step flow (transform.forward → format.quantize
+    → transform.inverse). Instead, it handles MX-specific parameters
+    (scale_bits, shared_exp_method, flush_fp32_subnorms) directly.
+
+    For the standard three-step flow, use quantize(x, scheme) instead.
 
     Args:
         A: Input tensor.
         scheme: QuantScheme specifying format, granularity, and round_mode.
             block_size is taken from scheme.granularity.block_size.
-        axes: Axes along which to compute shared exponents. Default: -1.
+            granularity.mode must be PER_BLOCK or PER_TENSOR.
+            scheme.transform must be IdentityTransform (MX quantization
+            does not apply transforms).
+        axes: Axes along which to compute shared exponents. Default: None.
         scale_bits: Bits for shared scale (sign + magnitude). Default: 8.
         shared_exp_method: "max" or "none". Default: "max".
         flush_fp32_subnorms: Flush subnormal FP32 blocks to zero. Default: False.
 
     Returns:
         Quantized tensor with same shape as A.
+
+    Raises:
+        ValueError: If scheme.granularity is PER_CHANNEL.
+        ValueError: If scheme.transform is not IdentityTransform.
     """
     if scheme is None:
         return A
+
+    from src.scheme.granularity import GranularityMode
+    from src.scheme.transform import IdentityTransform
+
+    if not isinstance(scheme.transform, IdentityTransform):
+        raise ValueError(
+            "quantize_mx does not support transforms. "
+            "Use quantize(x, scheme) for the three-step flow with transforms."
+        )
+    if scheme.granularity.mode == GranularityMode.PER_CHANNEL:
+        raise ValueError(
+            "quantize_mx does not support PER_CHANNEL granularity. "
+            "Use quantize(x, scheme) for per-channel quantization."
+        )
 
     fmt = scheme.format
     block_size = scheme.block_size
@@ -252,6 +278,12 @@ def quantize_mx_op(
     Delegates to quantize_mx() after constructing a QuantScheme from mx_specs.
     Kept for backward compatibility with existing tests (remove in P2F-6).
     """
+    if expand_and_reshape:
+        raise NotImplementedError(
+            "expand_and_reshape is no longer supported. "
+            "Reshape input before calling quantize_mx_op."
+        )
+
     if elem_format is None:
         return A
 
