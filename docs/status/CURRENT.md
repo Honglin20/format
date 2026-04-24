@@ -21,13 +21,13 @@
 
 2026-04-24 新一轮静态 review 发现 2 Critical + 2 Major + 3 Minor（详见 `docs/plans/2026-04-24-p2f7-findings.md`）：
 
-- [ ] **P2F-7（进行中）**：
+- [x] **P2F-7（已完成）** — commit `bcf4031`：
   - C1: `QuantScheme.__post_init__` 加 granularity 类型 guard
   - C2: `channel_axis` 负值行为文档化 + `FormatBase._quantize_per_channel` 加越界断言
   - M1: `QuantScheme.granularity` 默认值 docstring 补注（字段级）
   - M2: `BFloat16Format` / `Float16Format` 的 shortcut 路径 round_mode 校验加注释
   - m1: `quantize(x, scheme=None)` 的 docstring 补"scheme=None 语义"
-  - + 新增 6 条 `pytest.raises` 负面测试（3 条 granularity 类型 / 3 条 negative axis）
+  - + 新增 7 条 `pytest.raises` 负面测试（3 条 granularity 类型 / 4 条 axis bounds）
 
 ### Phase 3（开发计划已定稿，未开工）
 
@@ -60,15 +60,7 @@
 
 ## 下一步（具体动作）
 
-**进入 P3.0（P2F-7 缺陷修复）**，按 `docs/plans/2026-04-24-p2f7-findings.md` §"P2F-7 落地清单"逐项落代码：
-
-1. `src/scheme/quant_scheme.py:42-62` — `__post_init__` 加 `isinstance(granularity, GranularitySpec)` 类型 guard（在 round_mode 校验前）
-2. `src/formats/base.py:114` — `_quantize_per_channel` 规范化 axis 后加越界断言
-3. `src/tests/test_formats_equiv.py` — 追加 6 条 `pytest.raises` 负面测试
-4. 文档微调：`GranularitySpec` / `QuantScheme` 字段 docstring
-5. commit：`fix(scheme): P2F-7 close Phase 2 review findings`
-6. 派 review agent（CLAUDE.md §5.2），检查验证漏斗覆盖
-7. 若通过，进入 P3.1-a（`OpQuantConfig` 数据类）
+P2F-7 已完成。进入 **P3.1-a**（`OpQuantConfig` 数据类实现），详见 `docs/plans/2026-04-24-phase3.md`。
 
 ---
 

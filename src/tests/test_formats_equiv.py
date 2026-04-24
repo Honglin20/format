@@ -619,10 +619,19 @@ def test_format_quantize_per_channel_negative_axis_normalization():
 
 
 def test_format_quantize_per_channel_out_of_bounds_axis_raises():
-    """Out-of-bounds axis raises ValueError at quantization time."""
+    """Out-of-bounds negative axis raises ValueError at quantization time."""
     fmt = FormatBase.from_str("fp8_e4m3")
     x = torch.randn(3, 4)
     g = GranularitySpec.per_channel(axis=-100)
+    with pytest.raises(ValueError, match="out of range"):
+        fmt.quantize(x, g, "nearest")
+
+
+def test_format_quantize_per_channel_positive_out_of_bounds_axis_raises():
+    """Out-of-bounds positive axis raises ValueError at quantization time."""
+    fmt = FormatBase.from_str("fp8_e4m3")
+    x = torch.randn(3, 4)
+    g = GranularitySpec.per_channel(axis=5)
     with pytest.raises(ValueError, match="out of range"):
         fmt.quantize(x, g, "nearest")
 
