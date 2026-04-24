@@ -21,8 +21,8 @@ Phase 2 修正目标：扶正三轴架构，让 `src/` 完全不依赖 `MxSpecs`
 
 - [x] **P2F-1：实现 `GranularitySpec`**（替换 Granularity enum，加 block_size、channel_axis）— commit c991b43
 - [x] **P2F-1 测试审查**：补充 21 个用例，修复 default_factory 和 channel_axis 验证 — commit 6664476
-- [ ] **P2F-2：实现 `TransformBase` + `IdentityTransform`；升级 `QuantScheme` 加 transform 字段，format 改为 FormatBase 对象**
-- [ ] P2F-3：升级 `FormatBase`，加 `quantize(x, granularity, round_mode)` 抽象方法
+- [x] **P2F-2：实现 `TransformBase` + `IdentityTransform`；升级 `QuantScheme` 加 transform 字段，format 改为 FormatBase 对象** — commit 1401cfb
+- [ ] **P2F-3：升级 `FormatBase`，加 `quantize(x, granularity, round_mode)` 抽象方法**
 - [ ] P2F-4：实现各 Format 子类的 `quantize()` 方法，替换 `elemwise.py` 中的 if-elif 链
 - [ ] P2F-5：升级 `mx_quantize.py` / `bfloat_quantize.py` / `vector.py` 消除 MxSpecs 依赖
 - [ ] P2F-6：更新所有等价性测试，改用新 QuantScheme API；全部通过
@@ -31,9 +31,9 @@ Phase 2 修正目标：扶正三轴架构，让 `src/` 完全不依赖 `MxSpecs`
 
 ## 下一步（具体动作）
 
-**P2F-2**：创建 `src/scheme/transform.py`，实现 `TransformBase(ABC)` + `IdentityTransform`；
-升级 `QuantScheme`：`format: str` → `format: FormatBase`，新增 `transform: TransformBase` 字段。
-详见 `docs/plans/2026-04-24-phase2-fix.md` P2F-2 节。
+**P2F-3**：在 `FormatBase` 中添加 `quantize(x, granularity, round_mode)` 抽象方法，
+提供默认实现分发到 `_quantize_elemwise_core`（elemwise）和 `_quantize_mx`（block）。
+各 Format 子类按需 override。详见 `docs/plans/2026-04-24-phase2-fix.md` P2F-3 节。
 
 ---
 
@@ -42,8 +42,8 @@ Phase 2 修正目标：扶正三轴架构，让 `src/` 完全不依赖 `MxSpecs`
 1. `CLAUDE.md`（全文）— 架构约束和 TASK 协议
 2. `docs/plans/2026-04-24-phase2-fix.md`（全文）— P2F 完整计划
 3. `docs/architecture/001-three-axis-quant-scheme.md`（全文）— 三轴接口规范
-4. `src/scheme/quant_scheme.py`（全文）— 当前 QuantScheme（P2F-2 需修改）
-5. `src/formats/base.py`（全文）— FormatBase（P2F-2/3 需修改）
+4. `src/formats/base.py`（全文）— FormatBase（P2F-3 需修改）
+5. `src/quantize/elemwise.py`（全文）— 量化核心（P2F-3/4 需修改）
 
 ---
 
