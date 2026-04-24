@@ -21,6 +21,8 @@ class GranularitySpec:
 
     Combines mode with its parameters so that block_size / channel_axis
     are always colocated with the mode that gives them meaning.
+
+    channel_axis supports NumPy-style negative indexing (e.g. -1 = last dimension).
     """
     mode: GranularityMode = GranularityMode.PER_TENSOR
     block_size: int = 0

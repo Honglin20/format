@@ -271,7 +271,7 @@ def test_quant_scheme_mxfp():
     assert scheme.format_name == "fp6_e3m2"
 
 
-def test_quant_scheme_immutability():
+def test_quant_scheme_hashable():
     scheme = QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32))
     scheme_dict = {scheme: "test"}
     assert scheme_dict[scheme] == "test"
@@ -407,6 +407,64 @@ def test_quant_scheme_default_transform():
 def test_quant_scheme_explicit_transform():
     scheme = QuantScheme(format="fp8_e4m3", transform=IdentityTransform())
     assert isinstance(scheme.transform, IdentityTransform)
+
+
+# --- C1: TransformBase requires __eq__/__hash__ ---
+
+def test_transform_base_requires_eq_and_hash():
+    """Concrete TransformBase without __eq__/__hash__ should be rejected by ABC."""
+    class IncompleteTransform(TransformBase):
+        def forward(self, x):
+            return x
+    with pytest.raises(TypeError):
+        IncompleteTransform()
+
+
+# --- C2: transform type validation ---
+
+def test_quant_scheme_invalid_transform_type_raises():
+    with pytest.raises(TypeError, match="transform must be TransformBase"):
+        QuantScheme(format="fp8_e4m3", transform="invalid")
+
+
+def test_quant_scheme_invalid_transform_none_raises():
+    with pytest.raises(TypeError, match="transform must be TransformBase"):
+        QuantScheme(format="fp8_e4m3", transform=None)
+
+
+# --- C3: per_channel string axis guard ---
+
+def test_per_channel_rejects_string_axis():
+    with pytest.raises(TypeError, match="axis must be int"):
+        QuantScheme.per_channel("fp8_e4m3", "floor")
+
+
+# --- M2: IdentityTransform hash consistency ---
+
+def test_quant_scheme_identity_transform_hash_stable():
+    s1 = QuantScheme(format="fp8_e4m3", transform=IdentityTransform())
+    s2 = QuantScheme(format="fp8_e4m3", transform=IdentityTransform())
+    assert s1 == s2
+    assert hash(s1) == hash(s2)
+    assert len({s1, s2}) == 1
+
+
+# --- M4: Custom Transform equality in QuantScheme ---
+
+def test_quant_scheme_custom_transform_equality():
+    class MyTransform(TransformBase):
+        def forward(self, x):
+            return x
+        def __eq__(self, other):
+            return isinstance(other, MyTransform)
+        def __hash__(self):
+            return hash("MyTransform")
+
+    s1 = QuantScheme(format="fp8_e4m3", transform=MyTransform())
+    s2 = QuantScheme(format="fp8_e4m3", transform=MyTransform())
+    assert s1 == s2
+    assert hash(s1) == hash(s2)
+    assert len({s1, s2}) == 1
 
 
 # --- QuantScheme format as FormatBase ---

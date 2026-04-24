@@ -14,8 +14,8 @@ from torch import Tensor
 class TransformBase(ABC):
     """Abstract base for quantization transforms.
 
-    Subclasses must implement forward(). If invertible, also override inverse()
-    and set invertible = True.
+    Subclasses must implement forward(), __eq__, and __hash__.
+    If invertible, also override inverse() and set invertible = True.
     """
 
     invertible: bool = False
@@ -27,6 +27,14 @@ class TransformBase(ABC):
     def inverse(self, x_q: Tensor) -> Tensor:
         """Post-quantization inverse. Default: identity (non-invertible transforms)."""
         return x_q
+
+    @abstractmethod
+    def __eq__(self, other) -> bool:
+        """Required for QuantScheme value equality."""
+
+    @abstractmethod
+    def __hash__(self) -> int:
+        """Required for QuantScheme hashability."""
 
 
 class IdentityTransform(TransformBase):

@@ -31,6 +31,8 @@ class QuantScheme:
     - granularity: GranularitySpec (mode + block_size + channel_axis)
     - transform: TransformBase (default: IdentityTransform)
     - round_mode: rounding mode ("nearest", "floor", "even", "dither")
+
+    Default: INT8, per_tensor, IdentityTransform, round_mode="nearest".
     """
     format: FormatBase = field(default_factory=lambda: _resolve_format("int8"))
     granularity: GranularitySpec = field(default_factory=GranularitySpec.per_tensor)
@@ -40,11 +42,17 @@ class QuantScheme:
     def __post_init__(self):
         # Coerce string format to FormatBase (supports factory methods accepting str)
         if isinstance(self.format, str):
+            # frozen dataclass standard pattern: use object.__setattr__ inside __post_init__
             object.__setattr__(self, "format", _resolve_format(self.format))
 
         if not isinstance(self.format, FormatBase):
             raise TypeError(
                 f"format must be FormatBase, got {type(self.format).__name__}"
+            )
+
+        if not isinstance(self.transform, TransformBase):
+            raise TypeError(
+                f"transform must be TransformBase, got {type(self.transform).__name__}"
             )
 
         # Validate round_mode
@@ -62,6 +70,12 @@ class QuantScheme:
     @staticmethod
     def per_channel(format: Union[str, FormatBase], axis: int = 0,
                     round_mode: str = "nearest") -> "QuantScheme":
+        if isinstance(axis, str):
+            raise TypeError(
+                f"axis must be int, not str. "
+                f"Did you mean: per_channel({format!r}, round_mode={axis!r})? "
+                f"The API changed: axis was inserted before round_mode."
+            )
         return QuantScheme(format=_resolve_format(format),
                           granularity=GranularitySpec.per_channel(axis),
                           round_mode=round_mode)
