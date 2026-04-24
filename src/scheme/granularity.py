@@ -39,6 +39,10 @@ class GranularitySpec:
             raise ValueError(
                 f"PER_CHANNEL requires block_size=0, got {self.block_size}"
             )
+        if self.mode != GranularityMode.PER_CHANNEL and self.channel_axis != 0:
+            raise ValueError(
+                f"{self.mode.name} requires channel_axis=0, got {self.channel_axis}"
+            )
 
     @staticmethod
     def per_tensor() -> "GranularitySpec":

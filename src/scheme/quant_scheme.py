@@ -1,9 +1,9 @@
 """
 QuantScheme: format + granularity + round_mode — the tensor-level quantization strategy.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from .granularity import GranularitySpec, GranularityMode
+from .granularity import GranularitySpec
 
 _VALID_ROUND_MODES = {"nearest", "floor", "even", "dither"}
 
@@ -18,14 +18,10 @@ class QuantScheme:
     - round_mode: rounding mode ("nearest", "floor", "even", "dither")
     """
     format: str
-    granularity: GranularitySpec = None
+    granularity: GranularitySpec = field(default_factory=GranularitySpec.per_tensor)
     round_mode: str = "nearest"
 
     def __post_init__(self):
-        # Default granularity: per_tensor
-        if self.granularity is None:
-            object.__setattr__(self, "granularity", GranularitySpec.per_tensor())
-
         # Validate format string resolves in registry
         from ..formats.registry import get_format
         get_format(self.format)  # raises ValueError if unknown

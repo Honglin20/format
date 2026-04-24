@@ -184,6 +184,56 @@ def test_granularity_spec_per_channel_rejects_block_size():
         GranularitySpec(mode=GranularityMode.PER_CHANNEL, block_size=8)
 
 
+def test_granularity_spec_default_values():
+    g = GranularitySpec()
+    assert g.mode == GranularityMode.PER_TENSOR
+    assert g.block_size == 0
+    assert g.channel_axis == 0
+
+
+def test_granularity_spec_equality():
+    assert GranularitySpec.per_tensor() == GranularitySpec.per_tensor()
+    assert GranularitySpec.per_block(32) == GranularitySpec.per_block(32)
+    assert GranularitySpec.per_channel(axis=1) == GranularitySpec.per_channel(axis=1)
+
+
+def test_granularity_spec_inequality():
+    assert GranularitySpec.per_tensor() != GranularitySpec.per_block(32)
+    assert GranularitySpec.per_block(32) != GranularitySpec.per_block(16)
+    assert GranularitySpec.per_channel(axis=0) != GranularitySpec.per_channel(axis=1)
+
+
+def test_granularity_spec_hashing():
+    s = {GranularitySpec.per_tensor(), GranularitySpec.per_block(32), GranularitySpec.per_block(32)}
+    assert len(s) == 2  # per_block(32) deduplicated
+
+
+def test_granularity_spec_frozen():
+    g = GranularitySpec.per_block(32)
+    with pytest.raises(AttributeError):
+        g.block_size = 64
+
+
+def test_granularity_spec_per_block_negative_size():
+    with pytest.raises(ValueError, match="PER_BLOCK requires block_size > 0"):
+        GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=-1)
+
+
+def test_granularity_spec_per_channel_default_axis():
+    g = GranularitySpec.per_channel()
+    assert g.channel_axis == 0
+
+
+def test_granularity_spec_per_tensor_rejects_channel_axis():
+    with pytest.raises(ValueError, match="PER_TENSOR requires channel_axis=0"):
+        GranularitySpec(mode=GranularityMode.PER_TENSOR, channel_axis=5)
+
+
+def test_granularity_spec_per_block_rejects_channel_axis():
+    with pytest.raises(ValueError, match="PER_BLOCK requires channel_axis=0"):
+        GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=32, channel_axis=1)
+
+
 # ---------------------------------------------------------------------------
 # 6. QuantScheme tests
 # ---------------------------------------------------------------------------
@@ -265,6 +315,61 @@ def test_quant_scheme_dither_round_mode():
     assert scheme.round_mode == "dither"
 
 
+def test_quant_scheme_default_granularity_is_per_tensor():
+    scheme = QuantScheme(format="fp8_e4m3")
+    assert scheme.granularity == GranularitySpec.per_tensor()
+    assert scheme.block_size == 0
+    assert not scheme.is_mx
+
+
+def test_quant_scheme_default_round_mode():
+    scheme = QuantScheme(format="fp8_e4m3")
+    assert scheme.round_mode == "nearest"
+
+
+def test_quant_scheme_equality():
+    a = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    b = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    assert a == b
+
+
+def test_quant_scheme_inequality():
+    a = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    b = QuantScheme.mxfp("fp8_e4m3", block_size=16)
+    assert a != b
+    c = QuantScheme.per_tensor("fp8_e4m3")
+    assert a != c
+
+
+def test_quant_scheme_frozen():
+    scheme = QuantScheme(format="fp8_e4m3")
+    with pytest.raises(AttributeError):
+        scheme.format = "int8"
+    with pytest.raises(AttributeError):
+        scheme.round_mode = "floor"
+
+
+def test_quant_scheme_per_channel_with_axis():
+    scheme = QuantScheme.per_channel("fp8_e4m3", axis=1)
+    assert scheme.granularity.channel_axis == 1
+
+
+def test_quant_scheme_mxfp_default_block_size():
+    scheme = QuantScheme.mxfp("fp8_e4m3")
+    assert scheme.block_size == 32
+
+
+def test_quant_scheme_empty_format_raises():
+    with pytest.raises(ValueError):
+        QuantScheme(format="")
+
+
+def test_quant_scheme_round_mode_case_sensitive():
+    with pytest.raises(ValueError, match="Invalid round_mode"):
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32),
+                    round_mode="Nearest")
+
+
 # ---------------------------------------------------------------------------
 # 7. Format classification tests
 # ---------------------------------------------------------------------------
@@ -332,4 +437,23 @@ def test_format_no_dict(fmt_name):
     """Subclasses with __slots__ = () should not have per-instance __dict__."""
     fmt = FormatBase.from_str(fmt_name)
     assert not hasattr(fmt, "__dict__"), f"{fmt_name} has __dict__ (missing __slots__ = ())"
+
+
+# ---------------------------------------------------------------------------
+# 11. src.scheme module export tests
+# ---------------------------------------------------------------------------
+
+def test_scheme_module_exports_granularity_mode():
+    from src.scheme import GranularityMode
+    assert GranularityMode.PER_TENSOR is not None
+
+
+def test_scheme_module_exports_granularity_spec():
+    from src.scheme import GranularitySpec
+    assert GranularitySpec.per_block(32).block_size == 32
+
+
+def test_scheme_module_exports_quant_scheme():
+    from src.scheme import QuantScheme
+    assert QuantScheme.per_tensor("int8").format == "int8"
 
