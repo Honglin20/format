@@ -67,6 +67,7 @@ def test_op_config_all_backward_fields():
         "grad_output", "grad_input", "grad_weight", "grad_bias",
         "input_gw", "grad_output_gw", "weight_gi", "grad_output_gi",
     ))
+    assert cfg.is_training is True
 
 
 # ---------------------------------------------------------------------------

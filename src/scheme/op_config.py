@@ -24,6 +24,9 @@ class OpQuantConfig:
     - Single scheme = one quantization step
     - Multiple schemes = chained pipeline: x -> quantize(x, s1) -> quantize(., s2) -> ...
 
+    Default construction (no arguments) produces a configuration with no
+    quantization on any role — all 12 pipelines are empty.
+
     Forward roles: input, weight, bias, output
     Backward roles (QAT): grad_output, grad_input, grad_weight, grad_bias
     Backward gemm re-quantization: input_gw, grad_output_gw, weight_gi, grad_output_gi
@@ -33,24 +36,26 @@ class OpQuantConfig:
     """
 
     # ---------- forward ----------
-    input:  Tuple[QuantScheme, ...] = ()
-    weight: Tuple[QuantScheme, ...] = ()
-    bias:   Tuple[QuantScheme, ...] = ()
-    output: Tuple[QuantScheme, ...] = ()
+    input:  Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    weight: Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    bias:   Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    output: Tuple[QuantScheme, ...] = ()   # Default: no quantization
 
     # ---------- backward (QAT) ----------
-    grad_output: Tuple[QuantScheme, ...] = ()
-    grad_input:  Tuple[QuantScheme, ...] = ()
-    grad_weight: Tuple[QuantScheme, ...] = ()
-    grad_bias:   Tuple[QuantScheme, ...] = ()
+    grad_output: Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    grad_input:  Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    grad_weight: Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    grad_bias:   Tuple[QuantScheme, ...] = ()   # Default: no quantization
 
     # ---------- backward gemm re-quantization ----------
-    input_gw:       Tuple[QuantScheme, ...] = ()
-    grad_output_gw: Tuple[QuantScheme, ...] = ()
-    weight_gi:       Tuple[QuantScheme, ...] = ()
-    grad_output_gi:  Tuple[QuantScheme, ...] = ()
+    input_gw:       Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    grad_output_gw: Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    weight_gi:       Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    grad_output_gi:  Tuple[QuantScheme, ...] = ()   # Default: no quantization
 
     def __post_init__(self):
+        # All current fields are tuple[QuantScheme, ...] pipelines.
+        # If a non-pipeline field is added, this loop needs a type dispatch.
         for f in fields(self):
             value = getattr(self, f.name)
             if not isinstance(value, tuple):
