@@ -1,11 +1,57 @@
 """
-Granularity enum for quantization scaling.
+GranularitySpec: how the shared scale is computed during quantization.
+
+Replaces the old Granularity enum with a composable dataclass that carries
+mode + parameters (block_size, channel_axis) together.
 """
+from dataclasses import dataclass
 from enum import Enum
 
 
-class Granularity(Enum):
-    """Quantization granularity: how the shared scale is computed."""
+class GranularityMode(Enum):
+    """Quantization granularity mode."""
     PER_TENSOR = "per_tensor"
     PER_CHANNEL = "per_channel"
     PER_BLOCK = "per_block"
+
+
+@dataclass(frozen=True)
+class GranularitySpec:
+    """Quantization granularity specification.
+
+    Combines mode with its parameters so that block_size / channel_axis
+    are always colocated with the mode that gives them meaning.
+    """
+    mode: GranularityMode = GranularityMode.PER_TENSOR
+    block_size: int = 0
+    channel_axis: int = 0
+
+    def __post_init__(self):
+        if self.mode == GranularityMode.PER_BLOCK and self.block_size <= 0:
+            raise ValueError(
+                f"PER_BLOCK requires block_size > 0, got {self.block_size}"
+            )
+        if self.mode == GranularityMode.PER_TENSOR and self.block_size != 0:
+            raise ValueError(
+                f"PER_TENSOR requires block_size=0, got {self.block_size}"
+            )
+        if self.mode == GranularityMode.PER_CHANNEL and self.block_size != 0:
+            raise ValueError(
+                f"PER_CHANNEL requires block_size=0, got {self.block_size}"
+            )
+
+    @staticmethod
+    def per_tensor() -> "GranularitySpec":
+        return GranularitySpec(mode=GranularityMode.PER_TENSOR)
+
+    @staticmethod
+    def per_channel(axis: int = 0) -> "GranularitySpec":
+        return GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=axis)
+
+    @staticmethod
+    def per_block(size: int) -> "GranularitySpec":
+        return GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=size)
+
+    @property
+    def is_mx(self) -> bool:
+        return self.mode == GranularityMode.PER_BLOCK

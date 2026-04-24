@@ -14,7 +14,7 @@ from mx.formats import ElemFormat, _get_format_params, _get_min_norm, _get_max_n
 # New code imports
 from src.formats.base import FormatBase, compute_min_norm, compute_max_norm
 from src.formats.registry import FORMAT_REGISTRY, register_format, get_format
-from src.scheme.granularity import Granularity
+from src.scheme.granularity import GranularityMode, GranularitySpec
 from src.scheme.quant_scheme import QuantScheme
 
 
@@ -138,13 +138,50 @@ def test_compute_max_norm_matches_old():
 
 
 # ---------------------------------------------------------------------------
-# 5. Granularity enum tests
+# 5. GranularityMode + GranularitySpec tests
 # ---------------------------------------------------------------------------
 
-def test_granularity_values():
-    assert Granularity.PER_TENSOR.value == "per_tensor"
-    assert Granularity.PER_CHANNEL.value == "per_channel"
-    assert Granularity.PER_BLOCK.value == "per_block"
+def test_granularity_mode_values():
+    assert GranularityMode.PER_TENSOR.value == "per_tensor"
+    assert GranularityMode.PER_CHANNEL.value == "per_channel"
+    assert GranularityMode.PER_BLOCK.value == "per_block"
+
+
+def test_granularity_spec_per_tensor():
+    g = GranularitySpec.per_tensor()
+    assert g.mode == GranularityMode.PER_TENSOR
+    assert g.block_size == 0
+    assert not g.is_mx
+
+
+def test_granularity_spec_per_channel():
+    g = GranularitySpec.per_channel(axis=1)
+    assert g.mode == GranularityMode.PER_CHANNEL
+    assert g.channel_axis == 1
+    assert g.block_size == 0
+    assert not g.is_mx
+
+
+def test_granularity_spec_per_block():
+    g = GranularitySpec.per_block(32)
+    assert g.mode == GranularityMode.PER_BLOCK
+    assert g.block_size == 32
+    assert g.is_mx
+
+
+def test_granularity_spec_per_block_requires_positive_size():
+    with pytest.raises(ValueError, match="PER_BLOCK requires block_size > 0"):
+        GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=0)
+
+
+def test_granularity_spec_per_tensor_rejects_block_size():
+    with pytest.raises(ValueError, match="PER_TENSOR requires block_size=0"):
+        GranularitySpec(mode=GranularityMode.PER_TENSOR, block_size=32)
+
+
+def test_granularity_spec_per_channel_rejects_block_size():
+    with pytest.raises(ValueError, match="PER_CHANNEL requires block_size=0"):
+        GranularitySpec(mode=GranularityMode.PER_CHANNEL, block_size=8)
 
 
 # ---------------------------------------------------------------------------
@@ -154,65 +191,64 @@ def test_granularity_values():
 def test_quant_scheme_basic():
     scheme = QuantScheme(
         format="fp8_e4m3",
-        granularity=Granularity.PER_BLOCK,
-        block_size=32,
+        granularity=GranularitySpec.per_block(32),
         round_mode="nearest",
     )
     assert scheme.format == "fp8_e4m3"
-    assert scheme.granularity == Granularity.PER_BLOCK
+    assert scheme.granularity == GranularitySpec.per_block(32)
     assert scheme.block_size == 32
     assert scheme.round_mode == "nearest"
 
 
 def test_quant_scheme_per_tensor():
     scheme = QuantScheme.per_tensor("fp8_e4m3")
-    assert scheme.granularity == Granularity.PER_TENSOR
+    assert scheme.granularity == GranularitySpec.per_tensor()
     assert scheme.block_size == 0
 
 
 def test_quant_scheme_per_channel():
     scheme = QuantScheme.per_channel("fp8_e4m3")
-    assert scheme.granularity == Granularity.PER_CHANNEL
+    assert scheme.granularity == GranularitySpec.per_channel()
     assert scheme.block_size == 0
 
 
 def test_quant_scheme_mxfp():
     scheme = QuantScheme.mxfp("fp6_e3m2", block_size=32)
-    assert scheme.granularity == Granularity.PER_BLOCK
+    assert scheme.granularity == GranularitySpec.per_block(32)
     assert scheme.block_size == 32
     assert scheme.format == "fp6_e3m2"
 
 
 def test_quant_scheme_immutability():
-    scheme = QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK, block_size=32)
+    scheme = QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32))
     scheme_dict = {scheme: "test"}
     assert scheme_dict[scheme] == "test"
 
 
 def test_quant_scheme_invalid_format_raises():
     with pytest.raises(ValueError, match="Unknown format"):
-        QuantScheme(format="nonexistent", granularity=Granularity.PER_BLOCK, block_size=32)
+        QuantScheme(format="nonexistent", granularity=GranularitySpec.per_block(32))
 
 
 def test_quant_scheme_invalid_round_mode_raises():
     with pytest.raises(ValueError, match="Invalid round_mode"):
-        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK,
-                    block_size=32, round_mode="invalid")
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32),
+                    round_mode="invalid")
 
 
 def test_quant_scheme_per_block_requires_block_size():
-    with pytest.raises(ValueError, match="PER_BLOCK granularity requires block_size > 0"):
-        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK, block_size=0)
+    with pytest.raises(ValueError, match="PER_BLOCK requires block_size > 0"):
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=0))
 
 
 def test_quant_scheme_per_tensor_rejects_block_size():
-    with pytest.raises(ValueError, match="requires block_size=0"):
-        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_TENSOR, block_size=32)
+    with pytest.raises(ValueError, match="PER_TENSOR requires block_size=0"):
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec(mode=GranularityMode.PER_TENSOR, block_size=32))
 
 
 def test_quant_scheme_per_channel_rejects_block_size():
-    with pytest.raises(ValueError, match="requires block_size=0"):
-        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_CHANNEL, block_size=8)
+    with pytest.raises(ValueError, match="PER_CHANNEL requires block_size=0"):
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec(mode=GranularityMode.PER_CHANNEL, block_size=8))
 
 
 def test_quant_scheme_is_mx_property():
@@ -224,8 +260,8 @@ def test_quant_scheme_is_mx_property():
 
 def test_quant_scheme_dither_round_mode():
     """dither is supported in old _round_mantissa() but not in RoundingMode enum."""
-    scheme = QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK,
-                        block_size=32, round_mode="dither")
+    scheme = QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32),
+                        round_mode="dither")
     assert scheme.round_mode == "dither"
 
 
