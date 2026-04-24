@@ -36,6 +36,7 @@ class QuantScheme:
     """
     format: FormatBase = field(default_factory=lambda: _resolve_format("int8"))
     granularity: GranularitySpec = field(default_factory=GranularitySpec.per_tensor)
+    """Default: PER_TENSOR (single shared scale for the whole tensor)."""
     transform: TransformBase = field(default_factory=IdentityTransform)
     round_mode: str = "nearest"
 
@@ -48,6 +49,11 @@ class QuantScheme:
         if not isinstance(self.format, FormatBase):
             raise TypeError(
                 f"format must be FormatBase, got {type(self.format).__name__}"
+            )
+
+        if not isinstance(self.granularity, GranularitySpec):
+            raise TypeError(
+                f"granularity must be GranularitySpec, got {type(self.granularity).__name__}"
             )
 
         if not isinstance(self.transform, TransformBase):

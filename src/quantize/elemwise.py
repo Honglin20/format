@@ -164,7 +164,7 @@ def quantize(x, scheme=None, allow_denorm=True):
     Args:
         x: Input tensor.
         scheme: QuantScheme specifying format, granularity, transform, and round_mode.
-            If None, input is returned unchanged (no quantization).
+            If None, input is returned unchanged (no quantization path).
         allow_denorm: If False, flush subnormal values to zero (float formats only).
 
     Returns:

@@ -578,3 +578,51 @@ def test_scheme_module_exports_quant_scheme():
     from src.scheme import QuantScheme
     assert QuantScheme.per_tensor("int8").format_name == "int8"
 
+
+# ---------------------------------------------------------------------------
+# P2F-7: Granularity type guard + channel_axis negative / out-of-bounds
+# ---------------------------------------------------------------------------
+
+# C1: QuantScheme rejects invalid granularity types
+def test_quant_scheme_invalid_granularity_type_raises():
+    with pytest.raises(TypeError, match="granularity must be GranularitySpec"):
+        QuantScheme(format="fp8_e4m3", granularity="per_tensor")
+
+
+def test_quant_scheme_invalid_granularity_none_raises():
+    with pytest.raises(TypeError, match="granularity must be GranularitySpec"):
+        QuantScheme(format="fp8_e4m3", granularity=None)
+
+
+def test_quant_scheme_invalid_granularity_int_raises():
+    with pytest.raises(TypeError, match="granularity must be GranularitySpec"):
+        QuantScheme(format="fp8_e4m3", granularity=123)
+
+
+# C2: channel_axis negative indexing + out-of-bounds
+def test_granularity_spec_per_channel_negative_axis_allowed():
+    """GranularitySpec accepts negative axis (not validated at construction time)."""
+    g = GranularitySpec.per_channel(axis=-1)
+    assert g.channel_axis == -1
+
+
+def test_format_quantize_per_channel_negative_axis_normalization():
+    """_quantize_per_channel normalizes -1 to ndim-1, producing same result as positive axis."""
+    fmt = FormatBase.from_str("fp8_e4m3")
+    x = torch.randn(3, 4, 5)
+    g_pos = GranularitySpec.per_channel(axis=2)
+    g_neg = GranularitySpec.per_channel(axis=-1)
+    assert torch.equal(
+        fmt.quantize(x.clone(), g_pos, "nearest"),
+        fmt.quantize(x.clone(), g_neg, "nearest"),
+    )
+
+
+def test_format_quantize_per_channel_out_of_bounds_axis_raises():
+    """Out-of-bounds axis raises ValueError at quantization time."""
+    fmt = FormatBase.from_str("fp8_e4m3")
+    x = torch.randn(3, 4)
+    g = GranularitySpec.per_channel(axis=-100)
+    with pytest.raises(ValueError, match="out of range"):
+        fmt.quantize(x, g, "nearest")
+

@@ -33,6 +33,8 @@ class BFloat16Format(FormatBase):
         return hash("BFloat16Format")
 
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
+        # Validate round_mode independently — the shortcut path below bypasses
+        # super().quantize() and therefore skips FormatBase's own validation.
         if round_mode not in _VALID_ROUND_MODES:
             raise ValueError(
                 f"Invalid round_mode {round_mode!r}. Must be one of {_VALID_ROUND_MODES}"
@@ -66,6 +68,8 @@ class Float16Format(FormatBase):
         return hash("Float16Format")
 
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
+        # Validate round_mode independently — the shortcut path below bypasses
+        # super().quantize() and therefore skips FormatBase's own validation.
         if round_mode not in _VALID_ROUND_MODES:
             raise ValueError(
                 f"Invalid round_mode {round_mode!r}. Must be one of {_VALID_ROUND_MODES}"

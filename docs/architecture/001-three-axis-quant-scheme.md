@@ -109,6 +109,8 @@ class GranularitySpec:
     channel_axis: int = 0          # PER_CHANNEL 时指定 axis（默认 0 = output channel）
 ```
 
+**channel_axis 负值与越界**：支持 NumPy 风格负索引（如 `axis=-1` 表示最后一维）。由于 `GranularitySpec` 不持有张量形状，越界检查延迟到 `FormatBase.quantize()` 中动态做。
+
 **预定义快捷实例**：
 ```python
 GranularitySpec.per_tensor()           # block_size=0, channel_axis=0

@@ -117,6 +117,11 @@ class FormatBase(ABC):
         axis = granularity.channel_axis
         if axis < 0:
             axis = x.ndim + axis
+        if not (0 <= axis < x.ndim):
+            raise ValueError(
+                f"channel_axis={granularity.channel_axis} out of range "
+                f"for tensor with ndim={x.ndim}"
+            )
 
         amax = torch.amax(torch.abs(x), dim=axis, keepdim=True)
         amax = amax.clamp(min=1e-12)

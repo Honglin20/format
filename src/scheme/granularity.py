@@ -23,6 +23,8 @@ class GranularitySpec:
     are always colocated with the mode that gives them meaning.
 
     channel_axis supports NumPy-style negative indexing (e.g. -1 = last dimension).
+    Since GranularitySpec does not hold a tensor shape, out-of-bounds checking is
+    deferred to FormatBase.quantize() at quantization time.
     """
     mode: GranularityMode = GranularityMode.PER_TENSOR
     block_size: int = 0
