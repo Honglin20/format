@@ -13,35 +13,36 @@
 - [x] P2F-2：TransformBase + IdentityTransform + QuantScheme 升级 — commit `64e8db5`
 - [x] P2F-3：FormatBase 加 `quantize()` 抽象方法 + 子类实现 — commit `8e74b3e`
 - [x] P2F-4：`quantize(x, scheme)` 统一入口 + `quantize_elemwise_op` 改为 compat wrapper — commit `ec3b5ee`
-- [ ] **P2F-5：消除 `src/quantize/` 中所有 MxSpecs 依赖**
-- [ ] P2F-6：更新所有等价性测试，改用新 QuantScheme API；全部通过
+- [x] P2F-5：消除 `src/quantize/` 中所有 MxSpecs 依赖 — commit `cd28f0c`
+- [ ] **P2F-6：更新所有等价性测试，改用新 QuantScheme API；全部通过**
 
 ---
 
-## P2F-4 完成摘要
+## P2F-5 完成摘要
 
-- 新增 `quantize(x, scheme, allow_denorm=True)` 统一入口，遵循 ADR-001 三步流程
-- `quantize_elemwise_op` 重写为 compat wrapper，内部构造 QuantScheme 再调用 `quantize()`
-- 新增 `_format_from_mx_specs` 辅助函数从 MxSpecs dict 推导 FormatBase
-- `FormatBase.quantize()` 增加 `allow_denorm` 参数，支持 `bfloat_subnorms=False` 语义
-- `_format_from_mx_specs` 为 bfloat=16 返回 `BFloat16Format`（保留硬件快捷路径）
-- 23 个新测试，311 总测试全绿
+- `quantize_mx(A, scheme, ...)` — 新 QuantScheme 驱动 API，带 granularity/transform 验证
+- `quantize_bfloat(x, scheme, backwards_scheme, allow_denorm)` — 新 QuantScheme 驱动 API
+- `vec_*` 系列函数新增 `scheme` 参数，`_dispatch_quantize` 统一分发
+- 旧签名保留为 compat wrapper（`quantize_mx_op`, `quantize_bfloat_from_specs`）
+- `src/quantize/` 不再 import `src.specs.specs`
+- Review 发现 3 Critical + 4 Major 问题全部修复
+- 18 个新测试（`test_scheme_api.py`），329 总测试全绿
 
 ---
 
 ## 下一步（具体动作）
 
-P2F-5：消除 `src/quantize/mx_quantize.py`、`src/quantize/bfloat_quantize.py`、`src/quantize/vector.py` 中的 MxSpecs 依赖。将 `quantize_mx_op(A, mx_specs, ...)` 改为 `quantize_mx(A, scheme, ...)` 等。
+P2F-6：更新所有等价性测试，改用新 QuantScheme API；删除或移入 compat 层的 `src/specs/specs.py`；验证 `grep -r "MxSpecs\|mx_specs\|from.*specs import" src/` 无命中。
 
 ---
 
 ## 断点续传必读文件
 
-1. `src/quantize/mx_quantize.py`（全文）— P2F-5 主要修改目标
-2. `src/quantize/bfloat_quantize.py`（全文）— P2F-5 修改目标
-3. `src/quantize/vector.py`（全文）— P2F-5 修改目标
-4. `docs/plans/2026-04-24-phase2-fix.md`（100-145 行）— P2F-5 计划
-5. `src/quantize/elemwise.py`（全文）— 刚完成的 quantize() 入口
+1. `src/tests/test_scheme_api.py`（全文）— P2F-5 新增的 QuantScheme API 测试
+2. `src/quantize/mx_quantize.py`（201-280 行）— quantize_mx + quantize_mx_op compat
+3. `src/quantize/bfloat_quantize.py`（全文）— quantize_bfloat + quantize_bfloat_from_specs compat
+4. `src/quantize/vector.py`（全文）— scheme 参数 + _dispatch_quantize
+5. `docs/plans/2026-04-24-phase2-fix.md`（129-143 行）— P2F-6 计划
 
 ---
 
