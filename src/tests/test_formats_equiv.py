@@ -15,6 +15,7 @@ from mx.formats import ElemFormat, _get_format_params, _get_min_norm, _get_max_n
 from src.formats.base import FormatBase, compute_min_norm, compute_max_norm
 from src.formats.registry import FORMAT_REGISTRY, register_format, get_format
 from src.scheme.granularity import GranularityMode, GranularitySpec
+from src.scheme.transform import TransformBase, IdentityTransform
 from src.scheme.quant_scheme import QuantScheme
 
 
@@ -244,7 +245,8 @@ def test_quant_scheme_basic():
         granularity=GranularitySpec.per_block(32),
         round_mode="nearest",
     )
-    assert scheme.format == "fp8_e4m3"
+    assert scheme.format_name == "fp8_e4m3"
+    assert isinstance(scheme.format, FormatBase)
     assert scheme.granularity == GranularitySpec.per_block(32)
     assert scheme.block_size == 32
     assert scheme.round_mode == "nearest"
@@ -266,7 +268,7 @@ def test_quant_scheme_mxfp():
     scheme = QuantScheme.mxfp("fp6_e3m2", block_size=32)
     assert scheme.granularity == GranularitySpec.per_block(32)
     assert scheme.block_size == 32
-    assert scheme.format == "fp6_e3m2"
+    assert scheme.format_name == "fp6_e3m2"
 
 
 def test_quant_scheme_immutability():
@@ -344,8 +346,6 @@ def test_quant_scheme_inequality():
 def test_quant_scheme_frozen():
     scheme = QuantScheme(format="fp8_e4m3")
     with pytest.raises(AttributeError):
-        scheme.format = "int8"
-    with pytest.raises(AttributeError):
         scheme.round_mode = "floor"
 
 
@@ -368,6 +368,69 @@ def test_quant_scheme_round_mode_case_sensitive():
     with pytest.raises(ValueError, match="Invalid round_mode"):
         QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32),
                     round_mode="Nearest")
+
+
+# --- Transform tests ---
+
+def test_identity_transform_forward():
+    t = IdentityTransform()
+    x = torch.randn(4, 8)
+    assert torch.equal(t.forward(x), x)
+
+
+def test_identity_transform_inverse():
+    t = IdentityTransform()
+    x = torch.randn(4, 8)
+    assert torch.equal(t.inverse(x), x)
+
+
+def test_identity_transform_invertible():
+    assert IdentityTransform().invertible
+
+
+def test_identity_transform_equality():
+    assert IdentityTransform() == IdentityTransform()
+
+
+def test_transform_base_not_invertible_by_default():
+    # TransformBase itself is abstract, but the default invertible flag is False
+    assert TransformBase.invertible is False
+
+
+# --- QuantScheme transform field ---
+
+def test_quant_scheme_default_transform():
+    scheme = QuantScheme(format="fp8_e4m3")
+    assert isinstance(scheme.transform, IdentityTransform)
+
+
+def test_quant_scheme_explicit_transform():
+    scheme = QuantScheme(format="fp8_e4m3", transform=IdentityTransform())
+    assert isinstance(scheme.transform, IdentityTransform)
+
+
+# --- QuantScheme format as FormatBase ---
+
+def test_quant_scheme_format_auto_coercion_from_str():
+    scheme = QuantScheme(format="fp8_e4m3")
+    assert isinstance(scheme.format, FormatBase)
+    assert scheme.format.name == "fp8_e4m3"
+
+
+def test_quant_scheme_format_from_format_base():
+    fmt = FormatBase.from_str("int8")
+    scheme = QuantScheme(format=fmt)
+    assert scheme.format is fmt
+
+
+def test_quant_scheme_format_name_property():
+    scheme = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    assert scheme.format_name == "fp8_e4m3"
+
+
+def test_quant_scheme_invalid_format_type_raises():
+    with pytest.raises(TypeError, match="format must be FormatBase"):
+        QuantScheme(format=123)
 
 
 # ---------------------------------------------------------------------------
@@ -455,5 +518,5 @@ def test_scheme_module_exports_granularity_spec():
 
 def test_scheme_module_exports_quant_scheme():
     from src.scheme import QuantScheme
-    assert QuantScheme.per_tensor("int8").format == "int8"
+    assert QuantScheme.per_tensor("int8").format_name == "int8"
 

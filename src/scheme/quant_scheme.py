@@ -1,30 +1,51 @@
 """
-QuantScheme: format + granularity + round_mode — the tensor-level quantization strategy.
+QuantScheme: format + granularity + transform + round_mode — the three-axis
+tensor-level quantization strategy.
 """
 from dataclasses import dataclass, field
+from typing import Union
 
+from ..formats.base import FormatBase
 from .granularity import GranularitySpec
+from .transform import TransformBase, IdentityTransform
 
 _VALID_ROUND_MODES = {"nearest", "floor", "even", "dither"}
 
 
+def _resolve_format(fmt: Union[str, FormatBase]) -> FormatBase:
+    """Convert string to FormatBase via registry, or pass through FormatBase."""
+    if isinstance(fmt, FormatBase):
+        return fmt
+    if isinstance(fmt, str):
+        from ..formats.registry import get_format
+        return get_format(fmt)
+    raise TypeError(f"format must be str or FormatBase, got {type(fmt).__name__}")
+
+
 @dataclass(frozen=True)
 class QuantScheme:
-    """Tensor-level quantization scheme.
+    """Tensor-level quantization scheme (three-axis design).
 
     Combines:
-    - format: element format string (e.g., "fp8_e4m3", "int8")
+    - format: FormatBase instance (e.g., FP8E4M3Format(), Int8Format())
     - granularity: GranularitySpec (mode + block_size + channel_axis)
+    - transform: TransformBase (default: IdentityTransform)
     - round_mode: rounding mode ("nearest", "floor", "even", "dither")
     """
-    format: str
+    format: FormatBase = field(default_factory=lambda: _resolve_format("int8"))
     granularity: GranularitySpec = field(default_factory=GranularitySpec.per_tensor)
+    transform: TransformBase = field(default_factory=IdentityTransform)
     round_mode: str = "nearest"
 
     def __post_init__(self):
-        # Validate format string resolves in registry
-        from ..formats.registry import get_format
-        get_format(self.format)  # raises ValueError if unknown
+        # Coerce string format to FormatBase (supports factory methods accepting str)
+        if isinstance(self.format, str):
+            object.__setattr__(self, "format", _resolve_format(self.format))
+
+        if not isinstance(self.format, FormatBase):
+            raise TypeError(
+                f"format must be FormatBase, got {type(self.format).__name__}"
+            )
 
         # Validate round_mode
         if self.round_mode not in _VALID_ROUND_MODES:
@@ -33,20 +54,22 @@ class QuantScheme:
             )
 
     @staticmethod
-    def per_tensor(format: str, round_mode: str = "nearest") -> "QuantScheme":
-        return QuantScheme(format=format,
+    def per_tensor(format: Union[str, FormatBase], round_mode: str = "nearest") -> "QuantScheme":
+        return QuantScheme(format=_resolve_format(format),
                           granularity=GranularitySpec.per_tensor(),
                           round_mode=round_mode)
 
     @staticmethod
-    def per_channel(format: str, axis: int = 0, round_mode: str = "nearest") -> "QuantScheme":
-        return QuantScheme(format=format,
+    def per_channel(format: Union[str, FormatBase], axis: int = 0,
+                    round_mode: str = "nearest") -> "QuantScheme":
+        return QuantScheme(format=_resolve_format(format),
                           granularity=GranularitySpec.per_channel(axis),
                           round_mode=round_mode)
 
     @staticmethod
-    def mxfp(format: str, block_size: int = 32, round_mode: str = "nearest") -> "QuantScheme":
-        return QuantScheme(format=format,
+    def mxfp(format: Union[str, FormatBase], block_size: int = 32,
+             round_mode: str = "nearest") -> "QuantScheme":
+        return QuantScheme(format=_resolve_format(format),
                           granularity=GranularitySpec.per_block(block_size),
                           round_mode=round_mode)
 
@@ -57,3 +80,7 @@ class QuantScheme:
     @property
     def block_size(self) -> int:
         return self.granularity.block_size
+
+    @property
+    def format_name(self) -> str:
+        return self.format.name
