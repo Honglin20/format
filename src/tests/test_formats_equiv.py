@@ -156,12 +156,12 @@ def test_quant_scheme_basic():
         format="fp8_e4m3",
         granularity=Granularity.PER_BLOCK,
         block_size=32,
-        round="nearest",
+        round_mode="nearest",
     )
     assert scheme.format == "fp8_e4m3"
     assert scheme.granularity == Granularity.PER_BLOCK
     assert scheme.block_size == 32
-    assert scheme.round == "nearest"
+    assert scheme.round_mode == "nearest"
 
 
 def test_quant_scheme_per_tensor():
@@ -187,6 +187,46 @@ def test_quant_scheme_immutability():
     scheme = QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK, block_size=32)
     scheme_dict = {scheme: "test"}
     assert scheme_dict[scheme] == "test"
+
+
+def test_quant_scheme_invalid_format_raises():
+    with pytest.raises(ValueError, match="Unknown format"):
+        QuantScheme(format="nonexistent", granularity=Granularity.PER_BLOCK, block_size=32)
+
+
+def test_quant_scheme_invalid_round_mode_raises():
+    with pytest.raises(ValueError, match="Invalid round_mode"):
+        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK,
+                    block_size=32, round_mode="invalid")
+
+
+def test_quant_scheme_per_block_requires_block_size():
+    with pytest.raises(ValueError, match="PER_BLOCK granularity requires block_size > 0"):
+        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK, block_size=0)
+
+
+def test_quant_scheme_per_tensor_rejects_block_size():
+    with pytest.raises(ValueError, match="requires block_size=0"):
+        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_TENSOR, block_size=32)
+
+
+def test_quant_scheme_per_channel_rejects_block_size():
+    with pytest.raises(ValueError, match="requires block_size=0"):
+        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_CHANNEL, block_size=8)
+
+
+def test_quant_scheme_is_mx_property():
+    mx = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    pt = QuantScheme.per_tensor("fp8_e4m3")
+    assert mx.is_mx
+    assert not pt.is_mx
+
+
+def test_quant_scheme_dither_round_mode():
+    """dither is supported in old _round_mantissa() but not in RoundingMode enum."""
+    scheme = QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK,
+                        block_size=32, round_mode="dither")
+    assert scheme.round_mode == "dither"
 
 
 # ---------------------------------------------------------------------------
@@ -245,3 +285,15 @@ def test_format_repr():
     r = repr(fmt)
     assert "FPFormat" in r
     assert "fp8_e4m3" in r
+
+
+# ---------------------------------------------------------------------------
+# 10. __slots__ verification — subclasses should not have __dict__
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fmt_name", ["int8", "fp8_e4m3", "float16", "bfloat16"])
+def test_format_no_dict(fmt_name):
+    """Subclasses with __slots__ = () should not have per-instance __dict__."""
+    fmt = FormatBase.from_str(fmt_name)
+    assert not hasattr(fmt, "__dict__"), f"{fmt_name} has __dict__ (missing __slots__ = ())"
+

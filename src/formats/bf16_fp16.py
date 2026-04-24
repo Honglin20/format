@@ -7,6 +7,8 @@ from .base import FormatBase, compute_min_norm, compute_max_norm
 class BFloat16Format(FormatBase):
     """Bfloat16: 1 sign + 8 exp + 7 mantissa (8+1=9 mbits with implicit)."""
 
+    __slots__ = ()
+
     def __init__(self):
         self.name = "bfloat16"
         self.ebits = 8
@@ -19,6 +21,8 @@ class BFloat16Format(FormatBase):
 
 class Float16Format(FormatBase):
     """IEEE float16: 1 sign + 5 exp + 10 mantissa (5+12=12 mbits with implicit)."""
+
+    __slots__ = ()
 
     def __init__(self):
         self.name = "float16"

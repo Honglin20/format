@@ -98,6 +98,34 @@ def mxint4_specs(block_size=32, quantize_backprop=True):
     })
 
 
+def mxint2_specs(block_size=32, quantize_backprop=True):
+    """MXINT2 specs."""
+    return finalize_mx_specs({
+        "w_elem_format": "int2",
+        "a_elem_format": "int2",
+        "block_size": block_size,
+        "bfloat": 16,
+        "quantize_backprop": quantize_backprop,
+    })
+
+
+def mxfp6_e2m3_specs(block_size=32, quantize_backprop=True):
+    """MXFP6-E2M3 specs."""
+    return finalize_mx_specs({
+        "w_elem_format": "fp6_e2m3",
+        "a_elem_format": "fp6_e2m3",
+        "block_size": block_size,
+        "bfloat": 16,
+        "quantize_backprop": quantize_backprop,
+    })
+
+
+def float16_specs():
+    """Float16-only specs (no MX quantization)."""
+    return finalize_mx_specs({"bfloat": 16, "a_elem_format": "float16",
+                              "w_elem_format": "float16"})
+
+
 def bfloat16_specs():
     """Bfloat16-only specs (no MX quantization)."""
     return finalize_mx_specs({"bfloat": 16})
@@ -120,11 +148,17 @@ def no_quant_specs():
 
 # All representative MX specs for parametrized tests
 ALL_MX_SPECS = [
+    ("mxfp8_e5m2", mxfp8_e5m2_specs()),
     ("mxfp8_e4m3", mxfp8_e4m3_specs()),
     ("mxfp6_e3m2", mxfp6_e3m2_specs()),
+    ("mxfp6_e2m3", mxfp6_e2m3_specs()),
     ("mxfp4_e2m1", mxfp4_e2m1_specs()),
     ("mxint8", mxint8_specs()),
+    ("mxint4", mxint4_specs()),
+    ("mxint2", mxint2_specs()),
+    ("float16", float16_specs()),
     ("bfloat16", bfloat16_specs()),
+    ("mixed_fp8w_fp4a", mixed_mxfp8_weight_fp4_act_specs()),
 ]
 
 # MX specs with backward pass quantization disabled

@@ -13,6 +13,8 @@ class IntFormat(FormatBase):
     ebits=0, emax=0, max_norm uses same formula as old code.
     """
 
+    __slots__ = ()
+
     def __init__(self, bits: int, name: str = None):
         self.name = name or f"int{bits}"
         self.ebits = 0

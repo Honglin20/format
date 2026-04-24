@@ -2,7 +2,9 @@
 Format registry: global name→FormatBase mapping.
 
 Replaces ElemFormat.from_str(). Supports aliases and custom format registration.
+Uses lazy initialization to avoid import-time side effects and threading issues.
 """
+import threading
 from typing import Dict, Optional
 from .base import FormatBase
 
@@ -11,6 +13,20 @@ FORMAT_REGISTRY: Dict[str, FormatBase] = {}
 
 # Alias map: alias → canonical name
 _ALIASES: Dict[str, str] = {}
+
+# Guard for lazy initialization and thread safety
+_lock = threading.Lock()
+_initialized = False
+
+
+def _ensure_initialized():
+    """Lazily register default formats on first access."""
+    global _initialized
+    if not _initialized:
+        with _lock:
+            if not _initialized:
+                _init_default_formats()
+                _initialized = True
 
 
 def register_format(name: str, fmt: FormatBase, aliases: list = None,
@@ -24,6 +40,7 @@ def register_format(name: str, fmt: FormatBase, aliases: list = None,
         overwrite: If True, silently replace existing entry. If False (default),
                    raise ValueError if name already exists.
     """
+    _ensure_initialized()
     if not overwrite and name in FORMAT_REGISTRY:
         raise ValueError(
             f"Format {name!r} already registered. Use overwrite=True to replace."
@@ -36,6 +53,7 @@ def register_format(name: str, fmt: FormatBase, aliases: list = None,
 
 def get_format(name: str) -> FormatBase:
     """Look up a format by name. Case-insensitive. Supports canonical names and aliases."""
+    _ensure_initialized()
     name = name.lower()
     if name in FORMAT_REGISTRY:
         return FORMAT_REGISTRY[name]
@@ -45,14 +63,14 @@ def get_format(name: str) -> FormatBase:
 
 
 def _init_default_formats():
-    """Register all default formats. Called once at import time."""
+    """Register all default formats. Called once on first registry access."""
     from .int_formats import IntFormat
     from .fp_formats import FPFormat
     from .bf16_fp16 import BFloat16Format, Float16Format
 
     # Integer formats
     for bits, name in [(8, "int8"), (4, "int4"), (2, "int2")]:
-        register_format(name, IntFormat(bits=bits, name=name))
+        FORMAT_REGISTRY[name] = IntFormat(bits=bits, name=name)
 
     # Float formats (MX sub-byte)
     float_formats = [
@@ -63,17 +81,14 @@ def _init_default_formats():
         ("fp4_e2m1", 2, 3, None),
     ]
     for name, ebits, mbits, max_norm_override in float_formats:
-        register_format(name, FPFormat(name=name, ebits=ebits, mbits=mbits,
-                                       max_norm_override=max_norm_override))
+        FORMAT_REGISTRY[name] = FPFormat(name=name, ebits=ebits, mbits=mbits,
+                                         max_norm_override=max_norm_override)
 
     # Aliases — overwrite=True because the canonical name already exists
-    register_format("fp4_e2m1", FORMAT_REGISTRY["fp4_e2m1"], aliases=["fp4"],
-                    overwrite=True)
+    _ALIASES["fp4"] = "fp4_e2m1"
 
     # Standard formats
-    register_format("float16", Float16Format(), aliases=["fp16"])
-    register_format("bfloat16", BFloat16Format(), aliases=["bf16"])
-
-
-# Auto-initialize on import
-_init_default_formats()
+    FORMAT_REGISTRY["float16"] = Float16Format()
+    _ALIASES["fp16"] = "float16"
+    FORMAT_REGISTRY["bfloat16"] = BFloat16Format()
+    _ALIASES["bf16"] = "bfloat16"

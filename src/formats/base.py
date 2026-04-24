@@ -34,7 +34,20 @@ class FormatBase(ABC):
         """Call at end of subclass __init__ to make instance immutable."""
         object.__setattr__(self, "_frozen", True)
 
+    @staticmethod
+    def _all_slots(cls):
+        """Collect __slots__ across the entire MRO."""
+        slots = set()
+        for klass in cls.__mro__:
+            slots.update(getattr(klass, '__slots__', ()))
+        return slots
+
     def __setattr__(self, key, value):
+        # Reject attributes not in __slots__ even before freeze
+        if key != "_frozen" and key not in FormatBase._all_slots(self.__class__):
+            raise AttributeError(
+                f"{self.__class__.__name__} has no attribute {key!r}"
+            )
         if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"{self.__class__.__name__} is immutable after construction"

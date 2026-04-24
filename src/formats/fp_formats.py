@@ -12,6 +12,8 @@ class FPFormat(FormatBase):
     mbits includes sign bit and implicit one bit (same convention as old code).
     """
 
+    __slots__ = ()
+
     def __init__(self, name: str, ebits: int, mbits: int, max_norm_override: float = None):
         self.name = name
         self.ebits = ebits
