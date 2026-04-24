@@ -72,7 +72,7 @@ class FormatBase(ABC):
         return self.ebits == 0
 
     @abstractmethod
-    def quantize(self, x, granularity, round_mode="nearest"):
+    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
         """Quantize tensor x to this format.
 
         Declared @abstractmethod to force subclasses to explicitly decide
@@ -83,6 +83,7 @@ class FormatBase(ABC):
             x: Input tensor.
             granularity: GranularitySpec controlling scale sharing.
             round_mode: "nearest" | "floor" | "even" | "dither"
+            allow_denorm: If False, flush subnormal values to zero (float formats only).
 
         Returns:
             Quantized tensor with same shape as x.
@@ -94,23 +95,23 @@ class FormatBase(ABC):
         from src.scheme.granularity import GranularityMode
         mode = granularity.mode
         if mode == GranularityMode.PER_TENSOR:
-            return self._quantize_per_tensor(x, round_mode)
+            return self._quantize_per_tensor(x, round_mode, allow_denorm)
         elif mode == GranularityMode.PER_CHANNEL:
-            return self._quantize_per_channel(x, granularity, round_mode)
+            return self._quantize_per_channel(x, granularity, round_mode, allow_denorm)
         elif mode == GranularityMode.PER_BLOCK:
             return self._quantize_per_block(x, granularity, round_mode)
         raise ValueError(f"Unknown granularity mode: {mode}")
 
-    def _quantize_per_tensor(self, x, round_mode):
+    def _quantize_per_tensor(self, x, round_mode, allow_denorm=True):
         """Default per-tensor quantization using elemwise core."""
         from src.quantize.elemwise import _quantize_elemwise_core
         return _quantize_elemwise_core(
             x, self.mbits, self.ebits, self.max_norm,
-            round_mode=round_mode, allow_denorm=True,
+            round_mode=round_mode, allow_denorm=allow_denorm,
             saturate_normals=(self.ebits == 0),
         )
 
-    def _quantize_per_channel(self, x, granularity, round_mode):
+    def _quantize_per_channel(self, x, granularity, round_mode, allow_denorm=True):
         """Default per-channel quantization: compute per-channel scale, then elemwise."""
         from src.quantize.elemwise import _quantize_elemwise_core
         axis = granularity.channel_axis
@@ -124,7 +125,7 @@ class FormatBase(ABC):
         x_norm = x / amax
         x_q = _quantize_elemwise_core(
             x_norm, self.mbits, self.ebits, self.max_norm,
-            round_mode=round_mode, allow_denorm=True,
+            round_mode=round_mode, allow_denorm=allow_denorm,
             saturate_normals=(self.ebits == 0),
         )
         return x_q * amax

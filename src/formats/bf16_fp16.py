@@ -32,14 +32,14 @@ class BFloat16Format(FormatBase):
     def __hash__(self):
         return hash("BFloat16Format")
 
-    def quantize(self, x, granularity, round_mode="nearest"):
+    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
         if round_mode not in _VALID_ROUND_MODES:
             raise ValueError(
                 f"Invalid round_mode {round_mode!r}. Must be one of {_VALID_ROUND_MODES}"
             )
-        if round_mode == "even" and granularity.mode == GranularityMode.PER_TENSOR:
+        if round_mode == "even" and granularity.mode == GranularityMode.PER_TENSOR and allow_denorm:
             return x.to(torch.bfloat16).float()
-        return super().quantize(x, granularity, round_mode)
+        return super().quantize(x, granularity, round_mode, allow_denorm)
 
 
 class Float16Format(FormatBase):
@@ -65,11 +65,11 @@ class Float16Format(FormatBase):
     def __hash__(self):
         return hash("Float16Format")
 
-    def quantize(self, x, granularity, round_mode="nearest"):
+    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
         if round_mode not in _VALID_ROUND_MODES:
             raise ValueError(
                 f"Invalid round_mode {round_mode!r}. Must be one of {_VALID_ROUND_MODES}"
             )
-        if round_mode == "even" and granularity.mode == GranularityMode.PER_TENSOR:
+        if round_mode == "even" and granularity.mode == GranularityMode.PER_TENSOR and allow_denorm:
             return x.to(torch.float16).float()
-        return super().quantize(x, granularity, round_mode)
+        return super().quantize(x, granularity, round_mode, allow_denorm)

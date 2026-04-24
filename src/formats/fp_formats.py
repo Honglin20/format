@@ -51,5 +51,5 @@ class FPFormat(FormatBase):
     def __hash__(self):
         return hash(("FPFormat", self.name, self.ebits, self.mbits))
 
-    def quantize(self, x, granularity, round_mode="nearest"):
-        return super().quantize(x, granularity, round_mode)
+    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
+        return super().quantize(x, granularity, round_mode, allow_denorm)
