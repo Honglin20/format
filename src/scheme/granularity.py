@@ -13,6 +13,7 @@ class GranularityMode(Enum):
     PER_TENSOR = "per_tensor"
     PER_CHANNEL = "per_channel"
     PER_BLOCK = "per_block"
+    DYNAMIC_GROUP = "dynamic_group"
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,7 @@ class GranularitySpec:
             raise ValueError(
                 f"PER_CHANNEL requires block_size=0, got {self.block_size}"
             )
-        if self.mode != GranularityMode.PER_CHANNEL and self.channel_axis != 0:
+        if self.mode not in (GranularityMode.PER_CHANNEL, GranularityMode.DYNAMIC_GROUP) and self.channel_axis != 0:
             raise ValueError(
                 f"{self.mode.name} requires channel_axis=0, got {self.channel_axis}"
             )
