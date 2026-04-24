@@ -1,8 +1,9 @@
 """
-P2F-4 TDD tests: quantize(x, scheme) unified entry point and
-quantize_elemwise_op rewritten as QuantScheme-driven compat wrapper.
+P2F-4 TDD tests: quantize(x, scheme) unified entry point.
 
-Tests written FIRST (red phase), then implementation makes them green.
+Tests verify that quantize(x, scheme) works correctly with various
+QuantScheme configurations. Old compat wrapper tests replaced with
+direct QuantScheme comparisons.
 """
 import pytest
 import torch
@@ -11,7 +12,7 @@ from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.transform import IdentityTransform
 from src.formats.base import FormatBase
-from src.quantize.elemwise import quantize, quantize_elemwise_op, _format_from_mx_specs
+from src.quantize.elemwise import quantize
 
 
 # ---------------------------------------------------------------------------
@@ -89,51 +90,49 @@ def test_quantize_allow_denorm_false():
     assert result_no_denorm[0] == 0.0 or result_no_denorm[0].abs() < result_denorm[0].abs()
 
 
+def test_quantize_none_scheme():
+    """quantize with scheme=None should return input unchanged."""
+    x = torch.randn(4, 32)
+    result = quantize(x.clone(), scheme=None)
+    assert torch.equal(result, x)
+
+
 # ---------------------------------------------------------------------------
-# 2. quantize_elemwise_op compat wrapper — produces same output as before
+# 2. quantize(x, scheme) equivalence with old mx code
 # ---------------------------------------------------------------------------
 
-def test_quantize_elemwise_op_bfloat16():
-    """Compat wrapper with bfloat=16 should match old behavior."""
-    from src.specs.specs import finalize_mx_specs
+def test_quantize_bfloat16_matches_old():
+    """quantize(x, per_tensor/bfloat16) should match old quantize_elemwise_op."""
     from mx.elemwise_ops import quantize_elemwise_op as old_op
     from mx.specs import finalize_mx_specs as old_finalize
 
     torch.manual_seed(42)
     x = torch.randn(4, 32)
     old_specs = old_finalize({"bfloat": 16})
-    new_specs = finalize_mx_specs({"bfloat": 16})
+    scheme = QuantScheme.per_tensor("bfloat16")
     old_out = old_op(x.clone(), mx_specs=old_specs)
-    new_out = quantize_elemwise_op(x.clone(), mx_specs=new_specs)
+    new_out = quantize(x.clone(), scheme)
     assert torch.allclose(old_out, new_out, atol=1e-7), \
         f"max diff = {(old_out - new_out).abs().max()}"
 
 
-def test_quantize_elemwise_op_bfloat12():
-    """Compat wrapper with bfloat=12 should match old behavior."""
-    from src.specs.specs import finalize_mx_specs
+def test_quantize_bfloat12_matches_old():
+    """quantize(x, bfloat12) should match old quantize_elemwise_op."""
     from mx.elemwise_ops import quantize_elemwise_op as old_op
     from mx.specs import finalize_mx_specs as old_finalize
+    from src.formats.fp_formats import FPFormat
 
     torch.manual_seed(42)
     x = torch.randn(4, 32)
     old_specs = old_finalize({"bfloat": 12})
-    new_specs = finalize_mx_specs({"bfloat": 12})
+    scheme = QuantScheme(format=FPFormat(name="bfloat12", ebits=8, mbits=5), round_mode="nearest")
     old_out = old_op(x.clone(), mx_specs=old_specs)
-    new_out = quantize_elemwise_op(x.clone(), mx_specs=new_specs)
+    new_out = quantize(x.clone(), scheme)
     assert torch.allclose(old_out, new_out, atol=1e-7)
 
 
-def test_quantize_elemwise_op_none():
-    """Compat wrapper with mx_specs=None should pass through."""
-    x = torch.randn(4, 32)
-    result = quantize_elemwise_op(x.clone(), mx_specs=None)
-    assert torch.equal(result, x)
-
-
-def test_quantize_elemwise_op_bfloat_subnorms_false():
-    """Compat wrapper with bfloat_subnorms=False should match old behavior."""
-    from src.specs.specs import finalize_mx_specs
+def test_quantize_bfloat_subnorms_false_matches_old():
+    """quantize with allow_denorm=False should match old bfloat_subnorms=False."""
     from mx.elemwise_ops import quantize_elemwise_op as old_op
     from mx.specs import finalize_mx_specs as old_finalize
 
@@ -141,15 +140,15 @@ def test_quantize_elemwise_op_bfloat_subnorms_false():
     # Mix of normal and subnormal-range values
     x = torch.randn(4, 32) * 0.01
     old_specs = old_finalize({"bfloat": 16, "bfloat_subnorms": False})
-    new_specs = finalize_mx_specs({"bfloat": 16, "bfloat_subnorms": False})
+    scheme = QuantScheme.per_tensor("bfloat16")
     old_out = old_op(x.clone(), mx_specs=old_specs)
-    new_out = quantize_elemwise_op(x.clone(), mx_specs=new_specs)
+    new_out = quantize(x.clone(), scheme, allow_denorm=False)
     assert torch.allclose(old_out, new_out, atol=1e-7), \
         f"max diff = {(old_out - new_out).abs().max()}"
 
 
 # ---------------------------------------------------------------------------
-# 3. quantize() equivalence with old quantize_elemwise_op
+# 3. quantize() equivalence with _quantize_elemwise
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("fmt_name", ["int8", "fp8_e4m3", "fp8_e5m2", "fp4_e2m1",
@@ -168,51 +167,52 @@ def test_quantize_equiv_old_elemwise_op(fmt_name):
 
 
 # ---------------------------------------------------------------------------
-# 4. _format_from_mx_specs helper
+# 4. _format_from_mx_specs_dict (in test _compat module)
 # ---------------------------------------------------------------------------
 
-def test_format_from_mx_specs_bfloat16():
+def test_format_from_compat_bfloat16():
     """bfloat=16 in mx_specs should produce BFloat16Format."""
-    from src.specs.specs import finalize_mx_specs
+    from src.tests._compat import _format_from_mx_specs_dict
     from src.formats.bf16_fp16 import BFloat16Format
-    specs = finalize_mx_specs({"bfloat": 16})
-    fmt = _format_from_mx_specs(specs)
+    fmt = _format_from_mx_specs_dict({"bfloat": 16})
     assert fmt is not None
     assert isinstance(fmt, BFloat16Format)
     assert fmt.ebits == 8
     assert fmt.mbits == 9
 
 
-def test_format_from_mx_specs_bfloat12():
+def test_format_from_compat_bfloat12():
     """bfloat=12 should produce ebits=8, mbits=5."""
-    from src.specs.specs import finalize_mx_specs
-    specs = finalize_mx_specs({"bfloat": 12})
-    fmt = _format_from_mx_specs(specs)
+    from src.tests._compat import _format_from_mx_specs_dict
+    fmt = _format_from_mx_specs_dict({"bfloat": 12})
     assert fmt is not None
     assert fmt.ebits == 8
     assert fmt.mbits == 5
 
 
-def test_format_from_mx_specs_no_format():
-    """bfloat=0, fp=0 should return None (finalize_mx_specs returns None)."""
-    # When bfloat=0, finalize_mx_specs returns None (no quantization active)
-    fmt = _format_from_mx_specs(None)
+def test_format_from_compat_no_format():
+    """bfloat=0, fp=0 should return None."""
+    from src.tests._compat import _format_from_mx_specs_dict
+    fmt = _format_from_mx_specs_dict({"bfloat": 0, "fp": 0})
     assert fmt is None
 
 
-def test_format_from_mx_specs_both_bfloat_and_fp_raises():
+def test_format_from_compat_both_bfloat_and_fp_raises():
     """Setting both bfloat>0 and fp>0 should raise ValueError."""
+    from src.tests._compat import _format_from_mx_specs_dict
     with pytest.raises(ValueError, match="Cannot set both"):
-        _format_from_mx_specs({"bfloat": 16, "fp": 8})
+        _format_from_mx_specs_dict({"bfloat": 16, "fp": 8})
 
 
-def test_format_from_mx_specs_bfloat_too_small_raises():
+def test_format_from_compat_bfloat_too_small_raises():
     """bfloat <= 9 should raise ValueError."""
+    from src.tests._compat import _format_from_mx_specs_dict
     with pytest.raises(ValueError, match="bfloat"):
-        _format_from_mx_specs({"bfloat": 8})
+        _format_from_mx_specs_dict({"bfloat": 8})
 
 
-def test_format_from_mx_specs_fp_too_small_raises():
+def test_format_from_compat_fp_too_small_raises():
     """fp <= 6 should raise ValueError."""
+    from src.tests._compat import _format_from_mx_specs_dict
     with pytest.raises(ValueError, match="fp"):
-        _format_from_mx_specs({"fp": 5})
+        _format_from_mx_specs_dict({"fp": 5})

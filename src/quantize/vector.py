@@ -2,13 +2,11 @@
 Non-differentiable vector quantization operations.
 
 Primary API: vec_quantize(input, scheme, ...) — QuantScheme-driven.
-Compat API:  vec_quantize(input, mx_specs=..., ...) — MxSpecs wrapper (P2F-6 removes).
 """
 import numpy as np
 import torch
 
-from src.quantize.elemwise import quantize_elemwise_op, quantize
-from src.scheme.quant_scheme import QuantScheme
+from src.quantize.elemwise import quantize
 
 torch_exp = torch.exp
 torch_exp2 = torch.exp2
@@ -19,109 +17,87 @@ LN_2_EXACT = 0.69314718056
 LOG2_E_BF16 = 1.4453125  # 1 + 2**-2 + 2**-3 + 2**-4 + 2**-7
 
 
-def _dispatch_quantize(input, scheme=None, mx_specs=None, round_mode=None):
-    """Internal: dispatch to quantize() or quantize_elemwise_op()."""
-    if scheme is not None:
-        if mx_specs is not None:
-            raise TypeError(
-                "Cannot specify both scheme and mx_specs. "
-                "Use scheme for QuantScheme-driven API, or mx_specs for compat."
-            )
-        if round_mode is not None:
-            raise TypeError(
-                "round_mode is ignored when scheme is provided. "
-                "Set round_mode in the QuantScheme instead."
-            )
-        return quantize(input, scheme)
-    return quantize_elemwise_op(input, mx_specs=mx_specs, round_mode=round_mode)
+def _dispatch_quantize(input, scheme=None):
+    """Internal: dispatch to quantize()."""
+    return quantize(input, scheme)
 
 
 # -------------------------------------------------------------------------
 # Quantize
 # -------------------------------------------------------------------------
 
-def vec_quantize(input, scheme=None, mx_specs=None, round_mode=None):
-    return _dispatch_quantize(input, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+def vec_quantize(input, scheme=None):
+    return _dispatch_quantize(input, scheme=scheme)
 
 
 # -------------------------------------------------------------------------
 # Arithmetic ops
 # -------------------------------------------------------------------------
 
-def vec_add(a, b, scheme=None, mx_specs=None, round_mode=None):
-    return _dispatch_quantize(a + b, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+def vec_add(a, b, scheme=None):
+    return _dispatch_quantize(a + b, scheme=scheme)
 
 
-def vec_sub(a, b, scheme=None, mx_specs=None, round_mode=None):
-    return _dispatch_quantize(a - b, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+def vec_sub(a, b, scheme=None):
+    return _dispatch_quantize(a - b, scheme=scheme)
 
 
-def vec_mul(a, b, scheme=None, mx_specs=None, round_mode=None):
-    return _dispatch_quantize(a * b, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+def vec_mul(a, b, scheme=None):
+    return _dispatch_quantize(a * b, scheme=scheme)
 
 
-def vec_div(a, b, scheme=None, mx_specs=None, round_mode=None, use_recip=False):
-    if not use_recip and mx_specs and mx_specs.get('vec_use_recip'):
-        use_recip = True
+def vec_div(a, b, scheme=None, use_recip=False):
     if use_recip:
-        recip_b = vec_recip(b, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
-        return vec_mul(a, recip_b, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
-    return _dispatch_quantize(a / b, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+        recip_b = vec_recip(b, scheme=scheme)
+        return vec_mul(a, recip_b, scheme=scheme)
+    return _dispatch_quantize(a / b, scheme=scheme)
 
 
 # -------------------------------------------------------------------------
 # Special math ops
 # -------------------------------------------------------------------------
 
-def vec_exp(input, scheme=None, mx_specs=None, round_mode=None, use_exp2=False):
-    if not use_exp2 and mx_specs and mx_specs.get('vec_use_exp2'):
-        use_exp2 = True
+def vec_exp(input, scheme=None, use_exp2=False):
     if use_exp2:
-        phi = _dispatch_quantize(LOG2_E_BF16 * input, scheme=scheme,
-                                 mx_specs=mx_specs, round_mode=round_mode)
-        phi = vec_exp2(phi, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+        phi = _dispatch_quantize(LOG2_E_BF16 * input, scheme=scheme)
+        phi = vec_exp2(phi, scheme=scheme)
     else:
-        phi = _dispatch_quantize(torch_exp(input), scheme=scheme,
-                                 mx_specs=mx_specs, round_mode=round_mode)
+        phi = _dispatch_quantize(torch_exp(input), scheme=scheme)
     return phi
 
 
-def vec_exp2(input, scheme=None, mx_specs=None, round_mode=None):
+def vec_exp2(input, scheme=None):
     if hasattr(torch, 'exp2'):
-        phi = _dispatch_quantize(torch_exp2(input), scheme=scheme,
-                                 mx_specs=mx_specs, round_mode=round_mode)
+        phi = _dispatch_quantize(torch_exp2(input), scheme=scheme)
     else:
-        phi = _dispatch_quantize(torch_exp(input * LN_2_EXACT), scheme=scheme,
-                                 mx_specs=mx_specs, round_mode=round_mode)
+        phi = _dispatch_quantize(torch_exp(input * LN_2_EXACT), scheme=scheme)
     return phi
 
 
-def vec_recip(input, scheme=None, mx_specs=None, round_mode=None):
-    return _dispatch_quantize(1. / input, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+def vec_recip(input, scheme=None):
+    return _dispatch_quantize(1. / input, scheme=scheme)
 
 
-def vec_sqrt(input, scheme=None, mx_specs=None, round_mode=None):
-    return _dispatch_quantize(torch_sqrt(input), scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+def vec_sqrt(input, scheme=None):
+    return _dispatch_quantize(torch_sqrt(input), scheme=scheme)
 
 
-def vec_tanh(input, scheme=None, mx_specs=None, round_mode=None):
-    return _dispatch_quantize(torch_tanh(input), scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+def vec_tanh(input, scheme=None):
+    return _dispatch_quantize(torch_tanh(input), scheme=scheme)
 
 
 # -------------------------------------------------------------------------
 # Reduce ops
 # -------------------------------------------------------------------------
 
-def vec_reduce_sum(input, dim, keepdim=False, scheme=None, mx_specs=None, round_mode=None):
-    return _dispatch_quantize(input.sum(dim, keepdim=keepdim),
-                              scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+def vec_reduce_sum(input, dim, keepdim=False, scheme=None):
+    return _dispatch_quantize(input.sum(dim, keepdim=keepdim), scheme=scheme)
 
 
-def vec_reduce_mean(input, dim, keepdim=False, scheme=None, mx_specs=None, round_mode=None):
+def vec_reduce_mean(input, dim, keepdim=False, scheme=None):
     dim = dim if type(dim) is list else [dim]
     denom = np.prod([input.shape[i] for i in dim])
 
-    s = vec_reduce_sum(input, dim, keepdim=keepdim,
-                       scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
-    s = vec_div(s, denom, scheme=scheme, mx_specs=mx_specs, round_mode=round_mode)
+    s = vec_reduce_sum(input, dim, keepdim=keepdim, scheme=scheme)
+    s = vec_div(s, denom, scheme=scheme)
     return s

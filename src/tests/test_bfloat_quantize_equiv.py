@@ -7,29 +7,34 @@ import pytest
 import torch
 
 from mx.quantize import quantize_bfloat as old_quantize_bfloat
-from src.quantize.bfloat_quantize import quantize_bfloat_from_specs
+from src.quantize.bfloat_quantize import quantize_bfloat
 from mx.specs import finalize_mx_specs as old_finalize
-from src.specs.specs import finalize_mx_specs as new_finalize
+from src.scheme.quant_scheme import QuantScheme
 
 
 class TestQuantizeBfloatForward:
-    """Forward pass: new quantize_bfloat vs old quantize_bfloat."""
+    """Forward pass: new quantize_bfloat(scheme) vs old quantize_bfloat(mx_specs)."""
 
     @pytest.mark.parametrize("bfloat_bits", [16, 12])
     def test_bfloat_forward(self, bfloat_bits):
         torch.manual_seed(42)
         x = torch.randn(4, 32)
         old_specs = old_finalize({"bfloat": bfloat_bits})
-        new_specs = new_finalize({"bfloat": bfloat_bits})
+        if bfloat_bits == 16:
+            scheme = QuantScheme.per_tensor("bfloat16")
+        else:
+            from src.formats.fp_formats import FPFormat
+            scheme = QuantScheme(format=FPFormat(name=f"bfloat{bfloat_bits}", ebits=8, mbits=bfloat_bits - 7),
+                                 round_mode="nearest")
         old_out = old_quantize_bfloat(x.clone(), mx_specs=old_specs)
-        new_out = quantize_bfloat_from_specs(x.clone(), mx_specs=new_specs)
+        new_out = quantize_bfloat(x.clone(), scheme=scheme)
         assert torch.equal(old_out, new_out), f"bfloat{bfloat_bits} forward mismatch"
 
-    def test_bfloat_forward_none_specs(self):
-        """When mx_specs is None, input should pass through unchanged."""
+    def test_bfloat_forward_none_scheme(self):
+        """When scheme=None, input should pass through unchanged."""
         x = torch.randn(4, 32)
         old_out = old_quantize_bfloat(x.clone(), mx_specs=None)
-        new_out = quantize_bfloat_from_specs(x.clone(), mx_specs=None)
+        new_out = quantize_bfloat(x.clone(), scheme=None)
         assert torch.equal(old_out, new_out)
 
     def test_bfloat_forward_explicit_round(self):
@@ -37,9 +42,9 @@ class TestQuantizeBfloatForward:
         torch.manual_seed(42)
         x = torch.randn(4, 32)
         old_specs = old_finalize({"bfloat": 16, "round": "nearest"})
-        new_specs = new_finalize({"bfloat": 16, "round": "nearest"})
+        scheme = QuantScheme.per_tensor("bfloat16", round_mode="floor")
         old_out = old_quantize_bfloat(x.clone(), mx_specs=old_specs, round="floor")
-        new_out = quantize_bfloat_from_specs(x.clone(), mx_specs=new_specs, round_mode="floor")
+        new_out = quantize_bfloat(x.clone(), scheme=scheme)
         assert torch.equal(old_out, new_out)
 
 
@@ -56,8 +61,9 @@ class TestQuantizeBfloatBackward:
         old_out = old_quantize_bfloat(x1, mx_specs=old_specs)
         old_out.sum().backward()
 
-        new_specs = new_finalize({"bfloat": 16, "quantize_backprop": quantize_bp})
-        new_out = quantize_bfloat_from_specs(x2, mx_specs=new_specs)
+        scheme = QuantScheme.per_tensor("bfloat16")
+        backwards_scheme = scheme if quantize_bp else None
+        new_out = quantize_bfloat(x2, scheme=scheme, backwards_scheme=backwards_scheme)
         new_out.sum().backward()
 
         assert torch.equal(x1.grad, x2.grad), \
@@ -73,8 +79,8 @@ class TestQuantizeBfloatBackward:
         old_out = old_quantize_bfloat(x1, mx_specs=old_specs)
         old_out.sum().backward()
 
-        new_specs = new_finalize({"bfloat": 16, "quantize_backprop": False})
-        new_out = quantize_bfloat_from_specs(x2, mx_specs=new_specs)
+        scheme = QuantScheme.per_tensor("bfloat16")
+        new_out = quantize_bfloat(x2, scheme=scheme, backwards_scheme=None)
         new_out.sum().backward()
 
         # With quantize_backprop=False, gradient is unquantized (identity)

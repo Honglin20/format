@@ -14,6 +14,7 @@ from mx.mx_ops import (
 from mx.formats import ElemFormat
 from mx.specs import finalize_mx_specs as old_finalize
 from src.tests.equivalence import assert_bit_identical
+from src.scheme.quant_scheme import QuantScheme
 
 
 # ---------------------------------------------------------------------------
@@ -179,18 +180,17 @@ def test_quantize_mx_floor_round(fmt):
 
 
 # ---------------------------------------------------------------------------
-# 4. quantize_mx_op (public API with mx_specs)
+# 4. quantize_mx(scheme) equivalence
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("fmt", MX_FORMATS)
-def test_quantize_mx_op(fmt):
-    from src.quantize.mx_quantize import quantize_mx_op
-    from src.specs.specs import finalize_mx_specs as new_finalize
+def test_quantize_mx_scheme(fmt):
+    from src.quantize.mx_quantize import quantize_mx
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     config = {"w_elem_format": fmt, "a_elem_format": fmt, "block_size": 32, "bfloat": 16}
     old_specs = old_finalize(config.copy())
-    new_specs = new_finalize(config.copy())
+    scheme = QuantScheme.mxfp(fmt, block_size=32)
     old_out = old_qmx_op(A.clone(), mx_specs=old_specs, elem_format=fmt, axes=[-1])
-    new_out = quantize_mx_op(A.clone(), mx_specs=new_specs, elem_format=fmt, axes=[-1])
-    assert torch.equal(old_out, new_out), f"mx_op mismatch for {fmt}"
+    new_out = quantize_mx(A.clone(), scheme=scheme, axes=[-1])
+    assert torch.equal(old_out, new_out), f"mx scheme mismatch for {fmt}"

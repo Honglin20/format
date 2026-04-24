@@ -1,6 +1,6 @@
 """
 MX block quantization: _shared_exponents, _reshape_to_blocks,
-_quantize_mx, quantize_mx_op.
+_quantize_mx, quantize_mx.
 
 Rewritten from mx/mx_ops.py. Key changes:
 - Uses FormatBase.from_str() instead of _get_format_params() / ElemFormat
@@ -222,6 +222,7 @@ def quantize_mx(
             granularity.mode must be PER_BLOCK or PER_TENSOR.
             scheme.transform must be IdentityTransform (MX quantization
             does not apply transforms).
+            If None, input is returned unchanged.
         axes: Axes along which to compute shared exponents. Default: None.
         scale_bits: Bits for shared scale (sign + magnitude). Default: 8.
         shared_exp_method: "max" or "none". Default: "max".
@@ -261,52 +262,4 @@ def quantize_mx(
         axes=axes, round_mode=round_mode,
         shared_exp_method=shared_exp_method,
         flush_fp32_subnorms=flush_fp32_subnorms,
-    )
-
-
-def quantize_mx_op(
-    A,
-    mx_specs,
-    elem_format=None,
-    block_size=None,
-    axes=None,
-    round_mode="nearest",
-    expand_and_reshape=False,
-):
-    """Compat wrapper: quantize A using mx_specs dict.
-
-    Delegates to quantize_mx() after constructing a QuantScheme from mx_specs.
-    Kept for backward compatibility with existing tests (remove in P2F-6).
-    """
-    if expand_and_reshape:
-        raise NotImplementedError(
-            "expand_and_reshape is no longer supported. "
-            "Reshape input before calling quantize_mx_op."
-        )
-
-    if elem_format is None:
-        return A
-
-    if block_size is None:
-        block_size = mx_specs["block_size"]
-
-    scale_bits = mx_specs["scale_bits"] if mx_specs["scale_bits"] != 0 else 8
-
-    fmt = FormatBase.from_str(elem_format) if isinstance(elem_format, str) else elem_format
-
-    from src.scheme.quant_scheme import QuantScheme
-    from src.scheme.granularity import GranularitySpec
-
-    scheme = QuantScheme(
-        format=fmt,
-        granularity=GranularitySpec.per_block(block_size) if block_size > 0
-                     else GranularitySpec.per_tensor(),
-        round_mode=round_mode,
-    )
-
-    return quantize_mx(
-        A, scheme, axes=axes,
-        scale_bits=scale_bits,
-        shared_exp_method=mx_specs["shared_exp_method"],
-        flush_fp32_subnorms=mx_specs["mx_flush_fp32_subnorms"],
     )

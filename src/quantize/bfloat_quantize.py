@@ -2,7 +2,6 @@
 Differentiable bfloat quantization.
 
 Primary API: quantize_bfloat(x, scheme, ...) — QuantScheme-driven.
-Compat API:  quantize_bfloat_from_specs(x, mx_specs, ...) — MxSpecs wrapper (P2F-6 removes).
 """
 import torch
 
@@ -33,6 +32,7 @@ def quantize_bfloat(x, scheme, backwards_scheme=None, allow_denorm=True):
     Args:
         x: Input tensor.
         scheme: QuantScheme specifying format, granularity, and round_mode.
+            If None, input is returned unchanged.
         backwards_scheme: QuantScheme for backward pass. If None, backward
             is identity (no quantization). Default: same as scheme.
         allow_denorm: If False, flush subnormal values to zero.
@@ -47,37 +47,3 @@ def quantize_bfloat(x, scheme, backwards_scheme=None, allow_denorm=True):
         backwards_scheme = scheme
 
     return QuantizeBfloatFunction.apply(x, scheme, backwards_scheme, allow_denorm)
-
-
-def quantize_bfloat_from_specs(x, mx_specs, round_mode=None):
-    """Compat wrapper: quantize x using mx_specs dict.
-
-    Constructs QuantScheme from mx_specs and delegates to quantize_bfloat().
-    Kept for backward compatibility with existing tests (remove in P2F-6).
-    """
-    if mx_specs is None:
-        return x
-
-    from src.quantize.elemwise import _format_from_mx_specs
-    from src.scheme.quant_scheme import QuantScheme
-    from src.scheme.granularity import GranularitySpec
-
-    fmt = _format_from_mx_specs(mx_specs)
-    if fmt is None:
-        return x
-
-    if round_mode is None:
-        round_mode = mx_specs["round"]
-
-    allow_denorm = mx_specs.get("bfloat_subnorms", True)
-
-    scheme = QuantScheme(
-        format=fmt,
-        granularity=GranularitySpec.per_tensor(),
-        round_mode=round_mode,
-    )
-
-    backwards_scheme = scheme if mx_specs.get("quantize_backprop", True) else None
-
-    return quantize_bfloat(x, scheme, backwards_scheme=backwards_scheme,
-                           allow_denorm=allow_denorm)
