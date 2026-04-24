@@ -11,7 +11,6 @@ Rewritten from mx/mx_ops.py. Key changes:
 import torch
 from src.formats.base import FormatBase
 from src.quantize.elemwise import _quantize_elemwise_core
-from src.specs.specs import mx_assert_test
 
 FP32_EXPONENT_BIAS = 127
 FP32_MIN_NORMAL = 2 ** (-FP32_EXPONENT_BIAS + 1)
@@ -199,6 +198,46 @@ def _quantize_mx(
 # Public API
 # ---------------------------------------------------------------------------
 
+def quantize_mx(
+    A,
+    scheme,
+    axes=None,
+    scale_bits=8,
+    shared_exp_method="max",
+    flush_fp32_subnorms=False,
+):
+    """Quantize tensor A using a QuantScheme (MX block quantization).
+
+    Primary QuantScheme-driven API for shared-exponent block quantization.
+
+    Args:
+        A: Input tensor.
+        scheme: QuantScheme specifying format, granularity, and round_mode.
+            block_size is taken from scheme.granularity.block_size.
+        axes: Axes along which to compute shared exponents. Default: -1.
+        scale_bits: Bits for shared scale (sign + magnitude). Default: 8.
+        shared_exp_method: "max" or "none". Default: "max".
+        flush_fp32_subnorms: Flush subnormal FP32 blocks to zero. Default: False.
+
+    Returns:
+        Quantized tensor with same shape as A.
+    """
+    if scheme is None:
+        return A
+
+    fmt = scheme.format
+    block_size = scheme.block_size
+    round_mode = scheme.round_mode
+
+    return _quantize_mx(
+        A, scale_bits, fmt,
+        block_size=block_size,
+        axes=axes, round_mode=round_mode,
+        shared_exp_method=shared_exp_method,
+        flush_fp32_subnorms=flush_fp32_subnorms,
+    )
+
+
 def quantize_mx_op(
     A,
     mx_specs,
@@ -208,22 +247,34 @@ def quantize_mx_op(
     round_mode="nearest",
     expand_and_reshape=False,
 ):
-    mx_assert_test(mx_specs)
+    """Compat wrapper: quantize A using mx_specs dict.
 
+    Delegates to quantize_mx() after constructing a QuantScheme from mx_specs.
+    Kept for backward compatibility with existing tests (remove in P2F-6).
+    """
     if elem_format is None:
         return A
 
     if block_size is None:
         block_size = mx_specs["block_size"]
 
-    if mx_specs["scale_bits"] == 0:
-        scale_bits = 8
-    else:
-        scale_bits = mx_specs["scale_bits"]
+    scale_bits = mx_specs["scale_bits"] if mx_specs["scale_bits"] != 0 else 8
 
-    return _quantize_mx(
-            A, scale_bits,
-            elem_format, block_size=block_size,
-            axes=axes, round_mode=round_mode,
-            shared_exp_method=mx_specs["shared_exp_method"],
-            flush_fp32_subnorms=mx_specs["mx_flush_fp32_subnorms"])
+    fmt = FormatBase.from_str(elem_format) if isinstance(elem_format, str) else elem_format
+
+    from src.scheme.quant_scheme import QuantScheme
+    from src.scheme.granularity import GranularitySpec
+
+    scheme = QuantScheme(
+        format=fmt,
+        granularity=GranularitySpec.per_block(block_size) if block_size > 0
+                     else GranularitySpec.per_tensor(),
+        round_mode=round_mode,
+    )
+
+    return quantize_mx(
+        A, scheme, axes=axes,
+        scale_bits=scale_bits,
+        shared_exp_method=mx_specs["shared_exp_method"],
+        flush_fp32_subnorms=mx_specs["mx_flush_fp32_subnorms"],
+    )
