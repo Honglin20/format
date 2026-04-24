@@ -10,7 +10,7 @@ Migrate `specs`, `elemwise_ops`, `mx_ops` into `src/`. Operators remain in `mx/`
 |----------|--------|-----------|
 | Migration scope | Quantization core only, operators stay | Manageable scope; operators depend on core |
 | Format dependency | New code uses `src/formats/` directly | Cohesive; avoids redundant parameter passing |
-| Specs structure | Faithful 39-key dict migration | Low risk; operators deeply depend on dict access |
+| Specs structure | Faithful 30-key dict migration | Low risk; operators deeply depend on dict access |
 | Migration style | Rewrite each function | Clean code; uses new FormatBase API; tests catch regressions |
 
 ## Module Design

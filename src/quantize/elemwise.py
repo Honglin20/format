@@ -1,6 +1,6 @@
 """
-Element-wise quantization: round_mantissa, quantize_elemwise_core,
-quantize_elemwise_op, _quantize_bfloat, _quantize_fp.
+Element-wise quantization: _round_mantissa, _quantize_elemwise_core,
+_quantize_elemwise, _quantize_bfloat, _quantize_fp, quantize_elemwise_op.
 
 Rewritten from mx/elemwise_ops.py. Key changes:
 - Uses src/formats/base.py instead of mx/formats.py
@@ -9,30 +9,28 @@ Rewritten from mx/elemwise_ops.py. Key changes:
 - Custom CUDA path omitted (Python/CPU path only for now)
 """
 import torch
-from src.formats.base import compute_min_norm, compute_max_norm
-
-_VALID_ROUND_MODES = {"nearest", "floor", "even", "dither"}
+from src.formats.base import compute_min_norm, compute_max_norm, FormatBase
 
 
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def safe_lshift(x, bits, exp):
+def _safe_lshift(x, bits, exp):
     if exp is None:
         return x * (2**bits)
     else:
         return x / (2 ** exp) * (2**bits)
 
 
-def safe_rshift(x, bits, exp):
+def _safe_rshift(x, bits, exp):
     if exp is None:
         return x / (2**bits)
     else:
         return x / (2**bits) * (2 ** exp)
 
 
-def round_mantissa(A, bits, round_mode, clamp=False):
+def _round_mantissa(A, bits, round_mode, clamp=False):
     if round_mode == "dither":
         rand_A = torch.rand_like(A, requires_grad=False)
         A = torch.sign(A) * torch.floor(torch.abs(A) + rand_A)
@@ -57,8 +55,8 @@ def round_mantissa(A, bits, round_mode, clamp=False):
 # Core quantization
 # ---------------------------------------------------------------------------
 
-def quantize_elemwise_core(A, bits, exp_bits, max_norm, round_mode='nearest',
-                           saturate_normals=False, allow_denorm=True):
+def _quantize_elemwise_core(A, bits, exp_bits, max_norm, round_mode='nearest',
+                            saturate_normals=False, allow_denorm=True):
     A_is_sparse = A.is_sparse
     if A_is_sparse:
         if A.layout != torch.sparse_coo:
@@ -83,12 +81,12 @@ def quantize_elemwise_core(A, bits, exp_bits, max_norm, round_mode='nearest',
         private_exp = None
 
     # Scale up so appropriate number of bits are in the integer portion
-    out = safe_lshift(out, bits - 2, private_exp)
+    out = _safe_lshift(out, bits - 2, private_exp)
 
-    out = round_mantissa(out, bits, round_mode, clamp=False)
+    out = _round_mantissa(out, bits, round_mode, clamp=False)
 
     # Undo scaling
-    out = safe_rshift(out, bits - 2, private_exp)
+    out = _safe_rshift(out, bits - 2, private_exp)
 
     # Set values > max_norm to Inf if desired, else clamp them
     if saturate_normals or exp_bits == 0:
@@ -103,10 +101,11 @@ def quantize_elemwise_core(A, bits, exp_bits, max_norm, round_mode='nearest',
     out[A == float("NaN")] = float("NaN")
 
     if A_is_sparse:
-        output = torch.sparse_coo_tensor(sparse_A.indices(), output,
+        # Fixed: old code had UnboundLocalError here (used 'output' instead of 'out')
+        out = torch.sparse_coo_tensor(sparse_A.indices(), out,
                 sparse_A.size(), dtype=sparse_A.dtype, device=sparse_A.device,
                 requires_grad=sparse_A.requires_grad)
-        return output
+        return out
 
     return out
 
@@ -115,13 +114,27 @@ def quantize_elemwise_core(A, bits, exp_bits, max_norm, round_mode='nearest',
 # Format-specific wrappers
 # ---------------------------------------------------------------------------
 
+def _quantize_elemwise(A, elem_format, round_mode='nearest',
+                       saturate_normals=False, allow_denorm=True):
+    """Quantize values to a defined format using FormatBase.from_str()."""
+    if elem_format is None:
+        return A
+
+    fmt = FormatBase.from_str(elem_format) if isinstance(elem_format, str) else elem_format
+
+    return _quantize_elemwise_core(
+            A, fmt.mbits, fmt.ebits, fmt.max_norm,
+            round_mode=round_mode, allow_denorm=allow_denorm,
+            saturate_normals=saturate_normals)
+
+
 def _quantize_bfloat(A, bfloat, round_mode='nearest', allow_denorm=True):
     if bfloat == 0 or bfloat == 32:
         return A
 
     max_norm = compute_max_norm(8, bfloat - 7)
 
-    return quantize_elemwise_core(
+    return _quantize_elemwise_core(
             A, bits=bfloat-7, exp_bits=8, max_norm=max_norm, round_mode=round_mode,
             allow_denorm=allow_denorm)
 
@@ -133,7 +146,7 @@ def _quantize_fp(A, exp_bits=None, mantissa_bits=None,
 
     max_norm = compute_max_norm(exp_bits, mantissa_bits + 2)
 
-    return quantize_elemwise_core(
+    return _quantize_elemwise_core(
             A, bits=mantissa_bits + 2, exp_bits=exp_bits,
             max_norm=max_norm, round_mode=round_mode, allow_denorm=allow_denorm)
 

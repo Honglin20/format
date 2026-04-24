@@ -3,7 +3,7 @@ Shared test fixtures: seeded tensor generators and representative mx_specs confi
 """
 import torch
 import pytest
-from mx.specs import MxSpecs, finalize_mx_specs
+from src.specs.specs import MxSpecs, finalize_mx_specs
 
 
 # ---------------------------------------------------------------------------

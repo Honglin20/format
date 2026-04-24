@@ -1,17 +1,16 @@
 """
-MX block quantization: shared_exponents, reshape_to_blocks,
-quantize_mx, quantize_mx_op.
+MX block quantization: _shared_exponents, _reshape_to_blocks,
+_quantize_mx, quantize_mx_op.
 
 Rewritten from mx/mx_ops.py. Key changes:
 - Uses FormatBase.from_str() instead of _get_format_params() / ElemFormat
-- Uses safe_lshift/safe_rshift from src/quantize/elemwise.py
 - Parameter 'round' renamed to 'round_mode'
 - Custom CUDA path omitted (Python/CPU path only for now)
 - FP32 constants defined locally instead of imported from mx/formats.py
 """
 import torch
 from src.formats.base import FormatBase
-from src.quantize.elemwise import safe_lshift, safe_rshift, quantize_elemwise_core
+from src.quantize.elemwise import _quantize_elemwise_core
 from src.specs.specs import mx_assert_test
 
 FP32_EXPONENT_BIAS = 127
@@ -22,7 +21,7 @@ FP32_MIN_NORMAL = 2 ** (-FP32_EXPONENT_BIAS + 1)
 # Shared exponents
 # ---------------------------------------------------------------------------
 
-def shared_exponents(A, method="max", axes=None, ebits=0):
+def _shared_exponents(A, method="max", axes=None, ebits=0):
     if method == "max":
         if axes is None:
             shared_exp = torch.max(torch.abs(A))
@@ -55,16 +54,17 @@ def shared_exponents(A, method="max", axes=None, ebits=0):
 # Block reshaping
 # ---------------------------------------------------------------------------
 
-def reshape_to_blocks(A, axes, block_size):
+def _reshape_to_blocks(A, axes, block_size):
     if axes is None:
         raise ValueError("axes required in order to determine which "
                          "dimension to apply block size to")
     if block_size == 0:
-        raise ValueError("block_size == 0 in reshape_to_blocks")
+        raise ValueError("block_size == 0 in _reshape_to_blocks")
 
     # Fix axes to be positive and sort them
     axes = [(x + len(A.shape) if x < 0 else x) for x in axes]
-    assert all(x >= 0 for x in axes)
+    if not all(x >= 0 for x in axes):
+        raise ValueError("All axes must be non-negative after normalization")
     axes = sorted(axes)
 
     # Add extra dimension for tiles
@@ -96,7 +96,9 @@ def reshape_to_blocks(A, axes, block_size):
     def _reshape(shape, reshape_block_size):
         for axis in axes:
             if shape[axis] >= reshape_block_size:
-                assert shape[axis] % reshape_block_size == 0
+                if shape[axis] % reshape_block_size != 0:
+                    raise ValueError(
+                        f"shape[{axis}]={shape[axis]} not divisible by block_size={reshape_block_size}")
                 shape[axis + 1] = reshape_block_size
                 shape[axis] = shape[axis] // reshape_block_size
             else:
@@ -110,7 +112,7 @@ def reshape_to_blocks(A, axes, block_size):
     return A, axes, orig_shape, padded_shape
 
 
-def undo_reshape_to_blocks(A, padded_shape, orig_shape, axes):
+def _undo_reshape_to_blocks(A, padded_shape, orig_shape, axes):
     A = A.view(padded_shape)
     if not list(padded_shape) == list(orig_shape):
         slices = [slice(0, x) for x in orig_shape]
@@ -124,7 +126,7 @@ def undo_reshape_to_blocks(A, padded_shape, orig_shape, axes):
 # Core MX quantization
 # ---------------------------------------------------------------------------
 
-def quantize_mx(
+def _quantize_mx(
     A,
     scale_bits,
     elem_format,
@@ -138,7 +140,8 @@ def quantize_mx(
     if elem_format is None:
         return A
 
-    assert scale_bits > 0
+    if scale_bits <= 0:
+        raise ValueError("scale_bits must be > 0")
 
     # Make sure axes is a list of non-negative numbers
     axes = [axes] if type(axes) == int else axes
@@ -156,13 +159,13 @@ def quantize_mx(
 
     # Perform tiling to the hardware vector size
     if block_size > 0:
-        A, axes, orig_shape, padded_shape = reshape_to_blocks(A, axes, block_size)
+        A, axes, orig_shape, padded_shape = _reshape_to_blocks(A, axes, block_size)
 
     # Quantize
     shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
 
     # Get shared exponents
-    shared_exp = shared_exponents(
+    shared_exp = _shared_exponents(
         A, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
     )
 
@@ -179,7 +182,7 @@ def quantize_mx(
 
     A = A / (2**shared_exp)
 
-    A = quantize_elemwise_core(
+    A = _quantize_elemwise_core(
             A, mbits, ebits, max_norm, round_mode=round_mode,
             allow_denorm=True, saturate_normals=True)
 
@@ -187,7 +190,7 @@ def quantize_mx(
 
     # Undo tile reshaping
     if block_size:
-        A = undo_reshape_to_blocks(A, padded_shape, orig_shape, axes)
+        A = _undo_reshape_to_blocks(A, padded_shape, orig_shape, axes)
 
     return A
 
@@ -203,6 +206,7 @@ def quantize_mx_op(
     block_size=None,
     axes=None,
     round_mode="nearest",
+    expand_and_reshape=False,
 ):
     mx_assert_test(mx_specs)
 
@@ -217,7 +221,7 @@ def quantize_mx_op(
     else:
         scale_bits = mx_specs["scale_bits"]
 
-    return quantize_mx(
+    return _quantize_mx(
             A, scale_bits,
             elem_format, block_size=block_size,
             axes=axes, round_mode=round_mode,

@@ -4,7 +4,7 @@
 
 **Goal:** Migrate specs, elemwise_ops, mx_ops, quantize, vector_ops into src/ with per-function test coverage verifying bit-identical output against old code.
 
-**Architecture:** Faithful migration — rewrite each function, use `src/formats/` instead of `mx/formats.py`, keep 39-key MxSpecs dict structure. Every internal function gets its own test comparing new vs old output.
+**Architecture:** Faithful migration — rewrite each function, use `src/formats/` instead of `mx/formats.py`, keep 30-key MxSpecs dict structure. Every internal function gets its own test comparing new vs old output.
 
 **Tech Stack:** Python 3.10, PyTorch, pytest
 

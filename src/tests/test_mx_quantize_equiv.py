@@ -17,99 +17,99 @@ from src.tests.equivalence import assert_bit_identical
 
 
 # ---------------------------------------------------------------------------
-# 1. shared_exponents
+# 1. _shared_exponents
 # ---------------------------------------------------------------------------
 
 def test_shared_exponents_max():
-    from src.quantize.mx_quantize import shared_exponents
+    from src.quantize.mx_quantize import _shared_exponents
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     old_out = old_shared_exp(A.clone(), method="max", axes=[-1])
-    new_out = shared_exponents(A.clone(), method="max", axes=[-1])
+    new_out = _shared_exponents(A.clone(), method="max", axes=[-1])
     assert torch.equal(old_out, new_out)
 
 
 def test_shared_exponents_none():
-    from src.quantize.mx_quantize import shared_exponents
+    from src.quantize.mx_quantize import _shared_exponents
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     old_out = old_shared_exp(A.clone(), method="none")
-    new_out = shared_exponents(A.clone(), method="none")
+    new_out = _shared_exponents(A.clone(), method="none")
     assert torch.equal(old_out, new_out)
 
 
 def test_shared_exponents_multi_axes():
-    from src.quantize.mx_quantize import shared_exponents
+    from src.quantize.mx_quantize import _shared_exponents
     torch.manual_seed(42)
     A = torch.randn(2, 4, 64)
     old_out = old_shared_exp(A.clone(), method="max", axes=[-2, -1])
-    new_out = shared_exponents(A.clone(), method="max", axes=[-2, -1])
+    new_out = _shared_exponents(A.clone(), method="max", axes=[-2, -1])
     assert torch.equal(old_out, new_out)
 
 
 def test_shared_exponents_with_ebits():
-    from src.quantize.mx_quantize import shared_exponents
+    from src.quantize.mx_quantize import _shared_exponents
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     old_out = old_shared_exp(A.clone(), method="max", axes=[-1], ebits=4)
-    new_out = shared_exponents(A.clone(), method="max", axes=[-1], ebits=4)
+    new_out = _shared_exponents(A.clone(), method="max", axes=[-1], ebits=4)
     assert torch.equal(old_out, new_out)
 
 
 def test_shared_exponents_zeros():
-    from src.quantize.mx_quantize import shared_exponents
+    from src.quantize.mx_quantize import _shared_exponents
     A = torch.zeros(4, 64)
     old_out = old_shared_exp(A.clone(), method="max", axes=[-1])
-    new_out = shared_exponents(A.clone(), method="max", axes=[-1])
+    new_out = _shared_exponents(A.clone(), method="max", axes=[-1])
     assert torch.equal(old_out, new_out)
 
 
 # ---------------------------------------------------------------------------
-# 2. reshape_to_blocks / undo_reshape_to_blocks
+# 2. _reshape_to_blocks / _undo_reshape_to_blocks
 # ---------------------------------------------------------------------------
 
 def test_reshape_undo_blocks_no_padding():
-    from src.quantize.mx_quantize import reshape_to_blocks
+    from src.quantize.mx_quantize import _reshape_to_blocks
     A = torch.randn(2, 64)
     old_A, old_axes, old_orig, old_padded = old_reshape(A.clone(), axes=[-1], block_size=32)
-    new_A, new_axes, new_orig, new_padded = reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
+    new_A, new_axes, new_orig, new_padded = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
     assert torch.equal(old_A, new_A)
 
 
 def test_reshape_undo_blocks_with_padding():
-    from src.quantize.mx_quantize import reshape_to_blocks
+    from src.quantize.mx_quantize import _reshape_to_blocks
     A = torch.randn(2, 48)
     old_A, old_axes, old_orig, old_padded = old_reshape(A.clone(), axes=[-1], block_size=32)
-    new_A, new_axes, new_orig, new_padded = reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
+    new_A, new_axes, new_orig, new_padded = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
     assert torch.equal(old_A, new_A)
 
 
 def test_reshape_undo_roundtrip_no_padding():
-    from src.quantize.mx_quantize import reshape_to_blocks, undo_reshape_to_blocks
+    from src.quantize.mx_quantize import _reshape_to_blocks, _undo_reshape_to_blocks
     A = torch.randn(2, 64)
-    reshaped, axes, orig_shape, padded_shape = reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
-    recovered = undo_reshape_to_blocks(reshaped, padded_shape, orig_shape, axes)
+    reshaped, axes, orig_shape, padded_shape = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
+    recovered = _undo_reshape_to_blocks(reshaped, padded_shape, orig_shape, axes)
     assert torch.equal(A, recovered)
 
 
 def test_reshape_undo_roundtrip_with_padding():
-    from src.quantize.mx_quantize import reshape_to_blocks, undo_reshape_to_blocks
+    from src.quantize.mx_quantize import _reshape_to_blocks, _undo_reshape_to_blocks
     A = torch.randn(2, 48)
-    reshaped, axes, orig_shape, padded_shape = reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
-    recovered = undo_reshape_to_blocks(reshaped, padded_shape, orig_shape, axes)
+    reshaped, axes, orig_shape, padded_shape = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
+    recovered = _undo_reshape_to_blocks(reshaped, padded_shape, orig_shape, axes)
     assert torch.equal(A, recovered)
 
 
 def test_reshape_undo_blocks_3d():
-    from src.quantize.mx_quantize import reshape_to_blocks
+    from src.quantize.mx_quantize import _reshape_to_blocks
     A = torch.randn(2, 4, 64)
     old_A, old_axes, old_orig, old_padded = old_reshape(A.clone(), axes=[-1], block_size=32)
-    new_A, new_axes, new_orig, new_padded = reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
+    new_A, new_axes, new_orig, new_padded = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
     assert torch.equal(old_A, new_A)
 
 
 # ---------------------------------------------------------------------------
-# 3. quantize_mx (core)
+# 3. _quantize_mx (core)
 # ---------------------------------------------------------------------------
 
 MX_FORMATS = ["fp8_e5m2", "fp8_e4m3", "fp6_e3m2", "fp6_e2m3",
@@ -118,63 +118,63 @@ MX_FORMATS = ["fp8_e5m2", "fp8_e4m3", "fp6_e3m2", "fp6_e2m3",
 
 @pytest.mark.parametrize("fmt", MX_FORMATS)
 def test_quantize_mx(fmt):
-    from src.quantize.mx_quantize import quantize_mx
+    from src.quantize.mx_quantize import _quantize_mx
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     old_out = old_quantize_mx(A.clone(), scale_bits=8,
                               elem_format=ElemFormat.from_str(fmt),
                               block_size=32, axes=[-1], round="nearest")
-    new_out = quantize_mx(A.clone(), scale_bits=8, elem_format=fmt,
-                          block_size=32, axes=[-1], round_mode="nearest")
+    new_out = _quantize_mx(A.clone(), scale_bits=8, elem_format=fmt,
+                           block_size=32, axes=[-1], round_mode="nearest")
     assert torch.equal(old_out, new_out), f"mx quantize mismatch for {fmt}"
 
 
 @pytest.mark.parametrize("fmt", ["fp8_e4m3", "int8"])
 def test_quantize_mx_block64(fmt):
-    from src.quantize.mx_quantize import quantize_mx
+    from src.quantize.mx_quantize import _quantize_mx
     torch.manual_seed(42)
     A = torch.randn(4, 128)
     old_out = old_quantize_mx(A.clone(), scale_bits=8,
                               elem_format=ElemFormat.from_str(fmt),
                               block_size=64, axes=[-1], round="nearest")
-    new_out = quantize_mx(A.clone(), scale_bits=8, elem_format=fmt,
-                          block_size=64, axes=[-1], round_mode="nearest")
+    new_out = _quantize_mx(A.clone(), scale_bits=8, elem_format=fmt,
+                           block_size=64, axes=[-1], round_mode="nearest")
     assert torch.equal(old_out, new_out)
 
 
 @pytest.mark.parametrize("fmt", ["fp8_e4m3", "fp4_e2m1"])
 def test_quantize_mx_no_block(fmt):
-    from src.quantize.mx_quantize import quantize_mx
+    from src.quantize.mx_quantize import _quantize_mx
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     old_out = old_quantize_mx(A.clone(), scale_bits=8,
                               elem_format=ElemFormat.from_str(fmt),
                               block_size=0, axes=[-1], round="nearest")
-    new_out = quantize_mx(A.clone(), scale_bits=8, elem_format=fmt,
-                          block_size=0, axes=[-1], round_mode="nearest")
+    new_out = _quantize_mx(A.clone(), scale_bits=8, elem_format=fmt,
+                           block_size=0, axes=[-1], round_mode="nearest")
     assert torch.equal(old_out, new_out)
 
 
 def test_quantize_mx_none_format():
-    from src.quantize.mx_quantize import quantize_mx
+    from src.quantize.mx_quantize import _quantize_mx
     A = torch.randn(4, 64)
     old_out = old_quantize_mx(A.clone(), scale_bits=8, elem_format=None,
                               block_size=32, axes=[-1])
-    new_out = quantize_mx(A.clone(), scale_bits=8, elem_format=None,
-                          block_size=32, axes=[-1])
+    new_out = _quantize_mx(A.clone(), scale_bits=8, elem_format=None,
+                           block_size=32, axes=[-1])
     assert torch.equal(old_out, new_out)
 
 
 @pytest.mark.parametrize("fmt", ["fp8_e4m3", "int8"])
 def test_quantize_mx_floor_round(fmt):
-    from src.quantize.mx_quantize import quantize_mx
+    from src.quantize.mx_quantize import _quantize_mx
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     old_out = old_quantize_mx(A.clone(), scale_bits=8,
                               elem_format=ElemFormat.from_str(fmt),
                               block_size=32, axes=[-1], round="floor")
-    new_out = quantize_mx(A.clone(), scale_bits=8, elem_format=fmt,
-                          block_size=32, axes=[-1], round_mode="floor")
+    new_out = _quantize_mx(A.clone(), scale_bits=8, elem_format=fmt,
+                           block_size=32, axes=[-1], round_mode="floor")
     assert torch.equal(old_out, new_out)
 
 

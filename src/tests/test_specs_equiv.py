@@ -118,3 +118,44 @@ def test_mx_assert_test():
     # With valid specs, should not raise
     specs = old_finalize({"bfloat": 16})
     mx_assert_test(specs)  # no exception
+
+
+# ---------------------------------------------------------------------------
+# 6. add_mx_args / get_mx_specs (argparse bridge)
+# ---------------------------------------------------------------------------
+
+def test_add_mx_args_and_get_mx_specs():
+    import argparse
+    from mx.specs import add_mx_args as old_add, get_mx_specs as old_get
+    from src.specs.specs import add_mx_args, get_mx_specs
+
+    # Build old and new parsers
+    old_parser = argparse.ArgumentParser()
+    old_parser = old_add(old_parser)
+    new_parser = argparse.ArgumentParser()
+    new_parser = add_mx_args(new_parser)
+
+    # Test with no args (should return None — no quantization)
+    old_args = old_parser.parse_args([])
+    new_args = new_parser.parse_args([])
+    old_result = old_get(old_args)
+    new_result = get_mx_specs(new_args)
+    assert old_result is None and new_result is None, "No-args should return None"
+
+    # Test with bfloat=16
+    old_parser2 = argparse.ArgumentParser()
+    old_parser2 = old_add(old_parser2)
+    new_parser2 = argparse.ArgumentParser()
+    new_parser2 = add_mx_args(new_parser2)
+
+    old_args2 = old_parser2.parse_args([])
+    old_args2.bfloat = 16
+    new_args2 = new_parser2.parse_args([])
+    new_args2.bfloat = 16
+
+    old_result2 = old_get(old_args2)
+    new_result2 = get_mx_specs(new_args2)
+
+    for key in ALL_SPEC_KEYS:
+        assert new_result2[key] == old_result2[key], \
+            f"argparse bridge mismatch for {key!r}: {new_result2[key]} != {old_result2[key]}"

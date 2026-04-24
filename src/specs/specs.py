@@ -1,10 +1,11 @@
 """
 MxSpecs: quantization configuration system.
 
-Faithful migration from mx/specs.py. MxSpecs is a 39-key dict
+Faithful migration from mx/specs.py. MxSpecs is a 30-key dict
 controlling all quantization behavior (formats, rounding, block sizes, etc.).
 """
 import os
+import argparse
 import json
 import traceback
 import collections
@@ -61,7 +62,8 @@ class MxSpecs(collections.UserDict):
 
         self.help_strings = {
             "scale_bits": "Bits (sign + magnitude) to use for shared exponent/scale",
-            "w_elem_format": "Weight MX elem format",
+            "w_elem_format": "Weight MX elem format, one of {fp8_e5m2, fp8_e4m3, "
+                             "fp6_e3m2, fp6_e2m3, fp4_e2m1, int8, int4}",
             "a_elem_format": "Activation MX elem format. See w_elem_format",
             "w_elem_format_bp": "Backpass weight MX elem format. See w_elem_format",
             "a_elem_format_bp": "Backpass stashed activation MX elem format. See w_elem_format",
@@ -69,10 +71,12 @@ class MxSpecs(collections.UserDict):
             "a_elem_format_bp_os": "Backpass act (grad) MX elem format. See w_elem_format",
             "mx_flush_fp32_subnorms": "MX quantization flushes blocks with "
                                       "subnormal shared scale to zero",
-            "shared_exp_method": "Shared exponent calculation method. Options: max, none",
+            "shared_exp_method": "Shared exponent calculation method. " "Options: max, none",
             "block_size": "mx shared exponent block size",
-            "bfloat": "BfloatX format (8exp + sign + mantissa). Only one of bfloat or fp can be used",
-            "fp": "fpX format (5exp + sign + mantissa). Only one of bfloat or fp can be used",
+            "bfloat":
+                "BfloatX format (8exp + sign + mantissa). Only one of bfloat or fp can be used",
+            "fp":
+                "fpX format (5exp + sign + mantissa). Only one of bfloat or fp can be used",
             "bfloat_subnorms": "Bfloat/FP supports subnorms",
             "quantize_backprop": "Enable mx/bfloat quantization on backward pass",
             "round": "Global rounding mode. Choices: nearest, floor",
@@ -161,6 +165,7 @@ def finalize_mx_specs(specs, early_exit=True):
         return None
 
     if specs.get('custom_cuda'):
+        # Deferred import: specs module should not require torch at import time
         import torch
         assert torch.cuda.is_available(), "'custom_cuda' is only supported on CUDA devices."
 
@@ -203,3 +208,55 @@ def mx_assert_test(mx_specs):
             + f"  {f2.line}"
         )
         raise ValueError(msg)
+
+
+def add_mx_args(parser):
+    """Automatically adds MX args to a parser based on its
+    default type and value."""
+    group = parser.add_argument_group("mx", "MX specs")
+
+    group.add_argument(
+        "--mx_dir", type=str, default=None, help="Path to mx library"
+    )
+
+    default_specs = get_default_mx_specs()
+    for k, v in default_specs.items():
+        help_str = default_specs.help_strings[k]
+        help_str = "No help string" if help_str == "" else help_str
+
+        # Make sure elem_format is type str
+        if k.find("elem_format") != -1:
+            group.add_argument("--" + k, type=str, default=v, help=help_str)
+        elif type(v) == bool and v is False:
+            group.add_argument("--" + k, action="store_true", help=help_str)
+        elif type(v) == bool and v is True:
+            group.add_argument("--no_" + k, action="store_true", help=help_str)
+        else:
+            group.add_argument("--" + k, type=type(v), default=None, help=help_str)
+
+    group.add_argument("--skip_early_exit", action="store_true",
+                       help="Don't early exit if no quantization is specified", default=False)
+
+    return parser
+
+
+def get_mx_specs(parsed_args):
+    """Call this on the output of parser.parse_args()"""
+    default_specs = get_default_mx_specs()
+
+    parsed_specs = {}
+    for k, v in default_specs.items():
+        if type(v) == bool and v is True:
+            arg_k = "no_" + k
+            if hasattr(parsed_args, arg_k):
+                parsed_specs[k] = not parsed_args.__getattribute__(arg_k)
+        else:
+            if hasattr(parsed_args, k):
+                parsed_specs[k] = parsed_args.__getattribute__(k)
+
+    if hasattr(parsed_args, "skip_early_exit"):
+        early_exit = not parsed_args.skip_early_exit
+    else:
+        early_exit = True
+
+    return finalize_mx_specs(parsed_specs, early_exit=early_exit)
