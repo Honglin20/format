@@ -40,3 +40,16 @@ class FPFormat(FormatBase):
 
         self.min_norm = compute_min_norm(ebits)
         self._freeze()
+
+    def __eq__(self, other):
+        return (isinstance(other, FPFormat)
+                and self.name == other.name
+                and self.ebits == other.ebits
+                and self.mbits == other.mbits
+                and self.max_norm == other.max_norm)
+
+    def __hash__(self):
+        return hash(("FPFormat", self.name, self.ebits, self.mbits))
+
+    def quantize(self, x, granularity, round_mode="nearest"):
+        return super().quantize(x, granularity, round_mode)

@@ -25,3 +25,12 @@ class IntFormat(FormatBase):
         self.max_norm = float(2 ** (self.mbits - 1) - 1) / 2 ** (self.mbits - 2)
         self.min_norm = compute_min_norm(self.ebits)
         self._freeze()
+
+    def __eq__(self, other):
+        return isinstance(other, IntFormat) and self.name == other.name and self.mbits == other.mbits
+
+    def __hash__(self):
+        return hash(("IntFormat", self.name, self.mbits))
+
+    def quantize(self, x, granularity, round_mode="nearest"):
+        return super().quantize(x, granularity, round_mode)
