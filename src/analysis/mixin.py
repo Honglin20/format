@@ -4,11 +4,13 @@ ObservableMixin: no-op skeleton for quantized operators.
 Phase 3: _emit does nothing (early return when _observers is empty).
 Phase 4: AnalysisContext will populate _observers to enable event dispatch.
 """
-from typing import List, Optional
+from typing import Optional
 
+import torch
 from torch import Tensor
 
 from src.scheme.quant_scheme import QuantScheme
+from src.analysis.events import QuantEvent
 
 
 class ObservableMixin:
@@ -19,8 +21,16 @@ class ObservableMixin:
     to populate _observers and dispatch events.
     """
 
-    _observers: list = []
     _analysis_name: Optional[str] = None
+
+    @property
+    def _observers(self) -> list:
+        """Instance-level observer list. Defaults to empty per instance."""
+        return getattr(self, "__observers", [])
+
+    @_observers.setter
+    def _observers(self, value: list):
+        object.__setattr__(self, "__observers", value)
 
     def _emit(self, role: str, pipeline_index: int, stage: str,
               fp32: Tensor, quant: Tensor, scheme: QuantScheme,
@@ -29,9 +39,9 @@ class ObservableMixin:
 
         No-op when no observers are attached (zero overhead).
         """
-        if not self._observers:
+        observers = self._observers
+        if not observers:
             return
-        from src.analysis.events import QuantEvent
         event = QuantEvent(
             layer_name=self._analysis_name or type(self).__name__,
             role=role,
@@ -42,5 +52,5 @@ class ObservableMixin:
             scheme=scheme,
             group_map=group_map.detach() if group_map is not None else None,
         )
-        for obs in self._observers:
+        for obs in observers:
             obs.on_event(event)

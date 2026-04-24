@@ -4,8 +4,8 @@ Tests for ObservableMixin + QuantEvent — P3.1-b.
 Key invariants:
 - No observers → _emit returns immediately (zero overhead)
 - With observers → QuantEvent is dispatched with correct fields
-- QuantEvent is frozen (immutable)
-- ObservableMixin._observers defaults to empty list
+- QuantEvent is frozen (immutable) and validates all fields
+- ObservableMixin._observers is instance-level (not shared across instances)
 """
 import pytest
 import torch
@@ -19,6 +19,16 @@ from src.scheme.quant_scheme import QuantScheme
 
 def _s(fmt="fp8_e4m3"):
     return QuantScheme(format=fmt)
+
+
+def _valid_event_kwargs(**overrides):
+    """Minimal valid QuantEvent kwargs for testing."""
+    kw = dict(
+        layer_name="test", role="input", pipeline_index=0, stage="input_pre_quant",
+        fp32_tensor=torch.randn(2), quant_tensor=torch.randn(2), scheme=_s(),
+    )
+    kw.update(overrides)
+    return kw
 
 
 # ---------------------------------------------------------------------------
@@ -35,12 +45,20 @@ def test_mixin_default_observers_empty():
     assert op._observers == []
 
 
+def test_mixin_observers_not_shared_across_instances():
+    """C1 fix: _observers must be per-instance, not class-level."""
+    op1 = _DummyOperator()
+    op2 = _DummyOperator()
+    assert op1._observers is not op2._observers
+    op1._observers = ["x"]
+    assert op2._observers == []
+
+
 def test_mixin_emit_no_op_without_observers():
     """_emit must return immediately when no observers attached."""
     op = _DummyOperator()
     x = torch.randn(3, 4)
     s = _s()
-    # Should not raise or do anything
     op._emit("input", 0, "input_pre_quant", fp32=x, quant=x, scheme=s)
 
 
@@ -73,7 +91,7 @@ def test_mixin_emit_dispatches_to_observers():
 def test_mixin_emit_detaches_tensors():
     """QuantEvent tensors must be detached (no grad graph)."""
     x = torch.randn(3, 4, requires_grad=True)
-    q = x + 1  # still in grad graph
+    q = x + 1
 
     received = []
     class _Collector(ObserverBase):
@@ -139,14 +157,11 @@ def test_mixin_dispatches_to_multiple_observers():
 
 
 # ---------------------------------------------------------------------------
-# QuantEvent — frozen dataclass
+# QuantEvent — frozen dataclass + validation (C2)
 # ---------------------------------------------------------------------------
 
 def test_quant_event_is_frozen():
-    evt = QuantEvent(
-        layer_name="test", role="input", pipeline_index=0, stage="input_pre_quant",
-        fp32_tensor=torch.randn(2), quant_tensor=torch.randn(2), scheme=_s(),
-    )
+    evt = QuantEvent(**_valid_event_kwargs())
     with pytest.raises(AttributeError):
         evt.role = "output"
 
@@ -165,3 +180,61 @@ def test_quant_event_construction():
     assert evt.stage == "weight_pre_quant"
     assert evt.scheme == s
     assert evt.group_map is None
+
+
+# --- QuantEvent validation: layer_name ---
+def test_quant_event_empty_layer_name_raises():
+    with pytest.raises(TypeError, match="layer_name must be a non-empty str"):
+        QuantEvent(**_valid_event_kwargs(layer_name=""))
+
+
+def test_quant_event_non_str_layer_name_raises():
+    with pytest.raises(TypeError, match="layer_name must be a non-empty str"):
+        QuantEvent(**_valid_event_kwargs(layer_name=123))
+
+
+# --- QuantEvent validation: role ---
+def test_quant_event_empty_role_raises():
+    with pytest.raises(TypeError, match="role must be a non-empty str"):
+        QuantEvent(**_valid_event_kwargs(role=""))
+
+
+def test_quant_event_non_str_role_raises():
+    with pytest.raises(TypeError, match="role must be a non-empty str"):
+        QuantEvent(**_valid_event_kwargs(role=42))
+
+
+# --- QuantEvent validation: pipeline_index ---
+def test_quant_event_negative_pipeline_index_raises():
+    with pytest.raises(ValueError, match="pipeline_index must be a non-negative int"):
+        QuantEvent(**_valid_event_kwargs(pipeline_index=-1))
+
+
+# --- QuantEvent validation: stage ---
+def test_quant_event_empty_stage_raises():
+    with pytest.raises(TypeError, match="stage must be a non-empty str"):
+        QuantEvent(**_valid_event_kwargs(stage=""))
+
+
+# --- QuantEvent validation: fp32_tensor ---
+def test_quant_event_non_tensor_fp32_raises():
+    with pytest.raises(TypeError, match="fp32_tensor must be a Tensor"):
+        QuantEvent(**_valid_event_kwargs(fp32_tensor=[1, 2, 3]))
+
+
+# --- QuantEvent validation: quant_tensor ---
+def test_quant_event_non_tensor_quant_raises():
+    with pytest.raises(TypeError, match="quant_tensor must be a Tensor"):
+        QuantEvent(**_valid_event_kwargs(quant_tensor=[1, 2, 3]))
+
+
+# --- QuantEvent validation: scheme ---
+def test_quant_event_non_scheme_raises():
+    with pytest.raises(TypeError, match="scheme must be a QuantScheme"):
+        QuantEvent(**_valid_event_kwargs(scheme="fp8_e4m3"))
+
+
+# --- QuantEvent validation: group_map ---
+def test_quant_event_invalid_group_map_raises():
+    with pytest.raises(TypeError, match="group_map must be a Tensor or None"):
+        QuantEvent(**_valid_event_kwargs(group_map="bad"))

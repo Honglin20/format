@@ -154,10 +154,39 @@ def test_unknown_granularity_mode_raises():
 # ---------------------------------------------------------------------------
 
 def test_slice_key_is_tuple_of_strings():
-    """SliceKey is Tuple[str, ...] — first element is always a string tag."""
+    """SliceKey — first element is always a string tag."""
     fp32 = torch.randn(3, 4)
     quant = torch.randn(3, 4)
     g = GranularitySpec.per_channel(axis=0)
     for key, _, _ in iter_slices(fp32, quant, g):
         assert isinstance(key, tuple)
         assert isinstance(key[0], str)
+
+
+# ---------------------------------------------------------------------------
+# PER_CHANNEL out-of-bounds (M1 fix)
+# ---------------------------------------------------------------------------
+
+def test_per_channel_out_of_bounds_positive_raises():
+    fp32 = torch.randn(3, 4)
+    quant = torch.randn(3, 4)
+    g = GranularitySpec.per_channel(axis=5)
+    with pytest.raises(ValueError, match="out of range"):
+        list(iter_slices(fp32, quant, g))
+
+
+def test_per_channel_out_of_bounds_negative_raises():
+    fp32 = torch.randn(3, 4)
+    quant = torch.randn(3, 4)
+    g = GranularitySpec.per_channel(axis=-100)
+    with pytest.raises(ValueError, match="out of range"):
+        list(iter_slices(fp32, quant, g))
+
+
+# ---------------------------------------------------------------------------
+# DYNAMIC_GROUP block_size validation (M3 fix)
+# ---------------------------------------------------------------------------
+
+def test_dynamic_group_rejects_nonzero_block_size():
+    with pytest.raises(ValueError, match="DYNAMIC_GROUP requires block_size=0"):
+        GranularitySpec(mode=GranularityMode.DYNAMIC_GROUP, block_size=5)

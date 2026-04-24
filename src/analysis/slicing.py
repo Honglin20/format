@@ -3,13 +3,13 @@ iter_slices: granularity-aware tensor slicing for analysis.
 
 Single entry point — new granularity modes only need a branch here.
 """
-from typing import Iterator, Optional, Tuple
+from typing import Any, Iterator, Optional, Tuple
 
 from torch import Tensor
 
 from src.scheme.granularity import GranularityMode, GranularitySpec
 
-SliceKey = Tuple[str, ...]
+SliceKey = Tuple[Any, ...]  # First element is a str tag (e.g. "channel"), rest are identifiers
 
 
 def iter_slices(
@@ -38,6 +38,11 @@ def iter_slices(
         axis = granularity.channel_axis
         if axis < 0:
             axis = fp32.ndim + axis
+        if not (0 <= axis < fp32.ndim):
+            raise ValueError(
+                f"channel_axis={granularity.channel_axis} out of range "
+                f"for tensor with ndim={fp32.ndim}"
+            )
         for i in range(fp32.shape[axis]):
             yield ("channel", i), fp32.select(axis, i), quant.select(axis, i)
 

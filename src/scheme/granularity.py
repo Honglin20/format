@@ -48,6 +48,10 @@ class GranularitySpec:
             raise ValueError(
                 f"{self.mode.name} requires channel_axis=0, got {self.channel_axis}"
             )
+        if self.mode == GranularityMode.DYNAMIC_GROUP and self.block_size != 0:
+            raise ValueError(
+                f"DYNAMIC_GROUP requires block_size=0, got {self.block_size}"
+            )
 
     @staticmethod
     def per_tensor() -> "GranularitySpec":
