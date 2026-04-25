@@ -2,6 +2,7 @@
 
 **Task ID**: Phase 4 — 层级误差分析（单配置）
 **Design**: `docs/plans/2026-04-26-phase4-design.md`
+**Plan**: `docs/plans/2026-04-26-phase4-implementation.md`
 **Branch**: `feature/refactor-src`
 
 ---
