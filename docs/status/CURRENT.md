@@ -15,9 +15,9 @@
 - [x] P3.2: Conv + ConvTranspose（44 tests）
 - [x] P3.3: BatchNorm/LayerNorm/GroupNorm/RMSNorm（32 tests）
 - [x] P3.4: Activation/Softmax/AdaptiveAvgPool2d（bit-exact）
-- [ ] **缺陷修复（fix-spec，进行中）**
-- [ ] P3.5: Elemwise/SIMD/Vector ops
-- [ ] P3.6: mapping + 端到端验证
+- [x] **缺陷修复（fix-spec，已完成）** — 8 个子任务全部修复
+- [x] P3.5: Elemwise/SIMD/Vector ops（46 个等价性测试）
+- [x] P3.6: mapping + 端到端验证（8 个 E2E 测试）
 
 ---
 
@@ -43,27 +43,39 @@
 - [x] **subtask-fix-2**: M1 — Activation/Softmax/Pool `__init__` 接口统一 + `_compat.py` 适配器返回值变更 + 5 条新测试
 - [x] **subtask-fix-3**: M3 — `_compat.py::_matmul_backward_pipelines` round_key 修正
 - [x] **subtask-fix-4**: C1 — Linear/Conv/Matmul/BMM 的 `emit_fn` 接入 + 4 条 observer 测试
-- [ ] **subtask-fix-5**: C1 — Norm/Activation/Softmax/Pool 的 `emit_fn` 接入（Act/Softmax/Pool done，Norm 进行中 — agent running）
+- [x] **subtask-fix-5**: C1 — Norm/Activation/Softmax/Pool 的 `emit_fn` 接入
 - [x] **subtask-fix-6**: m1 — QuantizedLinear passthrough 缓存到 `_is_passthrough`
 - [x] **subtask-fix-7**: m3 — QuantizedGELU `inner_scheme=None` 条件修正
 - [x] **subtask-fix-8**: m5 — 删除 `src/ops/nn/` 空目录
-- [ ] **P3.5**: Elemwise/SIMD/Vector ops
-- [ ] **P3.6**: mapping + 端到端验证
+---
+
+## Phase 3 完成总结
+
+| 阶段 | 状态 | 测试数 |
+|---|---|---|
+| P3.1 Matmul 家族 | 完成 | Linear/Matmul/BMM + emit_fn |
+| P3.2 Conv | 完成 | Conv1d/2d/3d + ConvTranspose |
+| P3.3 Norm | 完成 | BN/LN/GN/RMS + emit_fn |
+| P3.4 Activation/Softmax/Pool | 完成 | 7 Act + Softmax + Pool |
+| P3.5 Elemwise/SIMD | 完成 | 10 SIMD ops + 46 tests |
+| P3.6 Mapping + E2E | 完成 | quantize_model + 8 E2E tests |
+| 缺陷修复 | 完成 | M1/M2/M3 + C1 emit_fn + m1/m3/m5 |
+
+**总计：730 tests passed，bit-exact**
 
 ---
 
 ## 下一步（具体动作）
 
-Norm emit_fn agent 完成后 → 运行全量测试 → commit → 进入 P3.5
+Phase 3 全部完成。可进入 Phase 4（层级误差分析）或清理收尾。
 
 ---
 
 ## 断点续传必读文件
 
-1. `docs/plans/2026-04-24-phase3.md`（P3.5 + P3.6 章节）— 剩余任务规划
-2. `src/quantize/vector.py`（全文）— 已有 vec_* 函数清单
-3. `mx/simd_ops.py`（全文）— SIMD autograd.Function 参考
-4. `src/tests/test_vector_equiv.py`（全文）— 已有向量等价性测试
+1. `docs/plans/2026-04-24-phase3.md`（全文）— Phase 3 完成记录
+2. `docs/architecture/002-observer-analysis.md` — Phase 4 设计参考
+3. `src/analysis/mixin.py`（全文）— Observer 基础设施
 
 ---
 
