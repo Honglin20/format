@@ -206,10 +206,11 @@ class QuantizedLinear(ObservableMixin, nn.Linear):
     ):
         super().__init__(in_features, out_features, bias)
         self.cfg = cfg or OpQuantConfig()
+        self._is_passthrough = self.cfg == OpQuantConfig()
         self._analysis_name = name
 
     def forward(self, x):
-        if self.cfg == OpQuantConfig():
+        if self._is_passthrough:
             return F.linear(x, self.weight, self.bias)
 
         emit_fn = self._emit if self._observers else None

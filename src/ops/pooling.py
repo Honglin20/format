@@ -25,8 +25,9 @@ def _end_index(a, b, c):
 
 class AdaptiveAvgPool2dFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, output_size, inner_scheme, quantize_backprop=True, name=None):
+    def forward(ctx, input, output_size, inner_scheme, quantize_backprop=True, name=None, emit_fn=None):
         ctx.name = name
+        ctx.emit_fn = emit_fn
 
         sizeB, sizeD, isizeH, isizeW = input.size()
 
@@ -104,7 +105,7 @@ class AdaptiveAvgPool2dFunction(torch.autograd.Function):
                     scheme,
                 )
 
-        return (grad_input, None, None, None, None)
+        return (grad_input, None, None, None, None, None)
 
 
 class QuantizedAdaptiveAvgPool2d(ObservableMixin, nn.Module):
@@ -129,7 +130,8 @@ class QuantizedAdaptiveAvgPool2d(ObservableMixin, nn.Module):
         quantize_backprop = bool(self.cfg.grad_input)
         if inner_scheme is None:
             return _f_adaptive_avg_pool2d(input, self.output_size)
+        emit_fn = self._emit if self._observers else None
         return AdaptiveAvgPool2dFunction.apply(
             input, self.output_size, inner_scheme,
-            quantize_backprop, self._analysis_name,
+            quantize_backprop, self._analysis_name, emit_fn,
         )

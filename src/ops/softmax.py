@@ -20,14 +20,17 @@ LN_2_BF16 = 0.69140625  # ln(2) in bfloat16 precision
 class SoftmaxFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, dim, inner_scheme, softmax_exp2=False,
-                quantize_backprop=True, name=None):
+                quantize_backprop=True, name=None, emit_fn=None):
         if dim < 0:
             dim = dim + len(input.shape)
         ctx.dim = dim
         ctx.softmax_exp2 = softmax_exp2
         ctx.name = name
+        ctx.emit_fn = emit_fn
 
+        fp_in = input
         input = vec_quantize(input, inner_scheme)
+        if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, inner_scheme)
 
         # compute max
         max_data, _ = input.max(dim, keepdim=True)
@@ -55,8 +58,11 @@ class SoftmaxFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         output, = ctx.saved_tensors
         scheme = ctx.inner_scheme_bw
+        emit_fn = ctx.emit_fn
 
+        fp_go = grad_output
         grad_output = vec_quantize(grad_output, scheme)
+        if emit_fn: emit_fn("grad_output", 0, "grad_output_pre_quant", fp_go, grad_output, scheme)
 
         # dot product
         grad_input = vec_mul(grad_output, output, scheme)
@@ -71,7 +77,7 @@ class SoftmaxFunction(torch.autograd.Function):
         if ctx.softmax_exp2:
             grad_input = vec_mul(grad_input, LN_2_BF16, scheme)
 
-        return (grad_input, None, None, None, None, None)
+        return (grad_input, None, None, None, None, None, None)
 
 
 class QuantizedSoftmax(ObservableMixin, nn.Softmax):
@@ -97,7 +103,8 @@ class QuantizedSoftmax(ObservableMixin, nn.Softmax):
         quantize_backprop = bool(self.cfg.grad_input)
         if inner_scheme is None:
             return super().forward(input)
+        emit_fn = self._emit if self._observers else None
         return SoftmaxFunction.apply(
             input, self.dim, inner_scheme, self.softmax_exp2,
-            quantize_backprop, self._analysis_name,
+            quantize_backprop, self._analysis_name, emit_fn,
         )
