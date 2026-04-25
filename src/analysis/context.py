@@ -33,11 +33,21 @@ class AnalysisContext:
                 module._observers = []
 
     def report(self):
-        """Aggregate all observer data into a Report."""
+        """Aggregate all observer data into a Report.
+
+        Uses deep merge so metrics from different observers on the same
+        slice are combined rather than overwritten.
+        """
         raw = {}
         for obs in self.observers:
             for layer, role_map in obs.report().items():
-                raw.setdefault(layer, {}).update(role_map)
+                layer_data = raw.setdefault(layer, {})
+                for role, stages in role_map.items():
+                    role_data = layer_data.setdefault(role, {})
+                    for stage, slices in stages.items():
+                        stage_data = role_data.setdefault(stage, {})
+                        for slice_key, metrics in slices.items():
+                            stage_data.setdefault(slice_key, {}).update(metrics)
         return Report(raw)
 
     def step(self):

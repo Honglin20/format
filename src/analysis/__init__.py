@@ -1,10 +1,12 @@
 """
 Analysis infrastructure for quantized operators.
 
-Phase 3 lands the skeleton (ObservableMixin + QuantEvent + iter_slices).
-Phase 4 adds AnalysisContext and concrete Observer implementations.
+Phase 4: full AnalysisContext + concrete Observers + Report + Distribution taxonomy.
 """
 from .events import QuantEvent
 from .mixin import ObservableMixin
 from .observer import ObserverBase, SliceAwareObserver
 from .slicing import iter_slices, SliceKey
+from .observers import DistributionObserver, QSNRObserver, MSEObserver, HistogramObserver
+from .context import AnalysisContext
+from .report import Report

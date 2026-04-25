@@ -232,3 +232,69 @@ class TestAnalysisContext:
             ctx.step()
             # After warmup, no data should be accumulated (emit_fn not wired here)
             assert len(obs.report()) == 0
+
+
+from src.quantize import quantize
+from src.scheme.quant_scheme import QuantScheme
+from src.formats.base import FormatBase
+from src.scheme.granularity import GranularitySpec, GranularityMode
+from src.scheme.transform import IdentityTransform
+
+
+class TestEndToEnd:
+    """End-to-end: quantized model + AnalysisContext → report."""
+
+    def test_two_layer_linear_e2e(self):
+        from src.ops.linear import QuantizedLinear
+        from src.scheme.op_config import OpQuantConfig
+
+        fmt = FormatBase.from_str("fp8_e4m3")
+        scheme = QuantScheme(
+            format=fmt,
+            granularity=GranularitySpec(mode=GranularityMode.PER_TENSOR),
+            transform=IdentityTransform(),
+        )
+        cfg = OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+
+        class TwoLayer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layer0 = QuantizedLinear(8, 4, bias=False, cfg=cfg, name="layer0")
+                self.layer1 = QuantizedLinear(4, 2, bias=False, cfg=cfg, name="layer1")
+
+            def forward(self, x):
+                return self.layer1(self.layer0(x))
+
+        model = TwoLayer()
+        observers = [DistributionObserver(), QSNRObserver(), MSEObserver()]
+        x = torch.randn(3, 8)
+
+        with AnalysisContext(model, observers) as ctx:
+            model(x)
+
+        report = ctx.report()
+        assert len(report.keys()) >= 2
+        for name in report.keys():
+            assert "layer" in name.lower()
+
+        df = report.to_dataframe()
+        assert len(df) > 0
+        assert "qsnr_db" in df.columns
+        assert "dynamic_range_bits" in df.columns
+
+    def test_empty_observers_no_crash(self):
+        from src.ops.linear import QuantizedLinear
+        from src.scheme.op_config import OpQuantConfig
+
+        fmt = FormatBase.from_str("fp8_e4m3")
+        scheme = QuantScheme(
+            format=fmt,
+            granularity=GranularitySpec(mode=GranularityMode.PER_TENSOR),
+            transform=IdentityTransform(),
+        )
+        cfg = OpQuantConfig(input=(scheme,), weight=(scheme,))
+
+        model = QuantizedLinear(8, 4, bias=False, cfg=cfg, name="test_layer")
+        x = torch.randn(2, 8)
+        y = model(x)
+        assert y.shape == (2, 4)
