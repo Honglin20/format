@@ -197,3 +197,158 @@ class DistributionTaxonomy:
                 example = (data["representative_layers"][0]
                            if data["representative_layers"] else "N/A")
                 print(f"  [ASCII histogram: see HistogramObserver data for {example}]")
+
+
+class ErrorByDistribution:
+    """Correlate quantization error with distribution features."""
+
+    def __init__(self, report: Report):
+        self._report = report
+        self._samples = []
+        for layer, roles in report._raw.items():
+            for role, stages in roles.items():
+                for stage, slices in stages.items():
+                    for slice_key, metrics in slices.items():
+                        if "qsnr_db" in metrics or "mse" in metrics:
+                            self._samples.append({
+                                "layer": layer,
+                                "role": role,
+                                "stage": stage,
+                                **metrics,
+                            })
+
+    def rank_layers(self, by="qsnr_db", role=None, ascending=True, k=None):
+        samples = self._samples
+        if role:
+            samples = [s for s in samples if s["role"] == role]
+        if by not in ("qsnr_db", "mse"):
+            raise ValueError(f"Unknown metric: {by}")
+
+        reverse = not ascending if by == "qsnr_db" else ascending
+        sorted_samples = sorted(samples, key=lambda s: s.get(by, 0), reverse=reverse)
+        if k:
+            sorted_samples = sorted_samples[:k]
+        return [(s["layer"], s["role"], s.get(by, 0)) for s in sorted_samples]
+
+    def group_by_range(self, role=None, bins=None):
+        if bins is None:
+            bins = [0, 4, 7, 999]
+
+        samples = self._samples
+        if role:
+            samples = [s for s in samples if s["role"] == role]
+        samples = [s for s in samples if "dynamic_range_bits" in s]
+
+        groups = {}
+        for s in samples:
+            dr = s["dynamic_range_bits"]
+            bucket = None
+            for i in range(len(bins) - 1):
+                if bins[i] <= dr < bins[i + 1]:
+                    bucket = f"{bins[i]}-{bins[i+1]} bits"
+                    break
+            if bucket is None:
+                bucket = f"{bins[-1]}+ bits"
+
+            entry = groups.setdefault(bucket, {
+                "count": 0, "_qsnr_sum": 0.0, "_mse_sum": 0.0,
+            })
+            entry["count"] += 1
+            if "qsnr_db" in s:
+                entry["_qsnr_sum"] += s["qsnr_db"]
+            if "mse" in s:
+                entry["_mse_sum"] += s["mse"]
+
+        result = {}
+        for bucket, entry in groups.items():
+            avg_qsnr = entry["_qsnr_sum"] / entry["count"] if entry["count"] > 0 else 0
+            if avg_qsnr >= 35:
+                verdict = "excellent"
+            elif avg_qsnr >= 25:
+                verdict = "good"
+            elif avg_qsnr >= 15:
+                verdict = "acceptable"
+            elif avg_qsnr >= 10:
+                verdict = "poor — format insufficient"
+            else:
+                verdict = "critical"
+
+            result[bucket] = {
+                "avg_qsnr": avg_qsnr,
+                "avg_mse": entry["_mse_sum"] / entry["count"] if entry["count"] > 0 else 0,
+                "count": entry["count"],
+                "verdict": verdict,
+            }
+        return result
+
+    def print_correlation(self):
+        print("=== Error by Distribution ===")
+        groups = self.group_by_range()
+        for bucket, stats in sorted(groups.items()):
+            print(f"  {bucket}: avg QSNR={stats['avg_qsnr']:.1f} dB, "
+                  f"MSE={stats['avg_mse']:.2e}, count={stats['count']}, "
+                  f"verdict: {stats['verdict']}")
+
+
+class LayerSensitivity:
+    """Global sensitivity ranking for quantized layers."""
+
+    def __init__(self, report: Report):
+        self._report = report
+        self._samples = []
+        for layer, roles in report._raw.items():
+            for role, stages in roles.items():
+                for stage, slices in stages.items():
+                    for slice_key, metrics in slices.items():
+                        if "mse" not in metrics and "qsnr_db" not in metrics:
+                            continue
+                        name_lower = layer.lower()
+                        if "linear" in name_lower:
+                            ltype = "Linear"
+                        elif "conv" in name_lower:
+                            ltype = "Conv"
+                        elif "norm" in name_lower:
+                            ltype = "Norm"
+                        elif "act" in name_lower or "relu" in name_lower or "gelu" in name_lower:
+                            ltype = "Activation"
+                        else:
+                            ltype = "Other"
+                        self._samples.append({
+                            "layer": layer,
+                            "layer_type": ltype,
+                            "role": role,
+                            **metrics,
+                        })
+
+    def topk(self, k=10, role=None, metric="mse"):
+        samples = self._samples
+        if role:
+            samples = [s for s in samples if s["role"] == role]
+        reverse = True if metric == "mse" else False
+        sorted_samples = sorted(samples, key=lambda s: s.get(metric, 0), reverse=reverse)
+        return [(s["layer"], s["role"], s.get(metric, 0), s.get("layer_type", "?"))
+                for s in sorted_samples[:k]]
+
+    def by_layer_type(self) -> dict:
+        result = {}
+        for s in self._samples:
+            lt = s["layer_type"]
+            entry = result.setdefault(lt, {
+                "count": 0, "_mse_sum": 0.0, "_qsnr_sum": 0.0, "layers": [],
+            })
+            entry["count"] += 1
+            entry["_mse_sum"] += s.get("mse", 0)
+            entry["_qsnr_sum"] += s.get("qsnr_db", 0)
+            if s["layer"] not in entry["layers"]:
+                entry["layers"].append(s["layer"])
+
+        for lt, entry in result.items():
+            entry["avg_mse"] = entry["_mse_sum"] / entry["count"] if entry["count"] > 0 else 0
+            entry["avg_qsnr_db"] = entry["_qsnr_sum"] / entry["count"] if entry["count"] > 0 else 0
+            del entry["_mse_sum"], entry["_qsnr_sum"]
+
+        return result
+
+    def above_threshold(self, metric="mse", threshold=0.01) -> list:
+        return [(s["layer"], s["role"], s.get(metric, 0))
+                for s in self._samples if s.get(metric, 0) > threshold]

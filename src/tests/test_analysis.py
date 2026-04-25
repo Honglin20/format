@@ -448,3 +448,95 @@ class TestDistributionTaxonomy:
         taxonomy = DistributionTaxonomy.from_report(report)
         taxonomy.print_taxonomy()
         taxonomy.print_taxonomy(ascii_plots=True)
+
+
+from src.analysis.correlation import ErrorByDistribution, LayerSensitivity
+
+
+class TestErrorByDistribution:
+    def make_error_report(self):
+        import math
+        raw = {}
+        for i, (dr, qsnr) in enumerate([
+            (3.0, 45.0), (4.5, 35.0), (7.0, 15.0),
+            (9.0, 6.0), (3.5, 42.0), (5.0, 28.0),
+        ]):
+            raw[f"layer{i}"] = {
+                "input": {
+                    "input_pre_quant[0]": {
+                        ("tensor",): {
+                            "qsnr_db": qsnr,
+                            "mse": 10 ** (-qsnr / 10),
+                            "dynamic_range_bits": dr,
+                        },
+                    }
+                }
+            }
+        from src.analysis.report import Report
+        return Report(raw)
+
+    def test_rank_layers(self):
+        report = self.make_error_report()
+        eb = ErrorByDistribution(report)
+
+        ranked = eb.rank_layers(by="qsnr_db", k=3, ascending=True)
+        assert len(ranked) == 3
+        assert ranked[0][2] == pytest.approx(6.0, abs=0.1)
+        assert ranked[0][0] == "layer3"
+
+    def test_group_by_range(self):
+        report = self.make_error_report()
+        eb = ErrorByDistribution(report)
+
+        groups = eb.group_by_range(role="input", bins=[0, 4, 7, 999])
+        assert "0-4 bits" in groups
+        assert groups["0-4 bits"]["avg_qsnr"] == pytest.approx(43.5, abs=0.1)
+        assert groups["0-4 bits"]["verdict"] == "excellent"
+        assert "7-999 bits" in groups
+        assert groups["7-999 bits"]["avg_qsnr"] == pytest.approx(10.5, abs=0.1)
+
+    def test_print_correlation_no_crash(self):
+        report = self.make_error_report()
+        eb = ErrorByDistribution(report)
+        eb.print_correlation()
+
+
+class TestLayerSensitivity:
+    def make_sensitivity_report(self):
+        raw = {}
+        for i, (ltype, mse) in enumerate([
+            ("Linear", 1e-3), ("Linear", 5e-4), ("Conv", 2e-3),
+            ("Linear", 1e-5), ("Conv", 8e-4),
+        ]):
+            raw[f"layer{i}.{ltype}"] = {
+                "input": {
+                    "input_pre_quant[0]": {
+                        ("tensor",): {"mse": mse, "qsnr_db": 30.0},
+                    }
+                }
+            }
+        from src.analysis.report import Report
+        return Report(raw)
+
+    def test_topk(self):
+        report = self.make_sensitivity_report()
+        sens = LayerSensitivity(report)
+
+        top2 = sens.topk(k=2, metric="mse")
+        assert len(top2) == 2
+        assert top2[0][2] == 0.002
+
+    def test_by_layer_type(self):
+        report = self.make_sensitivity_report()
+        sens = LayerSensitivity(report)
+
+        by_type = sens.by_layer_type()
+        assert "Linear" in by_type
+        assert "Conv" in by_type
+
+    def test_above_threshold(self):
+        report = self.make_sensitivity_report()
+        sens = LayerSensitivity(report)
+
+        above = sens.above_threshold(metric="mse", threshold=1e-3)
+        assert len(above) >= 1
