@@ -39,8 +39,8 @@
 
 ## 待实现子任务（按顺序）
 
-- [ ] **subtask-fix-1**: M2 — `src/analysis/slicing.py` block_axis 修复 + 4 条新测试
-- [ ] **subtask-fix-2**: M1 — Activation/Softmax/Pool `__init__` 接口统一 + `_compat.py` 适配器返回值变更 + 5 条新测试
+- [x] **subtask-fix-1**: M2 — `src/analysis/slicing.py` block_axis 修复 + 4 条新测试
+- [x] **subtask-fix-2**: M1 — Activation/Softmax/Pool `__init__` 接口统一 + `_compat.py` 适配器返回值变更 + 5 条新测试
 - [ ] **subtask-fix-3**: M3 — `_compat.py::_matmul_backward_pipelines` round_key 修正
 - [ ] **subtask-fix-4**: C1 — Linear/Conv/Matmul/BMM 的 `emit_fn` 接入 + 4 条 observer 测试
 - [ ] **subtask-fix-5**: C1 — Norm/Activation/Softmax/Pool 的 `emit_fn` 接入
@@ -52,17 +52,15 @@
 
 ## 下一步（具体动作）
 
-开始 subtask-fix-1：修改 `src/analysis/slicing.py` PER_BLOCK 分支，用 `granularity.block_axis` 构造通用切片 index，然后在 `src/tests/test_slicing.py` 补充 4 条测试（见 fix-spec 文档 M2 章节）。
+开始 subtask-fix-3：修正 `src/tests/_compat.py::_matmul_backward_pipelines` 中 grad_weight round_key 从 `"round_grad_input"` 改为 `"round_grad_weight"`（见 fix-spec 文档和 Phase 3 review 报告 M3 章节）。
 
 ---
 
 ## 断点续传必读文件
 
-1. `docs/plans/2026-04-25-defect-fix-specs.md`（全文）— 三个缺陷的完整修复规范
-2. `src/analysis/slicing.py`（全文）— M2 修复点
-3. `src/ops/activations.py`（1-80 行）— M1 修复样板（Sigmoid 模块类）
-4. `src/analysis/mixin.py`（全文）— C1 emit_fn 模式参考
-5. `src/ops/linear.py`（全文）— C1 emit_fn 实现参考（matmul 族代表）
+1. `docs/plans/2026-04-25-defect-fix-specs.md`（M3 章节，若有；否则参考 Phase 3 review 报告）— round_key 修正
+2. `docs/plans/2026-04-25-phase3-review.md`（M3 条目）— matmul grad_weight round_key 详情
+3. `src/tests/_compat.py`（`_matmul_backward_pipelines` 函数）— 修复点
 
 ---
 
