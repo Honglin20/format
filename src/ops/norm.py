@@ -19,7 +19,8 @@ from src.quantize import quantize
 from src.analysis.mixin import ObservableMixin
 from src.ops.vec_ops import (
     vec_quantize, vec_add, vec_sub, vec_mul, vec_div,
-    vec_recip, vec_sqrt, vec_reduce_sum, vec_reduce_mean,
+    vec_recip, vec_sqrt, vec_exp, vec_exp2, vec_tanh,
+    vec_reduce_sum, vec_reduce_mean,
 )
 
 
@@ -191,7 +192,7 @@ class BatchNormFunction(torch.autograd.Function):
     def forward(ctx, x, running_mean, running_var, weight, bias,
                 is_training, momentum, eps,
                 cfg: OpQuantConfig, inner_scheme: QuantScheme,
-                name=None):
+                quantize_backprop: bool = True, name=None):
         if not is_training:
             assert running_mean is not None
             assert running_var is not None
@@ -240,7 +241,7 @@ class BatchNormFunction(torch.autograd.Function):
             ctx.save_for_backward(x_shift, x_norm, x_std_inv, weight)
 
         ctx.cfg = cfg
-        ctx.inner_scheme = inner_scheme
+        ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
         ctx.sum_axes = sum_axes
 
         # Output quantization
@@ -253,7 +254,7 @@ class BatchNormFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         x_shift, x_norm, x_std_inv, weight = ctx.saved_tensors
         cfg: OpQuantConfig = ctx.cfg
-        scheme = ctx.inner_scheme
+        scheme = ctx.inner_scheme_bw
 
         # Entry quantization on grad_output
         for s in cfg.grad_output:
@@ -283,19 +284,21 @@ class BatchNormFunction(torch.autograd.Function):
             grad_input = quantize(grad_input, s)
 
         return (grad_input, None, None, grad_weight, grad_bias,
-                None, None, None, None, None, None)
+                None, None, None, None, None, None, None)
 
 
 class QuantizedBatchNorm2d(ObservableMixin, nn.BatchNorm2d):
     def __init__(self, num_features, eps=1e-5, momentum=0.1,
                  affine=True, track_running_stats=True,
                  cfg: OpQuantConfig = None, inner_scheme: QuantScheme = None,
+                 quantize_backprop: bool = True,
                  name: str = None, **kwargs):
         super().__init__(num_features, eps=eps, momentum=momentum,
                          affine=affine, track_running_stats=track_running_stats,
                          **kwargs)
         self.cfg = cfg or OpQuantConfig()
         self.inner_scheme = inner_scheme
+        self.quantize_backprop = quantize_backprop
         self._analysis_name = name
 
     def forward(self, x):
@@ -325,7 +328,7 @@ class QuantizedBatchNorm2d(ObservableMixin, nn.BatchNorm2d):
             self.running_var if not self.training or self.track_running_stats else None,
             self.weight, self.bias,
             bn_training, exponential_average_factor, self.eps,
-            self.cfg, self.inner_scheme, self._analysis_name,
+            self.cfg, self.inner_scheme, self.quantize_backprop, self._analysis_name,
         )
 
 
@@ -333,12 +336,14 @@ class QuantizedBatchNorm1d(ObservableMixin, nn.BatchNorm1d):
     def __init__(self, num_features, eps=1e-5, momentum=0.1,
                  affine=True, track_running_stats=True,
                  cfg: OpQuantConfig = None, inner_scheme: QuantScheme = None,
+                 quantize_backprop: bool = True,
                  name: str = None, **kwargs):
         super().__init__(num_features, eps=eps, momentum=momentum,
                          affine=affine, track_running_stats=track_running_stats,
                          **kwargs)
         self.cfg = cfg or OpQuantConfig()
         self.inner_scheme = inner_scheme
+        self.quantize_backprop = quantize_backprop
         self._analysis_name = name
 
     def forward(self, x):
@@ -368,7 +373,7 @@ class QuantizedBatchNorm1d(ObservableMixin, nn.BatchNorm1d):
             self.running_var if not self.training or self.track_running_stats else None,
             self.weight, self.bias,
             bn_training, exponential_average_factor, self.eps,
-            self.cfg, self.inner_scheme, self._analysis_name,
+            self.cfg, self.inner_scheme, self.quantize_backprop, self._analysis_name,
         )
 
 
@@ -376,12 +381,14 @@ class QuantizedBatchNorm3d(ObservableMixin, nn.BatchNorm3d):
     def __init__(self, num_features, eps=1e-5, momentum=0.1,
                  affine=True, track_running_stats=True,
                  cfg: OpQuantConfig = None, inner_scheme: QuantScheme = None,
+                 quantize_backprop: bool = True,
                  name: str = None, **kwargs):
         super().__init__(num_features, eps=eps, momentum=momentum,
                          affine=affine, track_running_stats=track_running_stats,
                          **kwargs)
         self.cfg = cfg or OpQuantConfig()
         self.inner_scheme = inner_scheme
+        self.quantize_backprop = quantize_backprop
         self._analysis_name = name
 
     def forward(self, x):
@@ -411,7 +418,7 @@ class QuantizedBatchNorm3d(ObservableMixin, nn.BatchNorm3d):
             self.running_var if not self.training or self.track_running_stats else None,
             self.weight, self.bias,
             bn_training, exponential_average_factor, self.eps,
-            self.cfg, self.inner_scheme, self._analysis_name,
+            self.cfg, self.inner_scheme, self.quantize_backprop, self._analysis_name,
         )
 
 
@@ -423,7 +430,7 @@ class LayerNormFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, bias, eps,
                 cfg: OpQuantConfig, inner_scheme: QuantScheme,
-                name=None):
+                quantize_backprop: bool = True, name=None):
         ctx.eps = eps
         ctx.name = name
 
@@ -448,7 +455,7 @@ class LayerNormFunction(torch.autograd.Function):
             ctx.save_for_backward(x_norm, x_vare, weight)
 
         ctx.cfg = cfg
-        ctx.inner_scheme = inner_scheme
+        ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
         # Output quantization
         for s in cfg.output:
@@ -460,7 +467,7 @@ class LayerNormFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         x_norm, x_vare, weight = ctx.saved_tensors
         cfg: OpQuantConfig = ctx.cfg
-        scheme = ctx.inner_scheme
+        scheme = ctx.inner_scheme_bw
 
         # Entry quantization on grad_output
         for s in cfg.grad_output:
@@ -494,11 +501,13 @@ class LayerNormFunction(torch.autograd.Function):
 class QuantizedLayerNorm(ObservableMixin, nn.LayerNorm):
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True,
                  cfg: OpQuantConfig = None, inner_scheme: QuantScheme = None,
+                 quantize_backprop: bool = True,
                  name: str = None, **kwargs):
         super().__init__(normalized_shape, eps=eps,
                          elementwise_affine=elementwise_affine, **kwargs)
         self.cfg = cfg or OpQuantConfig()
         self.inner_scheme = inner_scheme
+        self.quantize_backprop = quantize_backprop
         self._analysis_name = name
 
     def forward(self, x):
@@ -507,7 +516,7 @@ class QuantizedLayerNorm(ObservableMixin, nn.LayerNorm):
 
         return LayerNormFunction.apply(
             x, self.weight, self.bias, self.eps,
-            self.cfg, self.inner_scheme, self._analysis_name,
+            self.cfg, self.inner_scheme, self.quantize_backprop, self._analysis_name,
         )
 
 
@@ -519,7 +528,7 @@ class GroupNormFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, num_groups, weight, bias, eps,
                 cfg: OpQuantConfig, inner_scheme: QuantScheme,
-                name=None):
+                quantize_backprop: bool = True, name=None):
         ctx.num_groups = num_groups
         ctx.eps = eps
         ctx.name = name
@@ -548,7 +557,7 @@ class GroupNormFunction(torch.autograd.Function):
             ctx.save_for_backward(x_shift, x_norm, x_std_inv, weight)
 
         ctx.cfg = cfg
-        ctx.inner_scheme = inner_scheme
+        ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
         # Output quantization
         for s in cfg.output:
@@ -560,7 +569,7 @@ class GroupNormFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         x_shift, x_norm, x_std_inv, weight = ctx.saved_tensors
         cfg: OpQuantConfig = ctx.cfg
-        scheme = ctx.inner_scheme
+        scheme = ctx.inner_scheme_bw
 
         # Entry quantization on grad_output
         for s in cfg.grad_output:
@@ -597,11 +606,13 @@ class GroupNormFunction(torch.autograd.Function):
 class QuantizedGroupNorm(ObservableMixin, nn.GroupNorm):
     def __init__(self, num_groups, num_channels, eps=1e-5, affine=True,
                  cfg: OpQuantConfig = None, inner_scheme: QuantScheme = None,
+                 quantize_backprop: bool = True,
                  name: str = None, **kwargs):
         super().__init__(num_groups, num_channels, eps=eps, affine=affine,
                          **kwargs)
         self.cfg = cfg or OpQuantConfig()
         self.inner_scheme = inner_scheme
+        self.quantize_backprop = quantize_backprop
         self._analysis_name = name
 
     def forward(self, x):
@@ -610,7 +621,7 @@ class QuantizedGroupNorm(ObservableMixin, nn.GroupNorm):
 
         return GroupNormFunction.apply(
             x, self.num_groups, self.weight, self.bias, self.eps,
-            self.cfg, self.inner_scheme, self._analysis_name,
+            self.cfg, self.inner_scheme, self.quantize_backprop, self._analysis_name,
         )
 
 
@@ -622,7 +633,7 @@ class RMSNormFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, bias, eps,
                 cfg: OpQuantConfig, inner_scheme: QuantScheme,
-                name=None):
+                quantize_backprop: bool = True, name=None):
         ctx.eps = eps
         ctx.name = name
 
@@ -655,7 +666,7 @@ class RMSNormFunction(torch.autograd.Function):
             ctx.save_for_backward(x_norm, x_rms_inv, weight)
 
         ctx.cfg = cfg
-        ctx.inner_scheme = inner_scheme
+        ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
         # Output quantization
         for s in cfg.output:
@@ -667,7 +678,7 @@ class RMSNormFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         x_norm, x_rms_inv, weight = ctx.saved_tensors
         cfg: OpQuantConfig = ctx.cfg
-        scheme = ctx.inner_scheme
+        scheme = ctx.inner_scheme_bw
 
         # Entry quantization on grad_output
         for s in cfg.grad_output:
@@ -708,15 +719,17 @@ class QuantizedRMSNorm(ObservableMixin, nn.LayerNorm):
 
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True,
                  cfg: OpQuantConfig = None, inner_scheme: QuantScheme = None,
+                 quantize_backprop: bool = True,
                  name: str = None, **kwargs):
         super().__init__(normalized_shape, eps=eps,
                          elementwise_affine=elementwise_affine, **kwargs)
         self.cfg = cfg or OpQuantConfig()
         self.inner_scheme = inner_scheme
+        self.quantize_backprop = quantize_backprop
         self._analysis_name = name
 
     def forward(self, x):
         return RMSNormFunction.apply(
             x, self.weight, self.bias, self.eps,
-            self.cfg, self.inner_scheme, self._analysis_name,
+            self.cfg, self.inner_scheme, self.quantize_backprop, self._analysis_name,
         )

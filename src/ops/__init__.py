@@ -15,3 +15,10 @@ from .norm import (BatchNormFunction, LayerNormFunction, GroupNormFunction,
                    RMSNormFunction, QuantizedBatchNorm1d, QuantizedBatchNorm2d,
                    QuantizedBatchNorm3d, QuantizedLayerNorm, QuantizedGroupNorm,
                    QuantizedRMSNorm)
+from .activations import (SigmoidFunction, TanhFunction, ReLUFunction,
+                          ReLU6Function, LeakyReLUFunction, SiLUFunction,
+                          GELUFunction, QuantizedSigmoid, QuantizedTanh,
+                          QuantizedReLU, QuantizedReLU6, QuantizedLeakyReLU,
+                          QuantizedSiLU, QuantizedGELU)
+from .softmax import SoftmaxFunction, QuantizedSoftmax
+from .pooling import AdaptiveAvgPool2dFunction, QuantizedAdaptiveAvgPool2d

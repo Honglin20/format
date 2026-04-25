@@ -35,6 +35,10 @@ MX_SPECS_NORM = [
     pytest.param("bfloat10", {"bfloat": 10}, id="bf10"),
 ]
 
+MX_SPECS_NORM_STE = [
+    pytest.param("bf16-ste", {"bfloat": 16, "quantize_backprop": False}, id="bf16-ste"),
+]
+
 
 # ---------------------------------------------------------------------------
 # BatchNorm tests
@@ -79,8 +83,8 @@ def _run_mx_batchnorm(x, weight, bias, mx_specs, training=True, eps=1e-5,
     )
 
 
-def _run_src_batchnorm(x, weight, bias, cfg, inner_scheme, training=True,
-                       eps=1e-5, momentum=0.1, track_running_stats=True):
+def _run_src_batchnorm(x, weight, bias, cfg, inner_scheme, quantize_backprop=True,
+                       training=True, eps=1e-5, momentum=0.1, track_running_stats=True):
     running_mean = torch.zeros(x.shape[1]) if track_running_stats else None
     running_var = torch.ones(x.shape[1]) if track_running_stats else None
 
@@ -91,7 +95,7 @@ def _run_src_batchnorm(x, weight, bias, cfg, inner_scheme, training=True,
     out = BatchNormFunction.apply(
         x, running_mean, running_var, weight, bias,
         training, momentum, eps,
-        cfg, inner_scheme,
+        cfg, inner_scheme, quantize_backprop,
     )
     out.sum().backward()
     return (
@@ -107,32 +111,32 @@ class TestBatchNorm2d:
     def test_forward_training(self, name, mx_specs):
         x, w, b = _make_bn_tensors()
         mx_out, _, _, _ = _run_mx_batchnorm(x, w, b, mx_specs, training=True)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
-        src_out, _, _, _ = _run_src_batchnorm(x, w, b, cfg, inner, training=True)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
+        src_out, _, _, _ = _run_src_batchnorm(x, w, b, cfg, inner, quantize_backprop=qbp, training=True)
         _assert_bit_exact(mx_out, src_out, label=f"bn-fwd-train ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_input(self, name, mx_specs):
         x, w, b = _make_bn_tensors()
         _, mx_gi, _, _ = _run_mx_batchnorm(x, w, b, mx_specs, training=True)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
-        _, src_gi, _, _ = _run_src_batchnorm(x, w, b, cfg, inner, training=True)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
+        _, src_gi, _, _ = _run_src_batchnorm(x, w, b, cfg, inner, quantize_backprop=qbp, training=True)
         _assert_bit_exact(mx_gi, src_gi, label=f"bn-grad_input ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_weight(self, name, mx_specs):
         x, w, b = _make_bn_tensors()
         _, _, mx_gw, _ = _run_mx_batchnorm(x, w, b, mx_specs, training=True)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
-        _, _, src_gw, _ = _run_src_batchnorm(x, w, b, cfg, inner, training=True)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
+        _, _, src_gw, _ = _run_src_batchnorm(x, w, b, cfg, inner, quantize_backprop=qbp, training=True)
         _assert_bit_exact(mx_gw, src_gw, label=f"bn-grad_weight ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_bias(self, name, mx_specs):
         x, w, b = _make_bn_tensors()
         _, _, _, mx_gb = _run_mx_batchnorm(x, w, b, mx_specs, training=True)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
-        _, _, _, src_gb = _run_src_batchnorm(x, w, b, cfg, inner, training=True)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
+        _, _, _, src_gb = _run_src_batchnorm(x, w, b, cfg, inner, quantize_backprop=qbp, training=True)
         _assert_bit_exact(mx_gb, src_gb, label=f"bn-grad_bias ({name})")
 
 
@@ -169,12 +173,12 @@ def _run_mx_layernorm(x, weight, bias, mx_specs, eps=1e-5):
     )
 
 
-def _run_src_layernorm(x, weight, bias, cfg, inner_scheme, eps=1e-5):
+def _run_src_layernorm(x, weight, bias, cfg, inner_scheme, quantize_backprop=True, eps=1e-5):
     x = x.clone().requires_grad_(True)
     weight = weight.clone().requires_grad_(True)
     bias = bias.clone().requires_grad_(True)
 
-    out = LayerNormFunction.apply(x, weight, bias, eps, cfg, inner_scheme)
+    out = LayerNormFunction.apply(x, weight, bias, eps, cfg, inner_scheme, quantize_backprop)
     out.sum().backward()
     return (
         out.detach(),
@@ -189,32 +193,32 @@ class TestLayerNorm:
     def test_forward(self, name, mx_specs):
         x, w, b = _make_ln_tensors()
         mx_out, _, _, _ = _run_mx_layernorm(x, w, b, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
-        src_out, _, _, _ = _run_src_layernorm(x, w, b, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
+        src_out, _, _, _ = _run_src_layernorm(x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_out, src_out, label=f"ln-fwd ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_input(self, name, mx_specs):
         x, w, b = _make_ln_tensors()
         _, mx_gi, _, _ = _run_mx_layernorm(x, w, b, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
-        _, src_gi, _, _ = _run_src_layernorm(x, w, b, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
+        _, src_gi, _, _ = _run_src_layernorm(x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gi, src_gi, label=f"ln-grad_input ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_weight(self, name, mx_specs):
         x, w, b = _make_ln_tensors()
         _, _, mx_gw, _ = _run_mx_layernorm(x, w, b, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
-        _, _, src_gw, _ = _run_src_layernorm(x, w, b, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
+        _, _, src_gw, _ = _run_src_layernorm(x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gw, src_gw, label=f"ln-grad_weight ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_bias(self, name, mx_specs):
         x, w, b = _make_ln_tensors()
         _, _, _, mx_gb = _run_mx_layernorm(x, w, b, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
-        _, _, _, src_gb = _run_src_layernorm(x, w, b, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
+        _, _, _, src_gb = _run_src_layernorm(x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gb, src_gb, label=f"ln-grad_bias ({name})")
 
 
@@ -251,13 +255,13 @@ def _run_mx_groupnorm(x, weight, bias, num_groups, mx_specs, eps=1e-5):
     )
 
 
-def _run_src_groupnorm(x, weight, bias, num_groups, cfg, inner_scheme, eps=1e-5):
+def _run_src_groupnorm(x, weight, bias, num_groups, cfg, inner_scheme, quantize_backprop=True, eps=1e-5):
     x = x.clone().requires_grad_(True)
     weight = weight.clone().requires_grad_(True)
     bias = bias.clone().requires_grad_(True)
 
     out = GroupNormFunction.apply(
-        x, num_groups, weight, bias, eps, cfg, inner_scheme,
+        x, num_groups, weight, bias, eps, cfg, inner_scheme, quantize_backprop,
     )
     out.sum().backward()
     return (
@@ -273,32 +277,32 @@ class TestGroupNorm:
     def test_forward(self, name, mx_specs):
         x, w, b, ng = _make_gn_tensors()
         mx_out, _, _, _ = _run_mx_groupnorm(x, w, b, ng, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
-        src_out, _, _, _ = _run_src_groupnorm(x, w, b, ng, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
+        src_out, _, _, _ = _run_src_groupnorm(x, w, b, ng, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_out, src_out, label=f"gn-fwd ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_input(self, name, mx_specs):
         x, w, b, ng = _make_gn_tensors()
         _, mx_gi, _, _ = _run_mx_groupnorm(x, w, b, ng, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
-        _, src_gi, _, _ = _run_src_groupnorm(x, w, b, ng, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
+        _, src_gi, _, _ = _run_src_groupnorm(x, w, b, ng, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gi, src_gi, label=f"gn-grad_input ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_weight(self, name, mx_specs):
         x, w, b, ng = _make_gn_tensors()
         _, _, mx_gw, _ = _run_mx_groupnorm(x, w, b, ng, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
-        _, _, src_gw, _ = _run_src_groupnorm(x, w, b, ng, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
+        _, _, src_gw, _ = _run_src_groupnorm(x, w, b, ng, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gw, src_gw, label=f"gn-grad_weight ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_bias(self, name, mx_specs):
         x, w, b, ng = _make_gn_tensors()
         _, _, _, mx_gb = _run_mx_groupnorm(x, w, b, ng, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
-        _, _, _, src_gb = _run_src_groupnorm(x, w, b, ng, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
+        _, _, _, src_gb = _run_src_groupnorm(x, w, b, ng, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gb, src_gb, label=f"gn-grad_bias ({name})")
 
 
@@ -327,12 +331,12 @@ def _run_mx_rmsnorm(x, weight, bias, mx_specs, eps=1e-5):
     )
 
 
-def _run_src_rmsnorm(x, weight, bias, cfg, inner_scheme, eps=1e-5):
+def _run_src_rmsnorm(x, weight, bias, cfg, inner_scheme, quantize_backprop=True, eps=1e-5):
     x = x.clone().requires_grad_(True)
     weight = weight.clone().requires_grad_(True)
     bias = bias.clone().requires_grad_(True)
 
-    out = RMSNormFunction.apply(x, weight, bias, eps, cfg, inner_scheme)
+    out = RMSNormFunction.apply(x, weight, bias, eps, cfg, inner_scheme, quantize_backprop)
     out.sum().backward()
     return (
         out.detach(),
@@ -347,30 +351,70 @@ class TestRMSNorm:
     def test_forward(self, name, mx_specs):
         x, w, b = _make_ln_tensors()
         mx_out, _, _, _ = _run_mx_rmsnorm(x, w, b, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
-        src_out, _, _, _ = _run_src_rmsnorm(x, w, b, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
+        src_out, _, _, _ = _run_src_rmsnorm(x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_out, src_out, label=f"rms-fwd ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_input(self, name, mx_specs):
         x, w, b = _make_ln_tensors()
         _, mx_gi, _, _ = _run_mx_rmsnorm(x, w, b, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
-        _, src_gi, _, _ = _run_src_rmsnorm(x, w, b, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
+        _, src_gi, _, _ = _run_src_rmsnorm(x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gi, src_gi, label=f"rms-grad_input ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_weight(self, name, mx_specs):
         x, w, b = _make_ln_tensors()
         _, _, mx_gw, _ = _run_mx_rmsnorm(x, w, b, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
-        _, _, src_gw, _ = _run_src_rmsnorm(x, w, b, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
+        _, _, src_gw, _ = _run_src_rmsnorm(x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gw, src_gw, label=f"rms-grad_weight ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM)
     def test_backward_grad_bias(self, name, mx_specs):
         x, w, b = _make_ln_tensors()
         _, _, _, mx_gb = _run_mx_rmsnorm(x, w, b, mx_specs)
-        cfg, inner = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
-        _, _, _, src_gb = _run_src_rmsnorm(x, w, b, cfg, inner)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
+        _, _, _, src_gb = _run_src_rmsnorm(x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_gb, src_gb, label=f"rms-grad_bias ({name})")
+
+
+# ---------------------------------------------------------------------------
+# STE (quantize_backprop=False) tests — verify Norm backward fix
+# ---------------------------------------------------------------------------
+
+class TestNormSTE:
+    """Test that quantize_backprop=False produces passthrough backward for norms."""
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM_STE)
+    def test_batchnorm_ste(self, name, mx_specs):
+        x, w, b = _make_bn_tensors()
+        mx_out, mx_gi, mx_gw, mx_gb = _run_mx_batchnorm(x, w, b, mx_specs, training=True)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="batch_norm")
+        src_out, src_gi, src_gw, src_gb = _run_src_batchnorm(
+            x, w, b, cfg, inner, quantize_backprop=qbp, training=True)
+        _assert_bit_exact(mx_out, src_out, label=f"bn-ste-fwd ({name})")
+        _assert_bit_exact(mx_gi, src_gi, label=f"bn-ste-grad_input ({name})")
+        _assert_bit_exact(mx_gw, src_gw, label=f"bn-ste-grad_weight ({name})")
+        _assert_bit_exact(mx_gb, src_gb, label=f"bn-ste-grad_bias ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM_STE)
+    def test_layernorm_ste(self, name, mx_specs):
+        x, w, b = _make_ln_tensors()
+        mx_out, mx_gi, mx_gw, mx_gb = _run_mx_layernorm(x, w, b, mx_specs)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="layer_norm")
+        src_out, src_gi, src_gw, src_gb = _run_src_layernorm(
+            x, w, b, cfg, inner, quantize_backprop=qbp)
+        _assert_bit_exact(mx_out, src_out, label=f"ln-ste-fwd ({name})")
+        _assert_bit_exact(mx_gi, src_gi, label=f"ln-ste-grad_input ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM_STE)
+    def test_rmsnorm_ste(self, name, mx_specs):
+        x, w, b = _make_ln_tensors()
+        mx_out, mx_gi, mx_gw, mx_gb = _run_mx_rmsnorm(x, w, b, mx_specs)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="rms_norm")
+        src_out, src_gi, src_gw, src_gb = _run_src_rmsnorm(
+            x, w, b, cfg, inner, quantize_backprop=qbp)
+        _assert_bit_exact(mx_out, src_out, label=f"rms-ste-fwd ({name})")
+        _assert_bit_exact(mx_gi, src_gi, label=f"rms-ste-grad_input ({name})")

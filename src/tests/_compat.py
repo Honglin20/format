@@ -452,7 +452,7 @@ def _conv_transpose_backward_pipelines(mx_specs, block_size, input_elem, go_elem
 # ---------------------------------------------------------------------------
 
 def norm_config_from_mx_specs(mx_specs: dict, op_type: str = "batch_norm"):
-    """Convert an mx_specs dict to (OpQuantConfig, inner_scheme) for norm ops.
+    """Convert an mx_specs dict to (OpQuantConfig, inner_scheme, quantize_backprop) for norm ops.
 
     Norm operators (BatchNorm, LayerNorm, GroupNorm, RMSNorm) use only elemwise
     quantization — no MX block quantization. The OpQuantConfig provides
@@ -466,7 +466,7 @@ def norm_config_from_mx_specs(mx_specs: dict, op_type: str = "batch_norm"):
         op_type: "batch_norm", "layer_norm", "group_norm", or "rms_norm".
 
     Returns:
-        Tuple of (OpQuantConfig, inner_scheme QuantScheme or None).
+        Tuple of (OpQuantConfig, inner_scheme QuantScheme or None, quantize_backprop bool).
     """
     quantize_backprop = mx_specs.get("quantize_backprop", True)
 
@@ -487,7 +487,7 @@ def norm_config_from_mx_specs(mx_specs: dict, op_type: str = "batch_norm"):
         return OpQuantConfig(
             input=input_pipeline, weight=weight_pipeline,
             bias=bias_pipeline, output=output_pipeline,
-        ), inner_scheme
+        ), inner_scheme, quantize_backprop
 
     # Backward entry for grad_output: vec_quantize(grad_output, mx_specs)
     # Same format/round as inner_scheme since mx uses mx_specs['round']
@@ -498,4 +498,47 @@ def norm_config_from_mx_specs(mx_specs: dict, op_type: str = "batch_norm"):
         input=input_pipeline, weight=weight_pipeline,
         bias=bias_pipeline, output=output_pipeline,
         grad_output=go_pipeline,
-    ), inner_scheme
+    ), inner_scheme, quantize_backprop
+
+
+# ---------------------------------------------------------------------------
+# Activation / Softmax / Pool config adapters
+# ---------------------------------------------------------------------------
+
+def activation_config_from_mx_specs(mx_specs: dict):
+    """Convert an mx_specs dict to (inner_scheme, quantize_backprop) for activation ops.
+
+    Activation operators use only elemwise quantization via inner_scheme.
+    No OpQuantConfig needed — all quantization is per-step via vec_ops.
+
+    Returns:
+        Tuple of (inner_scheme QuantScheme or None, quantize_backprop bool).
+    """
+    if mx_specs is None:
+        return None, True
+    quantize_backprop = mx_specs.get("quantize_backprop", True)
+    inner_scheme = _elem_scheme(mx_specs, "round_output")
+    return inner_scheme, quantize_backprop
+
+
+def softmax_config_from_mx_specs(mx_specs: dict):
+    """Convert an mx_specs dict to (inner_scheme, quantize_backprop, softmax_exp2) for softmax.
+
+    Returns:
+        Tuple of (inner_scheme, quantize_backprop, softmax_exp2).
+    """
+    if mx_specs is None:
+        return None, True, False
+    quantize_backprop = mx_specs.get("quantize_backprop", True)
+    softmax_exp2 = mx_specs.get("softmax_exp2", False)
+    inner_scheme = _elem_scheme(mx_specs, "round_output")
+    return inner_scheme, quantize_backprop, softmax_exp2
+
+
+def pool_config_from_mx_specs(mx_specs: dict):
+    """Convert an mx_specs dict to (inner_scheme, quantize_backprop) for pool ops.
+
+    Returns:
+        Tuple of (inner_scheme, quantize_backprop).
+    """
+    return activation_config_from_mx_specs(mx_specs)
