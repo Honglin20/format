@@ -1,6 +1,6 @@
 # Current Task
 
-**Task ID**: Phase 4 — 层级误差分析（已完成）
+**Task ID**: Phase 4 + 4.5 — 层级误差分析 + 多格式对比（已完成）
 **Design**: `docs/plans/2026-04-26-phase4-design.md`
 **Plan**: `docs/plans/2026-04-26-phase4-implementation.md`
 **Branch**: `feature/refactor-src`
@@ -29,7 +29,12 @@
 - [x] P4.3-1: JSON / CSV 导出（Report.to_json / Report.to_csv）
 - [x] P4.3-2: `print_summary()` Markdown 格式化
 
-**总计：33 个新 analysis 测试 + 944 tests passed（零 regression）**
+### P4.5 — 多格式对比
+- [x] P4.5-1: `compare_formats()` + `ComparisonReport`
+- [x] P4.5-2: `summary()`, `rank_formats()`, `recommend()`, `print_comparison()`
+- [x] P4.5-3: 7 个 compare tests
+
+**总计：40 个新 analysis tests + 951 tests passed（零 regression）**
 
 ---
 
@@ -51,7 +56,7 @@ src/tests/
 
 ## 下一步（具体动作）
 
-Phase 4.5 — 多格式对比框架（`compare_formats`）
+所有分析模块已完整交付（Phase 4 + 4.5）。可进入 Phase 5（ONNX Export）或按需扩展新格式。
 
 ---
 
