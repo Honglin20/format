@@ -7,3 +7,5 @@ ObservableMixin provides _emit for analysis (no-op in Phase 3).
 from .linear import QuantizedLinear, LinearFunction
 from .matmul import MatMulFunction, quantized_matmul
 from .bmm import BMMFunction, quantized_bmm
+from .conv import (ConvFunction, QuantizedConv1d, QuantizedConv2d,
+                   QuantizedConv3d)
