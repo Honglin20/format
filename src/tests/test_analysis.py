@@ -298,3 +298,153 @@ class TestEndToEnd:
         x = torch.randn(2, 8)
         y = model(x)
         assert y.shape == (2, 4)
+
+
+from src.analysis.correlation import (
+    DistributionProfile, DistributionTaxonomy,
+)
+
+
+class TestDistributionProfile:
+    def make_dist_report(self):
+        raw = {
+            "layer1.linear": {
+                "input": {
+                    "input_pre_quant[0]": {
+                        ("tensor",): {
+                            "mean": 0.1, "std": 1.2, "skewness": 1.5,
+                            "kurtosis": 5.0, "sparse_ratio": 0.3,
+                            "dynamic_range_bits": 4.5, "outlier_ratio": 0.02,
+                        },
+                    }
+                },
+                "weight": {
+                    "weight_pre_quant[0]": {
+                        ("tensor",): {
+                            "mean": -0.01, "std": 0.8, "skewness": -0.1,
+                            "kurtosis": 3.2, "sparse_ratio": 0.01,
+                            "dynamic_range_bits": 3.0, "outlier_ratio": 0.0,
+                        },
+                    }
+                },
+            },
+            "layer2.conv": {
+                "input": {
+                    "input_pre_quant[0]": {
+                        ("tensor",): {
+                            "mean": 0.5, "std": 0.9, "skewness": 0.8,
+                            "kurtosis": 4.1, "sparse_ratio": 0.05,
+                            "dynamic_range_bits": 5.2, "outlier_ratio": 0.01,
+                        },
+                    }
+                },
+            },
+        }
+        from src.analysis.report import Report
+        return Report(raw)
+
+    def test_by_role_aggregates_correctly(self):
+        report = self.make_dist_report()
+        profile = DistributionProfile.from_report(report)
+
+        ip = profile.by_role("input")
+        assert ip["sample_count"] == 2
+        assert ip["dynamic_range_bits"]["p50"] == pytest.approx(4.85, abs=0.1)
+
+    def test_all_roles(self):
+        report = self.make_dist_report()
+        profile = DistributionProfile.from_report(report)
+        all_roles = profile.all_roles()
+        assert "input" in all_roles
+        assert "weight" in all_roles
+
+    def test_empty_report(self):
+        from src.analysis.report import Report
+        report = Report({})
+        profile = DistributionProfile.from_report(report)
+        assert profile.by_role("input")["sample_count"] == 0
+
+    def test_print_profile_does_not_crash(self):
+        report = self.make_dist_report()
+        profile = DistributionProfile.from_report(report)
+        profile.print_profile()
+
+
+class TestDistributionTaxonomy:
+    def make_taxonomy_report(self):
+        raw = {}
+        archetypes = [
+            ("l_gauss", "weight", 0.1, 3.1, 0.4, 0.02, 0.6),
+            ("l_pos", "input", 1.2, 4.0, 0.3, 0.25, 0.5),
+            ("l_neg", "input", -0.8, 3.5, 0.4, 0.05, 0.5),
+            ("l_heavy", "output", 0.2, 8.0, 0.3, 0.05, 0.4),
+            ("l_bi", "weight", 0.1, 2.5, 0.6, 0.05, 0.55),
+            ("l_unif", "input", 0.1, 2.0, 0.4, 0.05, 0.9),
+            ("l_zero", "input", 0.2, 3.0, 0.3, 0.5, 0.3),
+            ("l_logn", "output", 1.5, 5.0, 0.3, 0.1, 0.6),
+        ]
+        for layer, role, sk, ku, bi, sp, ent in archetypes:
+            raw[layer] = {
+                role: {
+                    "input_pre_quant[0]": {
+                        ("tensor",): {
+                            "skewness": sk, "kurtosis": ku,
+                            "bimodality_coefficient": bi,
+                            "sparse_ratio": sp, "norm_entropy": ent,
+                        }
+                    }
+                }
+            }
+        from src.analysis.report import Report
+        return Report(raw)
+
+    def test_classify_all_eight_types(self):
+        report = self.make_taxonomy_report()
+        taxonomy = DistributionTaxonomy.from_report(report)
+        result = taxonomy.classify()
+
+        cluster_names = set(result.keys())
+        expected = {"zero-centered-gaussian", "positive-skewed", "negative-skewed",
+                    "heavy-tailed", "bimodal", "uniform-like",
+                    "zero-inflated", "log-normal-like"}
+        assert len(cluster_names & expected) >= 6
+
+        for name, cluster in result.items():
+            assert "count" in cluster
+            assert "percentage" in cluster
+            assert "representative_layers" in cluster
+            assert cluster["count"] > 0
+
+    def test_unclassified_fallback(self):
+        raw = {
+            "weird_layer": {
+                "input": {
+                    "input_pre_quant[0]": {
+                        ("tensor",): {
+                            "skewness": 0.3, "kurtosis": 4.5,
+                            "bimodality_coefficient": 0.4,
+                            "sparse_ratio": 0.15, "norm_entropy": 0.6,
+                        }
+                    }
+                }
+            }
+        }
+        from src.analysis.report import Report
+        report = Report(raw)
+        taxonomy = DistributionTaxonomy.from_report(report)
+        result = taxonomy.classify()
+        assert "unclassified" in result
+
+    def test_get_exemplars_returns_structure(self):
+        report = self.make_taxonomy_report()
+        taxonomy = DistributionTaxonomy.from_report(report)
+        exemplars = taxonomy.get_exemplars("positive-skewed", n=1)
+        assert len(exemplars) >= 1
+        assert "layer" in exemplars[0]
+        assert "role" in exemplars[0]
+
+    def test_print_taxonomy_no_crash(self):
+        report = self.make_taxonomy_report()
+        taxonomy = DistributionTaxonomy.from_report(report)
+        taxonomy.print_taxonomy()
+        taxonomy.print_taxonomy(ascii_plots=True)
