@@ -547,3 +547,24 @@ def pool_config_from_mx_specs(mx_specs: dict):
         OpQuantConfig with populated input/grad_input fields.
     """
     return activation_config_from_mx_specs(mx_specs)
+
+
+# ---------------------------------------------------------------------------
+# SIMD / Elemwise config adapter
+# ---------------------------------------------------------------------------
+
+
+def simd_config_from_mx_specs(mx_specs: dict):
+    """Convert an mx_specs dict to (inner_scheme, quantize_backprop) for SIMD ops.
+
+    SIMD operators use elemwise quantization via inner_scheme.
+    Same pattern as activation ops.
+
+    Returns:
+        Tuple of (inner_scheme QuantScheme or None, quantize_backprop bool).
+    """
+    if mx_specs is None:
+        return None, True
+    quantize_backprop = mx_specs.get("quantize_backprop", True)
+    inner_scheme = _elem_scheme(mx_specs, "round_output")
+    return inner_scheme, quantize_backprop
