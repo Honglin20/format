@@ -102,3 +102,45 @@ class TestDistributionObserver:
         metrics = obs._measure(("tensor",), f, q)
         assert metrics["outlier_ratio"] > 0.0
         assert metrics["outlier_ratio"] < 0.01
+
+
+from src.analysis.observers import QSNRObserver, MSEObserver
+
+
+class TestQSNRObserver:
+    def test_perfect_quantization_high_qsnr(self):
+        """fp32 == quant → error=0 → QSNR should be very high."""
+        obs = QSNRObserver()
+        f = torch.randn(100)
+        q = f.clone()
+
+        metrics = obs._measure(("tensor",), f, q)
+        assert metrics["qsnr_db"] > 100
+
+    def test_known_error(self):
+        """fp32=[1,2,3], 10% error → QSNR = 20 dB."""
+        obs = QSNRObserver()
+        f = torch.tensor([1.0, 2.0, 3.0])
+        q = torch.tensor([0.9, 1.8, 2.7])
+
+        metrics = obs._measure(("tensor",), f, q)
+        # num = (1+4+9)/3 = 14/3, den = (0.01+0.04+0.09)/3 = 0.14/3
+        # QSNR = 10*log10(100) = 20 dB
+        assert metrics["qsnr_db"] == pytest.approx(20.0, abs=0.01)
+
+
+class TestMSEObserver:
+    def test_perfect_quantization_zero_mse(self):
+        obs = MSEObserver()
+        f = torch.randn(100)
+        q = f.clone()
+        metrics = obs._measure(("tensor",), f, q)
+        assert metrics["mse"] == 0.0
+
+    def test_known_error(self):
+        obs = MSEObserver()
+        f = torch.tensor([1.0, 2.0, 3.0])
+        q = torch.tensor([0.9, 1.8, 2.7])
+        metrics = obs._measure(("tensor",), f, q)
+        # MSE = (0.01+0.04+0.09)/3
+        assert metrics["mse"] == pytest.approx(0.04667, abs=1e-5)

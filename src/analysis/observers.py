@@ -56,3 +56,20 @@ class DistributionObserver(SliceAwareObserver):
             "outlier_ratio": (f_abs > self.outlier_sigma * std).float().mean().item(),
             "norm_entropy": norm_entropy,
         }
+
+
+class QSNRObserver(SliceAwareObserver):
+    """QSNR = 10 * log10(||fp32||^2 / ||fp32 - quant||^2), unit dB."""
+
+    def _measure(self, key, fp32, quant):
+        err = fp32 - quant
+        num = fp32.pow(2).mean()
+        den = err.pow(2).mean().clamp_min(1e-30)
+        return {"qsnr_db": (10 * torch.log10(num / den)).item()}
+
+
+class MSEObserver(SliceAwareObserver):
+    """Mean squared error per slice."""
+
+    def _measure(self, key, fp32, quant):
+        return {"mse": (fp32 - quant).pow(2).mean().item()}
