@@ -198,28 +198,34 @@ def op_config_from_mx_specs(mx_specs: dict, op_type: str = "linear") -> OpQuantC
     go_pipeline = (go_elem,) if go_elem is not None else ()
 
     # grad_weight gemm: input_gw (axis=-2) + grad_output_gw (axis=-2)
-    a_fmt_bp = mx_specs.get("a_elem_format_bp", mx_specs.get("a_elem_format"))
-    a_fmt_bp_ex = mx_specs.get("a_elem_format_bp_ex", a_fmt_bp)
+    # Note: apply_mx_specs does NOT fill _bp keys from forward formats.
+    # Only create MX schemes when _bp keys are explicitly set (non-None).
+    a_fmt_bp = mx_specs.get("a_elem_format_bp")
+    a_fmt_bp_ex = mx_specs.get("a_elem_format_bp_ex") or a_fmt_bp
     input_gw_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_ex}, "a_elem_format",
                               block_size, "round_mx_input_grad_weight", block_axis=-2) if a_fmt_bp_ex else None
     grad_output_gw_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_ex}, "a_elem_format",
                                      block_size, "round_mx_grad_output_grad_weight", block_axis=-2) if a_fmt_bp_ex else None
-    input_gw_pipeline = tuple(s for s in [input_elem, input_gw_mx] if s is not None)
-    grad_output_gw_pipeline = tuple(s for s in [go_elem, grad_output_gw_mx] if s is not None)
+    # input_gw / grad_output_gw: only MX schemes — the elemwise cast was
+    # already applied in the forward pass (saved tensors are post-elemwise).
+    input_gw_pipeline = (input_gw_mx,) if input_gw_mx is not None else ()
+    grad_output_gw_pipeline = (grad_output_gw_mx,) if grad_output_gw_mx is not None else ()
 
     # grad_weight exit: elemwise cast
     gw_elem = _elem_scheme(mx_specs, "round_grad_weight")
     gw_pipeline = (gw_elem,) if gw_elem is not None else ()
 
     # grad_input gemm: weight_gi (axis=0) + grad_output_gi (axis=-1)
-    w_fmt_bp = mx_specs.get("w_elem_format_bp", mx_specs.get("w_elem_format"))
-    a_fmt_bp_os = mx_specs.get("a_elem_format_bp_os", mx_specs.get("a_elem_format"))
+    w_fmt_bp = mx_specs.get("w_elem_format_bp")
+    a_fmt_bp_os = mx_specs.get("a_elem_format_bp_os")
     weight_gi_mx = _mx_scheme({**mx_specs, "w_elem_format": w_fmt_bp}, "w_elem_format",
                                block_size, "round_mx_weight_grad_input", block_axis=0) if w_fmt_bp else None
     grad_output_gi_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_os}, "a_elem_format",
                                      block_size, "round_mx_grad_output_grad_input", block_axis=-1) if a_fmt_bp_os else None
-    weight_gi_pipeline = tuple(s for s in [weight_elem, weight_gi_mx] if s is not None)
-    grad_output_gi_pipeline = tuple(s for s in [go_elem, grad_output_gi_mx] if s is not None)
+    # weight_gi / grad_output_gi: only MX schemes — saved tensors are post-elemwise,
+    # grad_output already elemwise-quantized above.
+    weight_gi_pipeline = (weight_gi_mx,) if weight_gi_mx is not None else ()
+    grad_output_gi_pipeline = (grad_output_gi_mx,) if grad_output_gi_mx is not None else ()
 
     # grad_input exit: elemwise cast
     gi_elem = _elem_scheme(mx_specs, "round_grad_input")

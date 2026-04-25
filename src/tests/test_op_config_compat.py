@@ -78,6 +78,11 @@ def test_backward_with_mx_formats():
         "w_elem_format": "fp8_e4m3",
         "block_size": 32,
         "quantize_backprop": True,
+        # _bp keys must be explicitly set for MX backward schemes
+        "a_elem_format_bp": "fp8_e4m3",
+        "a_elem_format_bp_ex": "fp8_e4m3",
+        "a_elem_format_bp_os": "fp8_e4m3",
+        "w_elem_format_bp": "fp8_e4m3",
     }
     cfg = op_config_from_mx_specs(mx_specs)
     assert cfg.is_training is True
@@ -90,20 +95,38 @@ def test_backward_with_mx_formats():
 
 
 def test_backward_format_fallback():
-    """a_elem_format_bp defaults to a_elem_format if not set."""
+    """a_elem_format_bp explicitly set → used for input_gw."""
     mx_specs = {
         "bfloat": 16,
         "a_elem_format": "fp8_e4m3",
         "w_elem_format": "int8",
         "block_size": 32,
+        "a_elem_format_bp": "fp8_e4m3",
+        "a_elem_format_bp_ex": "fp8_e4m3",
+        "w_elem_format_bp": "int8",
     }
     cfg = op_config_from_mx_specs(mx_specs)
-    # a_elem_format_bp not set → falls back to a_elem_format for input_gw
+    # a_elem_format_bp set → input_gw has MX scheme using that format
     assert len(cfg.input_gw) >= 1
     assert cfg.input_gw[-1].format_name == "fp8_e4m3"
 
 
-def test_op_type_param_accepted():
+def test_no_bp_keys_means_no_mx_backward():
+    """Without _bp keys, backward gemm has no MX schemes (only elemwise)."""
+    mx_specs = {
+        "bfloat": 16,
+        "a_elem_format": "fp8_e4m3",
+        "w_elem_format": "fp8_e4m3",
+        "block_size": 32,
+    }
+    cfg = op_config_from_mx_specs(mx_specs)
+    # No _bp keys set → no MX schemes in backward gemm pipelines
+    assert len(cfg.input_gw) == 0
+    assert len(cfg.grad_output_gw) == 0
+    assert len(cfg.weight_gi) == 0
+    assert len(cfg.grad_output_gi) == 0
+    # But elemwise backward schemes should still be present
+    assert cfg.is_training is True
     """op_type parameter is accepted (currently same logic for linear/matmul)."""
     mx_specs = {"bfloat": 16}
     cfg_linear = op_config_from_mx_specs(mx_specs, op_type="linear")
