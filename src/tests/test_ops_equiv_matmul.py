@@ -1,6 +1,7 @@
 """
-Bit-exact equivalence tests: src/ops/linear.py vs mx/linear.py — P3.1-d.
+Bit-exact equivalence tests: src/ops/ vs mx/ — P3.1-d + P3.1-e.
 
+Covers Linear, MatMul, and BMM operators.
 All comparisons use torch.equal (bit-exact, no atol/rtol).
 Dither mode tests fix seed for determinism.
 """
@@ -230,3 +231,173 @@ class TestLinearNoBackprop:
         mx_specs = {"bfloat": 16, "quantize_backprop": False}
         cfg = op_config_from_mx_specs(mx_specs)
         assert cfg.is_training is False
+
+
+# ===========================================================================
+# MatMul equivalence tests — P3.1-e
+# ===========================================================================
+
+from src.ops.matmul import MatMulFunction, quantized_matmul
+
+
+def _make_matmul_tensors(batch=2, m=8, k=16, n=12, seed=42):
+    """Create deterministic 3D tensors for matmul (batched)."""
+    torch.manual_seed(seed)
+    in1 = torch.randn(batch, m, k, dtype=torch.float32)
+    in2 = torch.randn(batch, k, n, dtype=torch.float32)
+    return in1, in2
+
+
+def _run_mx_matmul(in1, in2, mx_specs, mode_config='aa'):
+    """Run mx.matmul forward + backward, return (output, grad_in1, grad_in2)."""
+    mx_specs = apply_mx_specs(mx_specs)
+    in1 = in1.clone().requires_grad_(True)
+    in2 = in2.clone().requires_grad_(True)
+    out = mx.matmul(in1, in2, mx_specs=mx_specs, mode_config=mode_config)
+    out.sum().backward()
+    return (
+        out.detach(),
+        in1.grad.detach() if in1.grad is not None else None,
+        in2.grad.detach() if in2.grad is not None else None,
+    )
+
+
+def _run_src_matmul(in1, in2, cfg, mode_config='aa'):
+    """Run src MatMulFunction forward + backward."""
+    in1 = in1.clone().requires_grad_(True)
+    in2 = in2.clone().requires_grad_(True)
+    out = MatMulFunction.apply(in1, in2, None, cfg, None, mode_config)
+    out.sum().backward()
+    return (
+        out.detach(),
+        in1.grad.detach() if in1.grad is not None else None,
+        in2.grad.detach() if in2.grad is not None else None,
+    )
+
+
+MX_SPECS_MATMUL = [
+    pytest.param("bfloat16", {"bfloat": 16}, id="bf16"),
+    pytest.param("bf16+mxfp8e4m3", {
+        "bfloat": 16, "a_elem_format": "fp8_e4m3",
+        "w_elem_format": "fp8_e4m3", "block_size": 32,
+    }, id="bf16+mxfp8e4m3"),
+    pytest.param("bf16+mxfp8e5m2", {
+        "bfloat": 16, "a_elem_format": "fp8_e5m2",
+        "w_elem_format": "fp8_e5m2", "block_size": 32,
+    }, id="bf16+mxfp8e5m2"),
+    pytest.param("mxfp8e4m3-no-bf", {
+        "a_elem_format": "fp8_e4m3",
+        "w_elem_format": "fp8_e4m3", "block_size": 32,
+    }, id="mxfp8e4m3-no-bf"),
+]
+
+
+class TestMatMulForward:
+    """Forward bit-exact: src MatMulFunction vs mx.matmul."""
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_MATMUL)
+    def test_forward_aa(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        mx_out, _, _ = _run_mx_matmul(in1, in2, mx_specs, mode_config='aa')
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        src_out, _, _ = _run_src_matmul(in1, in2, cfg, mode_config='aa')
+        _assert_bit_exact(mx_out, src_out, label=f"matmul-fwd-aa ({name})")
+
+    def test_forward_passthrough(self):
+        """Empty OpQuantConfig → passthrough."""
+        in1, in2 = _make_matmul_tensors()
+        mx_out = torch.matmul(in1, in2)
+        src_out, _, _ = _run_src_matmul(in1, in2, OpQuantConfig())
+        _assert_bit_exact(mx_out, src_out, label="matmul-passthrough")
+
+
+class TestMatMulBackward:
+    """Backward bit-exact: src MatMulFunction vs mx.matmul."""
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_MATMUL)
+    def test_backward_grad_in1(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        _, mx_gi1, _ = _run_mx_matmul(in1, in2, mx_specs, mode_config='aa')
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        _, src_gi1, _ = _run_src_matmul(in1, in2, cfg, mode_config='aa')
+        _assert_bit_exact(mx_gi1, src_gi1, label=f"matmul-grad_in1 ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_MATMUL)
+    def test_backward_grad_in2(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        _, _, mx_gi2 = _run_mx_matmul(in1, in2, mx_specs, mode_config='aa')
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        _, _, src_gi2 = _run_src_matmul(in1, in2, cfg, mode_config='aa')
+        _assert_bit_exact(mx_gi2, src_gi2, label=f"matmul-grad_in2 ({name})")
+
+
+# ===========================================================================
+# BMM equivalence tests — P3.1-e
+# ===========================================================================
+
+from src.ops.bmm import BMMFunction, quantized_bmm
+
+
+def _run_mx_bmm(in1, in2, mx_specs):
+    """Run mx.bmm forward + backward, return (output, grad_in1, grad_in2)."""
+    mx_specs = apply_mx_specs(mx_specs)
+    in1 = in1.clone().requires_grad_(True)
+    in2 = in2.clone().requires_grad_(True)
+    out = mx.bmm(in1, in2, mx_specs=mx_specs)
+    out.sum().backward()
+    return (
+        out.detach(),
+        in1.grad.detach() if in1.grad is not None else None,
+        in2.grad.detach() if in2.grad is not None else None,
+    )
+
+
+def _run_src_bmm(in1, in2, cfg):
+    """Run src BMMFunction forward + backward."""
+    in1 = in1.clone().requires_grad_(True)
+    in2 = in2.clone().requires_grad_(True)
+    out = BMMFunction.apply(in1, in2, cfg)
+    out.sum().backward()
+    return (
+        out.detach(),
+        in1.grad.detach() if in1.grad is not None else None,
+        in2.grad.detach() if in2.grad is not None else None,
+    )
+
+
+class TestBMMForward:
+    """Forward bit-exact: src BMMFunction vs mx.bmm."""
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_MATMUL)
+    def test_forward(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        mx_out, _, _ = _run_mx_bmm(in1, in2, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        src_out, _, _ = _run_src_bmm(in1, in2, cfg)
+        _assert_bit_exact(mx_out, src_out, label=f"bmm-fwd ({name})")
+
+    def test_forward_passthrough(self):
+        in1, in2 = _make_matmul_tensors()
+        mx_out = torch.bmm(in1, in2)
+        src_out, _, _ = _run_src_bmm(in1, in2, OpQuantConfig())
+        _assert_bit_exact(mx_out, src_out, label="bmm-passthrough")
+
+
+class TestBMMBackward:
+    """Backward bit-exact: src BMMFunction vs mx.bmm."""
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_MATMUL)
+    def test_backward_grad_in1(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        _, mx_gi1, _ = _run_mx_bmm(in1, in2, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        _, src_gi1, _ = _run_src_bmm(in1, in2, cfg)
+        _assert_bit_exact(mx_gi1, src_gi1, label=f"bmm-grad_in1 ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_MATMUL)
+    def test_backward_grad_in2(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        _, _, mx_gi2 = _run_mx_bmm(in1, in2, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        _, _, src_gi2 = _run_src_bmm(in1, in2, cfg)
+        _assert_bit_exact(mx_gi2, src_gi2, label=f"bmm-grad_in2 ({name})")

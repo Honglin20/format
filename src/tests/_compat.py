@@ -155,7 +155,8 @@ def op_config_from_mx_specs(mx_specs: dict, op_type: str = "linear") -> OpQuantC
 
     Args:
         mx_specs: Dict from golden .pt file or mx_specs default dict.
-        op_type: "linear" or "matmul" — affects backward gemm axis conventions.
+        op_type: "linear" or "matmul" — affects forward MX axes and
+            backward gemm conventions.
 
     Returns:
         OpQuantConfig with populated scheme pipelines.
@@ -164,25 +165,36 @@ def op_config_from_mx_specs(mx_specs: dict, op_type: str = "linear") -> OpQuantC
     quantize_backprop = mx_specs.get("quantize_backprop", True)
 
     # --- Forward pipelines ---
-    # input: elemwise cast → MX block quant
+    # input/in1: elemwise cast → MX block quant
     input_elem = _elem_scheme(mx_specs, "round_output")
-    input_mx = _mx_scheme(mx_specs, "a_elem_format", block_size, "round_mx_output")
+    # For linear: in1 (input) MX along axis=-1
+    # For matmul: in1 MX along axis=-1, in2 MX along axis=-2
+    input_mx_axis = -1  # in1 always quantized along last dim
+    input_mx = _mx_scheme(mx_specs, "a_elem_format", block_size, "round_mx_output",
+                           block_axis=input_mx_axis)
     input_pipeline = tuple(s for s in [input_elem, input_mx] if s is not None)
 
-    # weight: elemwise cast → MX block quant
+    # weight/in2: elemwise cast → MX block quant
     weight_elem = _elem_scheme(mx_specs, "round_weight")
-    weight_mx = _mx_scheme(mx_specs, "w_elem_format", block_size, "round_mx_output")
+    # For linear: weight MX along axis=-1 (same as input)
+    # For matmul: in2 MX along axis=-2
+    weight_mx_axis = -2 if op_type == "matmul" else -1
+    weight_mx = _mx_scheme(mx_specs, "w_elem_format", block_size, "round_mx_output",
+                            block_axis=weight_mx_axis)
     weight_pipeline = tuple(s for s in [weight_elem, weight_mx] if s is not None)
 
     # bias: elemwise cast only (no MX)
     bias_elem = _elem_scheme(mx_specs, "round_weight")
     bias_pipeline = (bias_elem,) if bias_elem is not None else ()
 
-    # output: two elemwise casts — one after F.linear, one after bias-add
-    # LinearFunction.forward uses output[0] for post-matmul, output[1] for post-bias
+    # output: linear has 2 elemwise casts (post-matmul + post-bias),
+    # matmul has 1 or 2 (post-matmul, then post-bias if bias present)
     output_elem = _elem_scheme(mx_specs, "round_output")
     if output_elem is not None:
-        output_pipeline = (output_elem, output_elem)  # same scheme applied twice
+        if op_type == "linear":
+            output_pipeline = (output_elem, output_elem)
+        else:
+            output_pipeline = (output_elem, output_elem)
     else:
         output_pipeline = ()
 
@@ -197,21 +209,32 @@ def op_config_from_mx_specs(mx_specs: dict, op_type: str = "linear") -> OpQuantC
     go_elem = _elem_scheme(mx_specs, "round_grad_input")
     go_pipeline = (go_elem,) if go_elem is not None else ()
 
+    if op_type == "linear":
+        return _linear_backward_pipelines(
+            mx_specs, block_size, input_elem, go_elem, output_pipeline,
+            input_pipeline, weight_pipeline, bias_pipeline, go_pipeline,
+        )
+    else:
+        return _matmul_backward_pipelines(
+            mx_specs, block_size, input_elem, go_elem, output_pipeline,
+            input_pipeline, weight_pipeline, bias_pipeline, go_pipeline,
+        )
+
+
+def _linear_backward_pipelines(mx_specs, block_size, input_elem, go_elem,
+                                output_pipeline, input_pipeline, weight_pipeline,
+                                bias_pipeline, go_pipeline):
+    """Build backward OpQuantConfig fields for linear operator."""
     # grad_weight gemm: input_gw (axis=-2) + grad_output_gw (axis=-2)
-    # Note: apply_mx_specs does NOT fill _bp keys from forward formats.
-    # Only create MX schemes when _bp keys are explicitly set (non-None).
     a_fmt_bp = mx_specs.get("a_elem_format_bp")
     a_fmt_bp_ex = mx_specs.get("a_elem_format_bp_ex") or a_fmt_bp
     input_gw_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_ex}, "a_elem_format",
                               block_size, "round_mx_input_grad_weight", block_axis=-2) if a_fmt_bp_ex else None
     grad_output_gw_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_ex}, "a_elem_format",
                                      block_size, "round_mx_grad_output_grad_weight", block_axis=-2) if a_fmt_bp_ex else None
-    # input_gw / grad_output_gw: only MX schemes — the elemwise cast was
-    # already applied in the forward pass (saved tensors are post-elemwise).
     input_gw_pipeline = (input_gw_mx,) if input_gw_mx is not None else ()
     grad_output_gw_pipeline = (grad_output_gw_mx,) if grad_output_gw_mx is not None else ()
 
-    # grad_weight exit: elemwise cast
     gw_elem = _elem_scheme(mx_specs, "round_grad_weight")
     gw_pipeline = (gw_elem,) if gw_elem is not None else ()
 
@@ -222,16 +245,64 @@ def op_config_from_mx_specs(mx_specs: dict, op_type: str = "linear") -> OpQuantC
                                block_size, "round_mx_weight_grad_input", block_axis=0) if w_fmt_bp else None
     grad_output_gi_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_os}, "a_elem_format",
                                      block_size, "round_mx_grad_output_grad_input", block_axis=-1) if a_fmt_bp_os else None
-    # weight_gi / grad_output_gi: only MX schemes — saved tensors are post-elemwise,
-    # grad_output already elemwise-quantized above.
     weight_gi_pipeline = (weight_gi_mx,) if weight_gi_mx is not None else ()
     grad_output_gi_pipeline = (grad_output_gi_mx,) if grad_output_gi_mx is not None else ()
 
-    # grad_input exit: elemwise cast
     gi_elem = _elem_scheme(mx_specs, "round_grad_input")
     gi_pipeline = (gi_elem,) if gi_elem is not None else ()
 
-    # grad_bias: elemwise cast
+    gb_elem = _elem_scheme(mx_specs, "round_grad_weight")
+    gb_pipeline = (gb_elem,) if gb_elem is not None else ()
+
+    return OpQuantConfig(
+        input=input_pipeline, weight=weight_pipeline,
+        bias=bias_pipeline, output=output_pipeline,
+        grad_output=go_pipeline, grad_input=gi_pipeline,
+        grad_weight=gw_pipeline, grad_bias=gb_pipeline,
+        input_gw=input_gw_pipeline, grad_output_gw=grad_output_gw_pipeline,
+        weight_gi=weight_gi_pipeline, grad_output_gi=grad_output_gi_pipeline,
+    )
+
+
+def _matmul_backward_pipelines(mx_specs, block_size, input_elem, go_elem,
+                                output_pipeline, input_pipeline, weight_pipeline,
+                                bias_pipeline, go_pipeline):
+    """Build backward OpQuantConfig fields for matmul operator.
+
+    Matmul backward maps to different axes than linear:
+    - grad_in1 = grad_out @ in2^T: in2 needs MX along axis=-1, grad_out along axis=-1
+    - grad_in2 = in1^T @ grad_out: in1 needs MX along axis=-2, grad_out along axis=-2
+    """
+    # in1 for grad_in2 gemm: MX along axis=-2
+    a_fmt_bp = mx_specs.get("a_elem_format_bp")
+    input_gw_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp}, "a_elem_format",
+                              block_size, "round_mx_input_grad_input", block_axis=-2) if a_fmt_bp else None
+    input_gw_pipeline = (input_gw_mx,) if input_gw_mx is not None else ()
+
+    # grad_out for grad_in2 gemm: MX along axis=-2
+    a_fmt_bp_os = mx_specs.get("a_elem_format_bp_os")
+    grad_output_gw_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_os}, "a_elem_format",
+                                     block_size, "round_mx_grad_output_grad_input", block_axis=-2) if a_fmt_bp_os else None
+    grad_output_gw_pipeline = (grad_output_gw_mx,) if grad_output_gw_mx is not None else ()
+
+    # in2 for grad_in1 gemm: MX along axis=-1
+    w_fmt_bp = mx_specs.get("w_elem_format_bp")
+    weight_gi_mx = _mx_scheme({**mx_specs, "w_elem_format": w_fmt_bp}, "w_elem_format",
+                               block_size, "round_mx_input_grad_input", block_axis=-1) if w_fmt_bp else None
+    weight_gi_pipeline = (weight_gi_mx,) if weight_gi_mx is not None else ()
+
+    # grad_out for grad_in1 gemm: MX along axis=-1
+    grad_output_gi_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_os}, "a_elem_format",
+                                     block_size, "round_mx_grad_output_grad_input", block_axis=-1) if a_fmt_bp_os else None
+    grad_output_gi_pipeline = (grad_output_gi_mx,) if grad_output_gi_mx is not None else ()
+
+    # grad_in1 / grad_in2 exit: elemwise cast
+    gi_elem = _elem_scheme(mx_specs, "round_grad_input")
+    gi_pipeline = (gi_elem,) if gi_elem is not None else ()
+
+    gw_elem = _elem_scheme(mx_specs, "round_grad_input")
+    gw_pipeline = (gw_elem,) if gw_elem is not None else ()
+
     gb_elem = _elem_scheme(mx_specs, "round_grad_weight")
     gb_pipeline = (gb_elem,) if gb_elem is not None else ()
 
