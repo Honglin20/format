@@ -48,11 +48,21 @@ def iter_slices(
 
     elif mode == GranularityMode.PER_BLOCK:
         bs = granularity.block_size
-        last_dim = fp32.shape[-1]
-        n_blocks = (last_dim + bs - 1) // bs
+        axis = granularity.block_axis
+        if axis < 0:
+            axis = fp32.ndim + axis
+        if not (0 <= axis < fp32.ndim):
+            raise ValueError(
+                f"block_axis={granularity.block_axis} out of range "
+                f"for tensor with ndim={fp32.ndim}"
+            )
+        dim_size = fp32.shape[axis]
+        n_blocks = (dim_size + bs - 1) // bs
         for b in range(n_blocks):
-            sl = slice(b * bs, min((b + 1) * bs, last_dim))
-            yield ("block", b), fp32[..., sl], quant[..., sl]
+            sl = slice(b * bs, min((b + 1) * bs, dim_size))
+            idx = [slice(None)] * fp32.ndim
+            idx[axis] = sl
+            yield ("block", b), fp32[tuple(idx)], quant[tuple(idx)]
 
     elif mode == GranularityMode.DYNAMIC_GROUP:
         if group_map is None:

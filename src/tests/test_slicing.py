@@ -98,13 +98,61 @@ def test_per_block_non_exact_division():
 
 
 def test_per_block_3d_tensor():
-    """Block slicing always along last dim."""
+    """Block slicing along default block_axis=-1 (last dim)."""
     fp32 = torch.randn(2, 3, 16)
     quant = torch.randn(2, 3, 16)
     g = GranularitySpec.per_block(8)
     results = list(iter_slices(fp32, quant, g))
     assert len(results) == 2
     assert results[0][1].shape == (2, 3, 8)
+
+
+def test_per_block_non_last_axis():
+    """block_axis=1 on (4,8,16) slices along axis=1, not last dim."""
+    fp32 = torch.randn(4, 8, 16)
+    quant = torch.randn(4, 8, 16)
+    g = GranularitySpec.per_block(4, axis=1)
+    results = list(iter_slices(fp32, quant, g))
+    assert len(results) == 2
+    assert results[0][0] == ("block", 0)
+    assert results[1][0] == ("block", 1)
+    assert results[0][1].shape == (4, 4, 16)
+    assert results[1][1].shape == (4, 4, 16)
+    assert torch.equal(results[0][1], fp32[:, 0:4, :])
+    assert torch.equal(results[1][1], fp32[:, 4:8, :])
+
+
+def test_per_block_negative_axis():
+    """block_axis=-2 (axis=1 for ndim=3) same as positive axis=1."""
+    fp32 = torch.randn(4, 8, 16)
+    quant = torch.randn(4, 8, 16)
+    g_neg = GranularitySpec.per_block(4, axis=-2)
+    results = list(iter_slices(fp32, quant, g_neg))
+    assert len(results) == 2
+    assert results[0][1].shape == (4, 4, 16)
+    assert torch.equal(results[0][1], fp32[:, 0:4, :])
+
+
+def test_per_block_axis_out_of_range():
+    """block_axis out of bounds raises ValueError."""
+    fp32 = torch.randn(4, 8, 16)
+    quant = torch.randn(4, 8, 16)
+    g = GranularitySpec.per_block(4, axis=5)
+    with pytest.raises(ValueError, match="block_axis"):
+        list(iter_slices(fp32, quant, g))
+
+
+def test_per_block_last_axis_unchanged():
+    """block_axis=-1 (default) behaves same as before fix — regression test."""
+    fp32 = torch.randn(2, 3, 16)
+    quant = torch.randn(2, 3, 16)
+    g = GranularitySpec.per_block(8, axis=-1)
+    results = list(iter_slices(fp32, quant, g))
+    assert len(results) == 2
+    assert results[0][1].shape == (2, 3, 8)
+    assert results[1][1].shape == (2, 3, 8)
+    assert torch.equal(results[0][1], fp32[:, :, 0:8])
+    assert torch.equal(results[1][1], fp32[:, :, 8:16])
 
 
 # ---------------------------------------------------------------------------
