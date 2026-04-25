@@ -41,26 +41,29 @@
 
 - [x] **subtask-fix-1**: M2 — `src/analysis/slicing.py` block_axis 修复 + 4 条新测试
 - [x] **subtask-fix-2**: M1 — Activation/Softmax/Pool `__init__` 接口统一 + `_compat.py` 适配器返回值变更 + 5 条新测试
-- [ ] **subtask-fix-3**: M3 — `_compat.py::_matmul_backward_pipelines` round_key 修正
-- [ ] **subtask-fix-4**: C1 — Linear/Conv/Matmul/BMM 的 `emit_fn` 接入 + 4 条 observer 测试
-- [ ] **subtask-fix-5**: C1 — Norm/Activation/Softmax/Pool 的 `emit_fn` 接入
-- [ ] **subtask-fix-6**: m1 — QuantizedLinear passthrough 缓存到 `_is_passthrough`
-- [ ] **subtask-fix-7**: m3 — QuantizedGELU `inner_scheme=None` 条件修正
-- [ ] **subtask-fix-8**: m5 — 删除 `src/ops/nn/` 空目录
+- [x] **subtask-fix-3**: M3 — `_compat.py::_matmul_backward_pipelines` round_key 修正
+- [x] **subtask-fix-4**: C1 — Linear/Conv/Matmul/BMM 的 `emit_fn` 接入 + 4 条 observer 测试
+- [ ] **subtask-fix-5**: C1 — Norm/Activation/Softmax/Pool 的 `emit_fn` 接入（Act/Softmax/Pool done，Norm 进行中 — agent running）
+- [x] **subtask-fix-6**: m1 — QuantizedLinear passthrough 缓存到 `_is_passthrough`
+- [x] **subtask-fix-7**: m3 — QuantizedGELU `inner_scheme=None` 条件修正
+- [x] **subtask-fix-8**: m5 — 删除 `src/ops/nn/` 空目录
+- [ ] **P3.5**: Elemwise/SIMD/Vector ops
+- [ ] **P3.6**: mapping + 端到端验证
 
 ---
 
 ## 下一步（具体动作）
 
-开始 subtask-fix-3：修正 `src/tests/_compat.py::_matmul_backward_pipelines` 中 grad_weight round_key 从 `"round_grad_input"` 改为 `"round_grad_weight"`（见 fix-spec 文档和 Phase 3 review 报告 M3 章节）。
+Norm emit_fn agent 完成后 → 运行全量测试 → commit → 进入 P3.5
 
 ---
 
 ## 断点续传必读文件
 
-1. `docs/plans/2026-04-25-defect-fix-specs.md`（M3 章节，若有；否则参考 Phase 3 review 报告）— round_key 修正
-2. `docs/plans/2026-04-25-phase3-review.md`（M3 条目）— matmul grad_weight round_key 详情
-3. `src/tests/_compat.py`（`_matmul_backward_pipelines` 函数）— 修复点
+1. `docs/plans/2026-04-24-phase3.md`（P3.5 + P3.6 章节）— 剩余任务规划
+2. `src/quantize/vector.py`（全文）— 已有 vec_* 函数清单
+3. `mx/simd_ops.py`（全文）— SIMD autograd.Function 参考
+4. `src/tests/test_vector_equiv.py`（全文）— 已有向量等价性测试
 
 ---
 
