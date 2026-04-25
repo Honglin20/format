@@ -11,3 +11,7 @@ from .conv import (ConvFunction, QuantizedConv1d, QuantizedConv2d,
                    QuantizedConv3d, ConvTransposeFunction,
                    QuantizedConvTranspose1d, QuantizedConvTranspose2d,
                    QuantizedConvTranspose3d)
+from .norm import (BatchNormFunction, LayerNormFunction, GroupNormFunction,
+                   RMSNormFunction, QuantizedBatchNorm1d, QuantizedBatchNorm2d,
+                   QuantizedBatchNorm3d, QuantizedLayerNorm, QuantizedGroupNorm,
+                   QuantizedRMSNorm)

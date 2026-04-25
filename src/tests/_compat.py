@@ -445,3 +445,57 @@ def _conv_transpose_backward_pipelines(mx_specs, block_size, input_elem, go_elem
         input_gw=input_gw_pipeline, grad_output_gw=grad_output_gw_pipeline,
         weight_gi=weight_gi_pipeline, grad_output_gi=grad_output_gi_pipeline,
     )
+
+
+# ---------------------------------------------------------------------------
+# Norm operator config adapter
+# ---------------------------------------------------------------------------
+
+def norm_config_from_mx_specs(mx_specs: dict, op_type: str = "batch_norm"):
+    """Convert an mx_specs dict to (OpQuantConfig, inner_scheme) for norm ops.
+
+    Norm operators (BatchNorm, LayerNorm, GroupNorm, RMSNorm) use only elemwise
+    quantization — no MX block quantization. The OpQuantConfig provides
+    entry quantization only (input/weight/bias/grad_output), while inner_scheme
+    provides the QuantScheme used for all intermediate vec_op computations.
+    Exit quantization (output/grad_input/grad_weight/grad_bias) is empty
+    because mx norm operators have no post-vec_op output quantization.
+
+    Args:
+        mx_specs: Dict from golden .pt file or mx_specs default dict.
+        op_type: "batch_norm", "layer_norm", "group_norm", or "rms_norm".
+
+    Returns:
+        Tuple of (OpQuantConfig, inner_scheme QuantScheme or None).
+    """
+    quantize_backprop = mx_specs.get("quantize_backprop", True)
+
+    # Inner scheme: same elemwise format used for all intermediate vec_ops
+    # and for entry quantization of input/weight/bias/grad_output.
+    # All vec_ops use mx_specs['round'] (default round mode).
+    inner_scheme = _elem_scheme(mx_specs, "round_output")
+
+    # Forward entry schemes — same format as inner_scheme, same round mode
+    # mx norm forward: vec_quantize(input), vec_quantize(weight), vec_quantize(bias)
+    # No output quantization after _norm_forward (already quantized by vec_add)
+    input_pipeline = (inner_scheme,) if inner_scheme is not None else ()
+    weight_pipeline = (inner_scheme,) if inner_scheme is not None else ()
+    bias_pipeline = (inner_scheme,) if inner_scheme is not None else ()
+    output_pipeline = ()
+
+    if not quantize_backprop:
+        return OpQuantConfig(
+            input=input_pipeline, weight=weight_pipeline,
+            bias=bias_pipeline, output=output_pipeline,
+        ), inner_scheme
+
+    # Backward entry for grad_output: vec_quantize(grad_output, mx_specs)
+    # Same format/round as inner_scheme since mx uses mx_specs['round']
+    go_pipeline = (inner_scheme,) if inner_scheme is not None else ()
+
+    # No exit quantization — mx norm backward has no post-vec_op quantization
+    return OpQuantConfig(
+        input=input_pipeline, weight=weight_pipeline,
+        bias=bias_pipeline, output=output_pipeline,
+        grad_output=go_pipeline,
+    ), inner_scheme
