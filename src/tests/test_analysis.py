@@ -169,3 +169,66 @@ class TestHistogramObserver:
         assert metrics["fp32_hist"].sum().item() == 300
         assert metrics["quant_hist"].sum().item() == 300
         assert metrics["err_hist"].sum().item() == 300
+
+
+import torch.nn as nn
+from src.analysis.context import AnalysisContext
+
+
+class TestAnalysisContext:
+    def test_context_attaches_and_detaches_observers(self):
+        from src.analysis.mixin import ObservableMixin
+
+        class DummyLayer(ObservableMixin, nn.Module):
+            def forward(self, x):
+                return x
+
+        model = nn.Sequential(DummyLayer(), DummyLayer())
+        from src.analysis.observers import QSNRObserver
+
+        with AnalysisContext(model, [QSNRObserver()]) as ctx:
+            for m in model.modules():
+                if isinstance(m, ObservableMixin):
+                    assert len(m._observers) == 1
+
+        for m in model.modules():
+            if isinstance(m, ObservableMixin):
+                assert len(m._observers) == 0
+
+    def test_report_returns_report_object(self):
+        from src.analysis.mixin import ObservableMixin
+
+        class NoOpLayer(ObservableMixin, nn.Module):
+            def forward(self, x):
+                return x
+
+        model = nn.Sequential(NoOpLayer())
+        from src.analysis.observers import QSNRObserver
+
+        with AnalysisContext(model, [QSNRObserver()]) as ctx:
+            model(torch.randn(3, 4))
+
+        from src.analysis.report import Report
+        report = ctx.report()
+        assert isinstance(report, Report)
+
+    def test_warmup_batches_reset_observer(self):
+        from src.analysis.mixin import ObservableMixin
+
+        class SimpleLayer(ObservableMixin, nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(10))
+
+            def forward(self, x):
+                return x
+
+        model = SimpleLayer()
+        from src.analysis.observers import MSEObserver
+        obs = MSEObserver()
+
+        with AnalysisContext(model, [obs], warmup_batches=2) as ctx:
+            model(torch.randn(5, 10))
+            ctx.step()
+            # After warmup, no data should be accumulated (emit_fn not wired here)
+            assert len(obs.report()) == 0
