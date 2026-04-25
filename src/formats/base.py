@@ -141,7 +141,7 @@ class FormatBase(ABC):
         return _quantize_mx(
             x, scale_bits=8, elem_format=self,
             block_size=granularity.block_size,
-            axes=-1, round_mode=round_mode,
+            axes=granularity.block_axis, round_mode=round_mode,
         )
 
     @staticmethod

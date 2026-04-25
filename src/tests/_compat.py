@@ -134,7 +134,7 @@ def _elem_scheme(mx_specs: dict, round_key: str = "round_output") -> Optional[Qu
 
 
 def _mx_scheme(mx_specs: dict, fmt_key: str, block_size: int,
-               round_key: str) -> Optional[QuantScheme]:
+               round_key: str, block_axis: int = -1) -> Optional[QuantScheme]:
     """Build an MX block QuantScheme from mx_specs, or None if format is unset."""
     fmt_name = mx_specs.get(fmt_key)
     if fmt_name is None:
@@ -142,7 +142,7 @@ def _mx_scheme(mx_specs: dict, fmt_key: str, block_size: int,
     fmt = FormatBase.from_str(fmt_name)
     bs = block_size if block_size > 0 else 32  # mx default block_size=32
     round_mode = mx_specs.get(round_key, mx_specs.get("round", "nearest"))
-    return QuantScheme(format=fmt, granularity=GranularitySpec.per_block(bs),
+    return QuantScheme(format=fmt, granularity=GranularitySpec.per_block(bs, axis=block_axis),
                        round_mode=round_mode)
 
 
@@ -178,9 +178,13 @@ def op_config_from_mx_specs(mx_specs: dict, op_type: str = "linear") -> OpQuantC
     bias_elem = _elem_scheme(mx_specs, "round_weight")
     bias_pipeline = (bias_elem,) if bias_elem is not None else ()
 
-    # output: elemwise cast (post-matmul + post-bias-add)
+    # output: two elemwise casts — one after F.linear, one after bias-add
+    # LinearFunction.forward uses output[0] for post-matmul, output[1] for post-bias
     output_elem = _elem_scheme(mx_specs, "round_output")
-    output_pipeline = (output_elem,) if output_elem is not None else ()
+    if output_elem is not None:
+        output_pipeline = (output_elem, output_elem)  # same scheme applied twice
+    else:
+        output_pipeline = ()
 
     if not quantize_backprop:
         return OpQuantConfig(
@@ -193,13 +197,13 @@ def op_config_from_mx_specs(mx_specs: dict, op_type: str = "linear") -> OpQuantC
     go_elem = _elem_scheme(mx_specs, "round_grad_input")
     go_pipeline = (go_elem,) if go_elem is not None else ()
 
-    # grad_weight gemm: input_gw + grad_output_gw
+    # grad_weight gemm: input_gw (axis=-2) + grad_output_gw (axis=-2)
     a_fmt_bp = mx_specs.get("a_elem_format_bp", mx_specs.get("a_elem_format"))
     a_fmt_bp_ex = mx_specs.get("a_elem_format_bp_ex", a_fmt_bp)
     input_gw_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_ex}, "a_elem_format",
-                              block_size, "round_mx_input_grad_weight") if a_fmt_bp_ex else None
+                              block_size, "round_mx_input_grad_weight", block_axis=-2) if a_fmt_bp_ex else None
     grad_output_gw_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_ex}, "a_elem_format",
-                                     block_size, "round_mx_grad_output_grad_weight") if a_fmt_bp_ex else None
+                                     block_size, "round_mx_grad_output_grad_weight", block_axis=-2) if a_fmt_bp_ex else None
     input_gw_pipeline = tuple(s for s in [input_elem, input_gw_mx] if s is not None)
     grad_output_gw_pipeline = tuple(s for s in [go_elem, grad_output_gw_mx] if s is not None)
 
@@ -207,13 +211,13 @@ def op_config_from_mx_specs(mx_specs: dict, op_type: str = "linear") -> OpQuantC
     gw_elem = _elem_scheme(mx_specs, "round_grad_weight")
     gw_pipeline = (gw_elem,) if gw_elem is not None else ()
 
-    # grad_input gemm: weight_gi + grad_output_gi
+    # grad_input gemm: weight_gi (axis=0) + grad_output_gi (axis=-1)
     w_fmt_bp = mx_specs.get("w_elem_format_bp", mx_specs.get("w_elem_format"))
     a_fmt_bp_os = mx_specs.get("a_elem_format_bp_os", mx_specs.get("a_elem_format"))
     weight_gi_mx = _mx_scheme({**mx_specs, "w_elem_format": w_fmt_bp}, "w_elem_format",
-                               block_size, "round_mx_weight_grad_input") if w_fmt_bp else None
+                               block_size, "round_mx_weight_grad_input", block_axis=0) if w_fmt_bp else None
     grad_output_gi_mx = _mx_scheme({**mx_specs, "a_elem_format": a_fmt_bp_os}, "a_elem_format",
-                                     block_size, "round_mx_grad_output_grad_input") if a_fmt_bp_os else None
+                                     block_size, "round_mx_grad_output_grad_input", block_axis=-1) if a_fmt_bp_os else None
     weight_gi_pipeline = tuple(s for s in [weight_elem, weight_gi_mx] if s is not None)
     grad_output_gi_pipeline = tuple(s for s in [go_elem, grad_output_gi_mx] if s is not None)
 

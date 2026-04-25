@@ -23,7 +23,7 @@ def test_bfloat_only_forward():
     assert len(cfg.input) == 1
     assert len(cfg.weight) == 1
     assert len(cfg.bias) == 1
-    assert len(cfg.output) == 1
+    assert len(cfg.output) == 2  # two elemwise casts (post-matmul + post-bias)
     # Backward should also be populated (quantize_backprop=True by default)
     assert cfg.is_training is True
 
