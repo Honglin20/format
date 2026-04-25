@@ -129,6 +129,19 @@ feat(scheme): add TransformBase + IdentityTransform to QuantScheme
 refactor(quantize): replace MxSpecs dispatch with Format.quantize() Strategy
 ```
 
+### 子任务生命周期（必须严格遵守）
+
+每个子任务从开始到结束遵循固定节奏，**不得跳过任何步骤**：
+
+1. **实现** → TDD（先写失败测试 → 实现 → 测试通过）
+2. **Review** → 派遣 review agent，修复 Critical/Major 问题
+3. **Commit** → 小步提交，测试 + 实现在同一 commit
+4. **总结与状态更新** → 立即更新 `docs/status/CURRENT.md`：打勾已完成子任务、更新下一步、更新断点续传必读文件、补充关键经验记录。**不积累，不延后**
+5. **Clear Context** → 在进入下一个子任务之前，**主动清理主 context 中属于已完成子任务的临时文件内容**（已读完的参考文件、中间调试输出等），只保留下一个子任务需要的最小文件集。具体做法：
+   - 将已完成子任务的详细发现写入 memory（如 `_bp key 行为`、`forward 保存策略`等跨任务复用的知识）
+   - 下一个子任务需要重新读取的文件，不保留在 context 中——通过 CURRENT.md 的"断点续传必读文件"在新会话/新 context 中按需加载
+   - 目的：避免 context 膨胀导致注意力分散和 token 浪费
+
 ### 测试门（每个 task 完成前必须通过）
 
 | Phase | 必须通过的测试 | 门槛 |
@@ -269,12 +282,20 @@ Review agent 发现的 **Critical / Major** 问题必须在当前子任务内修
 
 ### 6.2 完成每个子任务后（立即更新，不批量）
 
-在 `docs/status/CURRENT.md` 中：
+严格遵循 Section 4 "子任务生命周期"的步骤 4-5：
+
+**步骤 4 — 总结与状态更新**：在 `docs/status/CURRENT.md` 中：
 - 打勾已完成子任务
 - 更新"下一步"为具体的下一个子任务
 - 更新"断点续传必读文件"（只列真正需要读的文件，≤5 个，带行号范围）
+- 补充"关键经验记录"（跨任务复用的发现，如 _bp key 行为、axis 约定等）
 
 每完成一个子任务就 commit（小步提交），不要积累大改动。
+
+**步骤 5 — Clear Context**：状态更新完成后、进入下一个子任务之前：
+- 将已发现的可复用知识写入 memory 文件（`~/.claude/projects/.../memory/`）
+- 不在 context 中保留已完成子任务的中间文件内容
+- 下一个子任务通过"断点续传必读文件"按需加载，而非依赖 context 残留
 
 ### 6.3 CURRENT.md 固定格式
 
