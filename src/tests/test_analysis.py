@@ -144,3 +144,28 @@ class TestMSEObserver:
         metrics = obs._measure(("tensor",), f, q)
         # MSE = (0.01+0.04+0.09)/3
         assert metrics["mse"] == pytest.approx(0.04667, abs=1e-5)
+
+
+from src.analysis.observers import HistogramObserver
+
+
+class TestHistogramObserver:
+    def test_bin_count(self):
+        obs = HistogramObserver(n_bins=64)
+        f = torch.randn(500)
+        q = f + 0.01 * torch.randn(500)
+
+        metrics = obs._measure(("tensor",), f, q)
+        assert metrics["fp32_hist"].numel() == 64
+        assert metrics["quant_hist"].numel() == 64
+        assert metrics["err_hist"].numel() == 64
+
+    def test_counts_sum_to_total(self):
+        obs = HistogramObserver(n_bins=32)
+        f = torch.randn(300)
+        q = f + 0.01 * torch.randn(300)
+
+        metrics = obs._measure(("tensor",), f, q)
+        assert metrics["fp32_hist"].sum().item() == 300
+        assert metrics["quant_hist"].sum().item() == 300
+        assert metrics["err_hist"].sum().item() == 300

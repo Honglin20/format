@@ -73,3 +73,18 @@ class MSEObserver(SliceAwareObserver):
 
     def _measure(self, key, fp32, quant):
         return {"mse": (fp32 - quant).pow(2).mean().item()}
+
+
+class HistogramObserver(SliceAwareObserver):
+    """fp32 / quant / error three-channel histogram."""
+
+    def __init__(self, n_bins: int = 128):
+        super().__init__()
+        self.n_bins = n_bins
+
+    def _measure(self, key, fp32, quant):
+        return {
+            "fp32_hist": torch.histc(fp32, bins=self.n_bins).cpu(),
+            "quant_hist": torch.histc(quant, bins=self.n_bins).cpu(),
+            "err_hist": torch.histc(fp32 - quant, bins=self.n_bins).cpu(),
+        }
