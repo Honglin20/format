@@ -137,10 +137,12 @@ refactor(quantize): replace MxSpecs dispatch with Format.quantize() Strategy
 2. **Review** → 派遣 review agent，修复 Critical/Major 问题
 3. **Commit** → 小步提交，测试 + 实现在同一 commit
 4. **总结与状态更新** → 立即更新 `docs/status/CURRENT.md`：打勾已完成子任务、更新下一步、更新断点续传必读文件、补充关键经验记录。**不积累，不延后**
-5. **Clear Context** → 在进入下一个子任务之前，**主动清理主 context 中属于已完成子任务的临时文件内容**（已读完的参考文件、中间调试输出等），只保留下一个子任务需要的最小文件集。具体做法：
-   - 将已完成子任务的详细发现写入 memory（如 `_bp key 行为`、`forward 保存策略`等跨任务复用的知识）
-   - 下一个子任务需要重新读取的文件，不保留在 context 中——通过 CURRENT.md 的"断点续传必读文件"在新会话/新 context 中按需加载
-   - 目的：避免 context 膨胀导致注意力分散和 token 浪费
+5. **子任务结束信号** → 完成上述步骤后，Claude 应向用户说明：**"子任务 X 已完成并提交。下一步是 Y。请按需 `/clear` 或开始新对话，以保持 context 干净。"**
+   - 用户决定何时执行 `/clear`（Claude Code 的 `/clear` 命令清除对话历史）
+   - Claude 不应在同一 context 内连续推进多个子任务，除非用户明确要求
+   - CURRENT.md 是唯一持久化状态，context 清空后依靠 CURRENT.md 断点续传
+
+> **说明：context 控制由用户主导**。Claude Code 的 context 压缩是系统自动行为，Claude 无法主动"清理"已在 context 中的内容。"Clear Context"的实操含义是：子任务结束 → 更新 CURRENT.md → 提示用户 → 等待用户 `/clear` 或开新会话。不要在同一会话中"假装"context 已清空而继续工作。
 
 ### 测试门（每个 task 完成前必须通过）
 
@@ -175,6 +177,9 @@ refactor(quantize): replace MxSpecs dispatch with Format.quantize() Strategy
 | API 陷阱 | 有无静默类型错误、缺类型验证、破坏性签名变更 |
 | 边界约束 | 是否违反 Section 2 的 `src/` ↔ `mx/` 隔离约束 |
 | 可哈希性 | 作为 frozen dataclass 字段的对象是否实现 `__eq__`/`__hash__` |
+| Observer 接入（Phase 3+ 算子）| 新算子是否在量化关键点调用 `_emit()`；`_emit()` 只能在持有 self 的 `QuantizedXxx.forward()` 中调用，不能在 `autograd.Function` 静态方法中 |
+| 接口一致性（算子族）| 新算子的构造参数是否遵循统一约定（matmul族用 `cfg: OpQuantConfig`，inner_scheme族文档化例外）；不得随意引入第三种配置接口 |
+| 分析层兼容（iter_slices）| 若新增 `GranularityMode` 或修改现有模式的 axis 语义，检查 `iter_slices` 是否需要同步更新 |
 
 Review agent 发现的 **Critical / Major** 问题必须在当前子任务内修复，不得留到下一个子任务。
 
@@ -204,6 +209,7 @@ Review agent 发现的 **Critical / Major** 问题必须在当前子任务内修
 - grep / diff 的长列表输出通过 agent 汇总为结论后返回主 context
 - 主 context 只保留"当前子任务直接需要读"的文件内容
 - 不要在主 context 里连续读取 5 个以上文件（用 Explore agent 代替）
+- 每完成一个子任务就触发"子任务结束信号"（见 Section 4 生命周期步骤 5），不在同一 context 内连续推进多个子任务
 
 ### 5.4 API 设计约束
 
@@ -313,6 +319,12 @@ Review agent 发现的 **Critical / Major** 问题必须在当前子任务内修
 - [ ] **子任务 3（进行中）**
 - [ ] 子任务 4
 
+## 待讨论设计决策（如有）
+
+> 用于记录需要与用户确认再继续的设计问题。有未决策项时不得推进依赖它的子任务。
+
+- [ ] 决策 A：<描述选项 A vs B，以及影响范围>
+
 ## 下一步（具体动作）
 
 <一句话，精确到函数/文件/行号级别>
@@ -323,6 +335,10 @@ Review agent 发现的 **Critical / Major** 问题必须在当前子任务内修
 2. `src/formats/base.py`（全文）
 3. `src/quantize/elemwise.py`（1-120 行）
 4. `docs/plans/2026-04-24-phase2-fix.md`（全文）
+
+## 关键经验记录
+
+<跨任务复用的发现，每条一句话>
 ```
 
 ### 6.4 新终端续接流程（Claude 自动执行）
@@ -331,8 +347,22 @@ Review agent 发现的 **Critical / Major** 问题必须在当前子任务内修
 1. 读 CLAUDE.md（本文件）
 2. 读 docs/status/CURRENT.md
 3. 只读 CURRENT.md 里"断点续传必读文件"清单中的文件
-4. 确认当前 task 和下一步后，继续工作
+4. 若 CURRENT.md 有"待讨论设计决策"，先与用户确认后再继续
+5. 确认当前 task 和下一步后，继续工作
 ```
+
+### 6.5 Context 管理实操（2026-04-25 补充）
+
+Claude Code 的 context 是对话历史，系统会自动压缩，但**Claude 无法主动清除**。以下是可操作的 context 管理策略：
+
+| 操作 | 执行者 | 时机 |
+|---|---|---|
+| 子任务完成信号 | Claude（文字说明） | 每个子任务 commit 后 |
+| `/clear` 清空 context | **用户** | 在 Claude 发出信号后，用户决定是否清空 |
+| 新对话开始（最彻底） | **用户** | 跨大子任务时推荐 |
+| 在 context 内使用 Explore/general agent | Claude | 需要大量文件读取时，避免污染主 context |
+
+**关键原则**：每次新对话/清空 context 后，Claude 必须从 CURRENT.md 的"断点续传必读文件"重新加载状态，不依赖 context 历史。**CURRENT.md 是唯一可信的持久化状态。**
 
 ---
 
@@ -348,5 +378,6 @@ Review agent 发现的 **Critical / Major** 问题必须在当前子任务内修
 | `docs/plans/2026-04-24-phase2-fix.md` | Phase 2 三轴扶正实现计划（P2F-1 ~ P2F-6）|
 | `docs/plans/2026-04-24-p2f7-findings.md` | P2F-7 Phase 2 review 后缺陷收口清单 |
 | `docs/plans/2026-04-24-phase3.md` | Phase 3 算子层实现计划（P3.0 ~ P3.6，RNN 不做）|
+| `docs/plans/2026-04-25-phase3-review.md` | Phase 3 代码 Review 报告（C1/M1-M5/m1-m6 缺陷清单，修复优先级）|
 | `docs/status/CURRENT.md` | 活跃 task 断点（新终端必读） |
 | `docs/plans/` | 各 task 详细实现计划 |
