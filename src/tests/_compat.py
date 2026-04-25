@@ -506,39 +506,44 @@ def norm_config_from_mx_specs(mx_specs: dict, op_type: str = "batch_norm"):
 # ---------------------------------------------------------------------------
 
 def activation_config_from_mx_specs(mx_specs: dict):
-    """Convert an mx_specs dict to (inner_scheme, quantize_backprop) for activation ops.
+    """Convert an mx_specs dict to OpQuantConfig for activation ops.
 
     Activation operators use only elemwise quantization via inner_scheme.
-    No OpQuantConfig needed — all quantization is per-step via vec_ops.
+    The returned OpQuantConfig has input=(inner_scheme,) for forward and
+    grad_input=(inner_scheme,) for backward QAT (empty if quantize_backprop=False).
 
     Returns:
-        Tuple of (inner_scheme QuantScheme or None, quantize_backprop bool).
+        OpQuantConfig with populated input/grad_input fields.
     """
     if mx_specs is None:
-        return None, True
+        return OpQuantConfig()
     quantize_backprop = mx_specs.get("quantize_backprop", True)
     inner_scheme = _elem_scheme(mx_specs, "round_output")
-    return inner_scheme, quantize_backprop
+    fwd_pipeline = (inner_scheme,) if inner_scheme is not None else ()
+    bw_pipeline = (inner_scheme,) if (inner_scheme is not None and quantize_backprop) else ()
+    return OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
 
 
 def softmax_config_from_mx_specs(mx_specs: dict):
-    """Convert an mx_specs dict to (inner_scheme, quantize_backprop, softmax_exp2) for softmax.
+    """Convert an mx_specs dict to (OpQuantConfig, softmax_exp2) for softmax.
 
     Returns:
-        Tuple of (inner_scheme, quantize_backprop, softmax_exp2).
+        Tuple of (OpQuantConfig, softmax_exp2).
     """
     if mx_specs is None:
-        return None, True, False
+        return OpQuantConfig(), False
     quantize_backprop = mx_specs.get("quantize_backprop", True)
     softmax_exp2 = mx_specs.get("softmax_exp2", False)
     inner_scheme = _elem_scheme(mx_specs, "round_output")
-    return inner_scheme, quantize_backprop, softmax_exp2
+    fwd_pipeline = (inner_scheme,) if inner_scheme is not None else ()
+    bw_pipeline = (inner_scheme,) if (inner_scheme is not None and quantize_backprop) else ()
+    return OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline), softmax_exp2
 
 
 def pool_config_from_mx_specs(mx_specs: dict):
-    """Convert an mx_specs dict to (inner_scheme, quantize_backprop) for pool ops.
+    """Convert an mx_specs dict to OpQuantConfig for pool ops.
 
     Returns:
-        Tuple of (inner_scheme, quantize_backprop).
+        OpQuantConfig with populated input/grad_input fields.
     """
     return activation_config_from_mx_specs(mx_specs)

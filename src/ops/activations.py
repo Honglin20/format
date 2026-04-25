@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.scheme.quant_scheme import QuantScheme
+from src.scheme.op_config import OpQuantConfig
 from src.analysis.mixin import ObservableMixin
 from src.ops.vec_ops import (
     vec_quantize, vec_add, vec_sub, vec_mul, vec_div,
@@ -60,18 +61,28 @@ class SigmoidFunction(torch.autograd.Function):
 
 
 class QuantizedSigmoid(ObservableMixin, nn.Sigmoid):
-    def __init__(self, inner_scheme: QuantScheme = None,
+    def __init__(self, cfg: OpQuantConfig = None,
+                 inner_scheme: QuantScheme = None,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         super().__init__()
-        self.inner_scheme = inner_scheme
-        self.quantize_backprop = quantize_backprop
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None:
             return super().forward(input)
         return SigmoidFunction.apply(
-            input, self.inner_scheme, self.quantize_backprop, self._analysis_name,
+            input, inner_scheme, quantize_backprop, self._analysis_name,
         )
 
 
@@ -105,18 +116,28 @@ class TanhFunction(torch.autograd.Function):
 
 
 class QuantizedTanh(ObservableMixin, nn.Tanh):
-    def __init__(self, inner_scheme: QuantScheme = None,
+    def __init__(self, cfg: OpQuantConfig = None,
+                 inner_scheme: QuantScheme = None,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         super().__init__()
-        self.inner_scheme = inner_scheme
-        self.quantize_backprop = quantize_backprop
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None:
             return super().forward(input)
         return TanhFunction.apply(
-            input, self.inner_scheme, self.quantize_backprop, self._analysis_name,
+            input, inner_scheme, quantize_backprop, self._analysis_name,
         )
 
 
@@ -158,19 +179,29 @@ class ReLUFunction(torch.autograd.Function):
 
 
 class QuantizedReLU(ObservableMixin, nn.ReLU):
-    def __init__(self, inplace=False, inner_scheme: QuantScheme = None,
+    def __init__(self, inplace=False, cfg: OpQuantConfig = None,
+                 inner_scheme: QuantScheme = None,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         super().__init__(inplace=inplace)
-        self.inner_scheme = inner_scheme
-        self.quantize_backprop = quantize_backprop
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None:
             return super().forward(input)
         return ReLUFunction.apply(
-            input, self.inplace, self.inner_scheme,
-            self.quantize_backprop, self._analysis_name,
+            input, self.inplace, inner_scheme,
+            quantize_backprop, self._analysis_name,
         )
 
 
@@ -211,19 +242,29 @@ class ReLU6Function(torch.autograd.Function):
 
 
 class QuantizedReLU6(ObservableMixin, nn.ReLU6):
-    def __init__(self, inplace=False, inner_scheme: QuantScheme = None,
+    def __init__(self, inplace=False, cfg: OpQuantConfig = None,
+                 inner_scheme: QuantScheme = None,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         super().__init__(inplace=inplace)
-        self.inner_scheme = inner_scheme
-        self.quantize_backprop = quantize_backprop
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None:
             return super().forward(input)
         return ReLU6Function.apply(
-            input, self.inplace, self.inner_scheme,
-            self.quantize_backprop, self._analysis_name,
+            input, self.inplace, inner_scheme,
+            quantize_backprop, self._analysis_name,
         )
 
 
@@ -266,19 +307,29 @@ class LeakyReLUFunction(torch.autograd.Function):
 
 class QuantizedLeakyReLU(ObservableMixin, nn.LeakyReLU):
     def __init__(self, negative_slope=0.01, inplace=False,
+                 cfg: OpQuantConfig = None,
                  inner_scheme: QuantScheme = None,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         super().__init__(negative_slope=negative_slope, inplace=inplace)
-        self.inner_scheme = inner_scheme
-        self.quantize_backprop = quantize_backprop
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None:
             return super().forward(input)
         return LeakyReLUFunction.apply(
             input, self.negative_slope, self.inplace,
-            self.inner_scheme, self.quantize_backprop, self._analysis_name,
+            inner_scheme, quantize_backprop, self._analysis_name,
         )
 
 
@@ -321,19 +372,29 @@ class SiLUFunction(torch.autograd.Function):
 
 
 class QuantizedSiLU(ObservableMixin, nn.SiLU):
-    def __init__(self, inplace=False, inner_scheme: QuantScheme = None,
+    def __init__(self, inplace=False, cfg: OpQuantConfig = None,
+                 inner_scheme: QuantScheme = None,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         super().__init__(inplace=inplace)
-        self.inner_scheme = inner_scheme
-        self.quantize_backprop = quantize_backprop
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None:
             return super().forward(input)
         return SiLUFunction.apply(
-            input, self.inplace, self.inner_scheme,
-            self.quantize_backprop, self._analysis_name,
+            input, self.inplace, inner_scheme,
+            quantize_backprop, self._analysis_name,
         )
 
 
@@ -397,21 +458,31 @@ class GELUFunction(torch.autograd.Function):
 
 
 class QuantizedGELU(ObservableMixin, nn.GELU):
-    def __init__(self, inner_scheme: QuantScheme = None, first_order_gelu=False,
+    def __init__(self, cfg: OpQuantConfig = None,
+                 inner_scheme: QuantScheme = None, first_order_gelu=False,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         try:
             super().__init__(approximate='tanh')
         except TypeError:
             super().__init__()
-        self.inner_scheme = inner_scheme
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self.first_order_gelu = first_order_gelu
-        self.quantize_backprop = quantize_backprop
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None and not self.first_order_gelu:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None and not self.first_order_gelu:
             return super().forward(input)
         return GELUFunction.apply(
-            input, self.inner_scheme, self.first_order_gelu,
-            self.quantize_backprop, self._analysis_name,
+            input, inner_scheme, self.first_order_gelu,
+            quantize_backprop, self._analysis_name,
         )

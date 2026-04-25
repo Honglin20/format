@@ -50,7 +50,9 @@ class TestSoftmax:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
-        inner, qbp, exp2 = softmax_config_from_mx_specs(mx_specs)
+        cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"softmax-fwd ({name})")
@@ -63,7 +65,9 @@ class TestSoftmax:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
-        inner, qbp, exp2 = softmax_config_from_mx_specs(mx_specs)
+        cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
         mx_out.sum().backward()
@@ -78,7 +82,9 @@ class TestSoftmax:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.softmax(mx_x, dim=0, mx_specs=mx_specs)
-        inner, qbp, exp2 = softmax_config_from_mx_specs(mx_specs)
+        cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, 0, inner, exp2, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"softmax-fwd-dim0 ({name})")
@@ -91,7 +97,9 @@ class TestSoftmax:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
-        inner, qbp, exp2 = softmax_config_from_mx_specs(mx_specs)
+        cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"softmax-fwd-exp2 ({name})")
@@ -104,7 +112,9 @@ class TestSoftmax:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
-        inner, qbp, exp2 = softmax_config_from_mx_specs(mx_specs)
+        cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
         mx_out.sum().backward()
@@ -121,7 +131,9 @@ class TestSoftmaxSTE:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
-        inner, qbp, exp2 = softmax_config_from_mx_specs(mx_specs)
+        cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"softmax-ste-fwd ({name})")

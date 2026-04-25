@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.scheme.quant_scheme import QuantScheme
+from src.scheme.op_config import OpQuantConfig
 from src.analysis.mixin import ObservableMixin
 from src.ops.vec_ops import (
     vec_quantize, vec_sub, vec_mul, vec_div,
@@ -74,19 +75,29 @@ class SoftmaxFunction(torch.autograd.Function):
 
 
 class QuantizedSoftmax(ObservableMixin, nn.Softmax):
-    def __init__(self, dim=None, inner_scheme: QuantScheme = None,
+    def __init__(self, dim=None, cfg: OpQuantConfig = None,
+                 inner_scheme: QuantScheme = None,
                  softmax_exp2: bool = False,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         super().__init__(dim)
-        self.inner_scheme = inner_scheme
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self.softmax_exp2 = softmax_exp2
-        self.quantize_backprop = quantize_backprop
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None:
             return super().forward(input)
         return SoftmaxFunction.apply(
-            input, self.dim, self.inner_scheme, self.softmax_exp2,
-            self.quantize_backprop, self._analysis_name,
+            input, self.dim, inner_scheme, self.softmax_exp2,
+            quantize_backprop, self._analysis_name,
         )

@@ -48,7 +48,9 @@ class TestAdaptiveAvgPool2d:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.adaptive_avg_pool2d(mx_x, output_size, mx_specs=mx_specs)
-        inner, qbp = pool_config_from_mx_specs(mx_specs)
+        cfg = pool_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = AdaptiveAvgPool2dFunction.apply(src_x, output_size, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"pool-fwd ({name})")
@@ -63,7 +65,9 @@ class TestAdaptiveAvgPool2d:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.adaptive_avg_pool2d(mx_x, output_size, mx_specs=mx_specs)
-        inner, qbp = pool_config_from_mx_specs(mx_specs)
+        cfg = pool_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = AdaptiveAvgPool2dFunction.apply(src_x, output_size, inner, qbp)
 
         mx_out.sum().backward()
@@ -80,7 +84,9 @@ class TestAdaptiveAvgPool2d:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.adaptive_avg_pool2d(mx_x, output_size, mx_specs=mx_specs)
-        inner, qbp = pool_config_from_mx_specs(mx_specs)
+        cfg = pool_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = AdaptiveAvgPool2dFunction.apply(src_x, output_size, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"pool-fwd-int ({name})")
@@ -97,7 +103,9 @@ class TestAdaptiveAvgPool2dSTE:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.adaptive_avg_pool2d(mx_x, output_size, mx_specs=mx_specs)
-        inner, qbp = pool_config_from_mx_specs(mx_specs)
+        cfg = pool_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = AdaptiveAvgPool2dFunction.apply(src_x, output_size, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"pool-ste-fwd ({name})")

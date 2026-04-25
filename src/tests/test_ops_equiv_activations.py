@@ -59,7 +59,9 @@ class TestSigmoid:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.sigmoid(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SigmoidFunction.apply(src_x, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"sigmoid-fwd ({name})")
@@ -72,7 +74,9 @@ class TestSigmoid:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.sigmoid(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SigmoidFunction.apply(src_x, inner, qbp)
 
         mx_out.sum().backward()
@@ -93,7 +97,9 @@ class TestTanh:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.tanh(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = TanhFunction.apply(src_x, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"tanh-fwd ({name})")
@@ -106,7 +112,9 @@ class TestTanh:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.tanh(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = TanhFunction.apply(src_x, inner, qbp)
 
         mx_out.sum().backward()
@@ -127,7 +135,9 @@ class TestReLU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.relu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = ReLUFunction.apply(src_x, False, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"relu-fwd ({name})")
@@ -140,7 +150,9 @@ class TestReLU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.relu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = ReLUFunction.apply(src_x, False, inner, qbp)
 
         mx_out.sum().backward()
@@ -161,7 +173,9 @@ class TestReLU6:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.relu6(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = ReLU6Function.apply(src_x, False, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"relu6-fwd ({name})")
@@ -174,7 +188,9 @@ class TestReLU6:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.relu6(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = ReLU6Function.apply(src_x, False, inner, qbp)
 
         mx_out.sum().backward()
@@ -195,7 +211,9 @@ class TestLeakyReLU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.leaky_relu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = LeakyReLUFunction.apply(src_x, 0.01, False, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"leaky_relu-fwd ({name})")
@@ -208,7 +226,9 @@ class TestLeakyReLU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.leaky_relu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = LeakyReLUFunction.apply(src_x, 0.01, False, inner, qbp)
 
         mx_out.sum().backward()
@@ -229,7 +249,9 @@ class TestSiLU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.silu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SiLUFunction.apply(src_x, False, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"silu-fwd ({name})")
@@ -242,7 +264,9 @@ class TestSiLU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.silu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SiLUFunction.apply(src_x, False, inner, qbp)
 
         mx_out.sum().backward()
@@ -263,7 +287,9 @@ class TestGELU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, False, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"gelu-fwd-detailed ({name})")
@@ -276,7 +302,9 @@ class TestGELU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, False, qbp)
 
         mx_out.sum().backward()
@@ -291,7 +319,9 @@ class TestGELU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs, first_order_gelu=True)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, True, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"gelu-fwd-1st ({name})")
@@ -304,7 +334,9 @@ class TestGELU:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs, first_order_gelu=True)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, True, qbp)
 
         mx_out.sum().backward()
@@ -327,7 +359,9 @@ class TestActivationSTE:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.sigmoid(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = SigmoidFunction.apply(src_x, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"sigmoid-ste-fwd ({name})")
@@ -343,7 +377,9 @@ class TestActivationSTE:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.relu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = ReLUFunction.apply(src_x, False, inner, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"relu-ste-fwd ({name})")
@@ -359,7 +395,9 @@ class TestActivationSTE:
         src_x = x.clone().requires_grad_(True)
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs)
-        inner, qbp = activation_config_from_mx_specs(mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input[0] if cfg.input else None
+        qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, False, qbp)
 
         _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"gelu-ste-fwd ({name})")

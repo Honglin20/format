@@ -241,3 +241,57 @@ def test_empty_pipeline_means_no_quantization():
     for s in cfg.input:
         pytest.fail("Should not iterate over empty tuple")
     assert cfg.is_training is False
+
+
+# ---------------------------------------------------------------------------
+# Activation module OpQuantConfig integration (M1 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_activation_cfg_from_inner_scheme():
+    """QuantizedSigmoid(inner_scheme=s) converts to cfg.input == (s,)."""
+    from src.ops.activations import QuantizedSigmoid
+    s = _s("fp8_e4m3")
+    mod = QuantizedSigmoid(inner_scheme=s)
+    assert isinstance(mod.cfg, OpQuantConfig)
+    assert mod.cfg.input == (s,)
+    assert mod.cfg.grad_input == (s,)  # quantize_backprop=True by default
+
+
+def test_activation_cfg_from_opquantconfig():
+    """QuantizedSigmoid(cfg=OpQuantConfig(input=(s,))) accepts cfg directly."""
+    from src.ops.activations import QuantizedSigmoid
+    s = _s("fp8_e4m3")
+    cfg = OpQuantConfig(input=(s,))
+    mod = QuantizedSigmoid(cfg=cfg)
+    assert mod.cfg is cfg
+
+
+def test_activation_cfg_both_raises():
+    """Passing both cfg and inner_scheme raises ValueError."""
+    from src.ops.activations import QuantizedSigmoid
+    s = _s("fp8_e4m3")
+    cfg = OpQuantConfig(input=(s,))
+    with pytest.raises(ValueError, match="cfg.*inner_scheme"):
+        QuantizedSigmoid(cfg=cfg, inner_scheme=s)
+
+
+def test_activation_passthrough_empty_cfg():
+    """QuantizedSigmoid(cfg=OpQuantConfig()) is passthrough = same as nn.Sigmoid."""
+    import torch
+    from src.ops.activations import QuantizedSigmoid
+    torch.manual_seed(42)
+    x = torch.randn(4, 8)
+    mod = QuantizedSigmoid(cfg=OpQuantConfig())
+    out = mod(x)
+    expected = torch.sigmoid(x)
+    assert torch.equal(out, expected)
+
+
+def test_activation_is_training_from_cfg():
+    """cfg.grad_input non-empty → cfg.is_training == True."""
+    s = _s("fp8_e4m3")
+    cfg = OpQuantConfig(input=(s,), grad_input=(s,))
+    assert cfg.is_training is True
+    cfg_no_bw = OpQuantConfig(input=(s,))
+    assert cfg_no_bw.is_training is False

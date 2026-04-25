@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.scheme.quant_scheme import QuantScheme
+from src.scheme.op_config import OpQuantConfig
 from src.analysis.mixin import ObservableMixin
 from src.ops.vec_ops import vec_add, vec_reduce_mean
 
@@ -107,18 +108,28 @@ class AdaptiveAvgPool2dFunction(torch.autograd.Function):
 
 
 class QuantizedAdaptiveAvgPool2d(ObservableMixin, nn.Module):
-    def __init__(self, output_size, inner_scheme: QuantScheme = None,
+    def __init__(self, output_size, cfg: OpQuantConfig = None,
+                 inner_scheme: QuantScheme = None,
                  quantize_backprop: bool = True, name: str = None, **kwargs):
         super().__init__()
         self.output_size = output_size
-        self.inner_scheme = inner_scheme
-        self.quantize_backprop = quantize_backprop
+        if cfg is not None and inner_scheme is not None:
+            raise ValueError("Cannot specify both cfg and inner_scheme")
+        if inner_scheme is not None and cfg is None:
+            fwd_pipeline = (inner_scheme,)
+            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
+            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+        if cfg is None:
+            cfg = OpQuantConfig()
+        self.cfg = cfg
         self._analysis_name = name
 
     def forward(self, input):
-        if self.inner_scheme is None:
+        inner_scheme = self.cfg.input[0] if self.cfg.input else None
+        quantize_backprop = bool(self.cfg.grad_input)
+        if inner_scheme is None:
             return _f_adaptive_avg_pool2d(input, self.output_size)
         return AdaptiveAvgPool2dFunction.apply(
-            input, self.output_size, self.inner_scheme,
-            self.quantize_backprop, self._analysis_name,
+            input, self.output_size, inner_scheme,
+            quantize_backprop, self._analysis_name,
         )
