@@ -8,4 +8,6 @@ from .linear import QuantizedLinear, LinearFunction
 from .matmul import MatMulFunction, quantized_matmul
 from .bmm import BMMFunction, quantized_bmm
 from .conv import (ConvFunction, QuantizedConv1d, QuantizedConv2d,
-                   QuantizedConv3d)
+                   QuantizedConv3d, ConvTransposeFunction,
+                   QuantizedConvTranspose1d, QuantizedConvTranspose2d,
+                   QuantizedConvTranspose3d)
