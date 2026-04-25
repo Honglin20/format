@@ -30,9 +30,10 @@ class MatMulFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, in1, in2, bias, cfg: OpQuantConfig, name=None, mode_config='aa'):
+    def forward(ctx, in1, in2, bias, cfg: OpQuantConfig, name=None, mode_config='aa', emit_fn=None):
         assert mode_config in ("aa", "aw", "wa")
         ctx.mode_config = mode_config
+        ctx.emit_fn = emit_fn
 
         # Save raw tensors for STE backward
         in1_raw, in2_raw = in1, in2
@@ -46,29 +47,47 @@ class MatMulFunction(torch.autograd.Function):
         in2_mx = tuple(s for s in cfg.weight if s.granularity.mode == GranularityMode.PER_BLOCK)
 
         # Elemwise quantize in1 and in2
+        in_idx = 0
         for s in in1_elem:
+            fp_in1 = in1
             in1 = quantize(in1, s)
+            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in1, in1, s)
+            in_idx += 1
         in1_post_elem = in1
 
+        for s in in1_mx:
+            fp_in1 = in1
+            in1 = quantize(in1, s)
+            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in1, in1, s)
+            in_idx += 1
+
+        wt_idx = 0
         for s in in2_elem:
+            fp_in2 = in2
             in2 = quantize(in2, s)
+            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_in2, in2, s)
+            wt_idx += 1
         in2_post_elem = in2
 
-        # MX quantize in1 (along last dim, axis=-1)
-        for s in in1_mx:
-            in1 = quantize(in1, s)
-
+        # MX quantize in1 (along last dim, axis=-1) — already covered in the MX loop above
         # MX quantize in2 (along second-to-last dim, axis=-2)
         for s in in2_mx:
+            fp_in2 = in2
             in2 = quantize(in2, s)
+            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_in2, in2, s)
+            wt_idx += 1
 
         # Bias quantization
         q_bias = None
         if bias is not None:
             ctx.bias_shape = list(bias.shape)
             q_bias = bias
+            b_idx = 0
             for s in cfg.bias:
+                fp_b = q_bias
                 q_bias = quantize(q_bias, s)
+                if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
+                b_idx += 1
         else:
             ctx.bias_shape = None
 
@@ -85,14 +104,21 @@ class MatMulFunction(torch.autograd.Function):
         out = torch.matmul(in1, in2)
 
         # Output quantization step 1 (post-matmul)
+        out_idx = 0
         if len(cfg.output) > 0:
+            fp_out = out
             out = quantize(out, cfg.output[0])
+            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_out, out, cfg.output[0])
+            out_idx += 1
 
         # Add bias + output quantization step 2 (post-bias)
         if q_bias is not None:
             out = out + q_bias
             if len(cfg.output) > 1:
+                fp_out = out
                 out = quantize(out, cfg.output[1])
+                if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_out, out, cfg.output[1])
+                out_idx += 1
 
         return out
 
@@ -100,10 +126,15 @@ class MatMulFunction(torch.autograd.Function):
     def backward(ctx, grad_out):
         in1, in2 = ctx.saved_tensors
         cfg: OpQuantConfig = ctx.cfg
+        emit_fn = ctx.emit_fn
 
         # Quantize grad_output
+        go_idx = 0
         for s in cfg.grad_output:
+            fp_go = grad_out
             grad_out = quantize(grad_out, s)
+            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_out, s)
+            go_idx += 1
 
         # --- grad_in1: grad_out @ in2^T ---
         # grad_in2: in1^T @ grad_out ---
@@ -135,11 +166,19 @@ class MatMulFunction(torch.autograd.Function):
         grad_in2 = torch.matmul(in1_for_grad_in2.transpose(-1, -2), g_for_grad_in2)
 
         # Exit elemwise quantize
+        gi_idx = 0
         for s in cfg.grad_input:
+            fp_gi = grad_in1
             grad_in1 = quantize(grad_in1, s)
+            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_in1, s)
+            gi_idx += 1
 
+        gw_idx = 0
         for s in cfg.grad_weight:
+            fp_gw = grad_in2
             grad_in2 = quantize(grad_in2, s)
+            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_in2, s)
+            gw_idx += 1
 
         # grad_bias
         grad_bias = None
@@ -151,7 +190,7 @@ class MatMulFunction(torch.autograd.Function):
             for s in cfg.grad_bias:
                 grad_bias = quantize(grad_bias, s)
 
-        return grad_in1, grad_in2, grad_bias, None, None, None
+        return grad_in1, grad_in2, grad_bias, None, None, None, None
 
 
 def quantized_matmul(in1, in2, bias=None, cfg=None, name=None, mode_config='aa'):

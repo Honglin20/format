@@ -238,3 +238,74 @@ def test_quant_event_non_scheme_raises():
 def test_quant_event_invalid_group_map_raises():
     with pytest.raises(TypeError, match="group_map must be a Tensor or None"):
         QuantEvent(**_valid_event_kwargs(group_map="bad"))
+
+
+# ---------------------------------------------------------------------------
+# emit_fn integration tests — C1: wired into operator forward/backward
+# ---------------------------------------------------------------------------
+
+from src.scheme.op_config import OpQuantConfig
+
+
+def _qcfg():
+    """One-scheme-per-role OpQuantConfig for emit_fn integration tests."""
+    s = _s("fp8_e4m3")
+    return OpQuantConfig(
+        input=(s,), weight=(s,), bias=(s,), output=(s,),
+        grad_output=(s,), grad_weight=(s,), grad_input=(s,),
+    )
+
+
+class _SpyObserver(ObserverBase):
+    def __init__(self):
+        self.events = []
+    def on_event(self, event):
+        self.events.append(event)
+
+
+def test_emit_not_called_without_observers():
+    """No observers attached → emit_fn is None → operator runs normally."""
+    from src.ops.linear import QuantizedLinear
+    mod = QuantizedLinear(4, 8, cfg=_qcfg())
+    x = torch.randn(2, 4)
+    out = mod(x)
+    assert out.shape == (2, 8)
+
+
+def test_emit_called_with_observer():
+    """Attaching a spy observer → events are emitted during forward."""
+    from src.ops.linear import QuantizedLinear
+    mod = QuantizedLinear(4, 8, cfg=_qcfg())
+    spy = _SpyObserver()
+    mod._observers = [spy]
+    mod(torch.randn(2, 4))
+    assert len(spy.events) > 0
+
+
+def test_emit_forward_roles_present():
+    """Forward pass emits 'input', 'weight', 'output' roles."""
+    from src.ops.linear import QuantizedLinear
+    mod = QuantizedLinear(4, 8, cfg=_qcfg())
+    spy = _SpyObserver()
+    mod._observers = [spy]
+    mod(torch.randn(2, 4))
+    roles = {e.role for e in spy.events}
+    assert "input" in roles
+    assert "weight" in roles
+    assert "output" in roles
+
+
+def test_emit_backward_roles_present():
+    """Backward pass emits 'grad_output', 'grad_weight', 'grad_input' roles."""
+    from src.ops.linear import QuantizedLinear
+    mod = QuantizedLinear(4, 8, cfg=_qcfg())
+    spy = _SpyObserver()
+    mod._observers = [spy]
+    x = torch.randn(2, 4, requires_grad=True)
+    out = mod(x)
+    spy.events.clear()
+    out.sum().backward()
+    roles = {e.role for e in spy.events}
+    assert "grad_output" in roles
+    assert "grad_weight" in roles
+    assert "grad_input" in roles

@@ -64,13 +64,14 @@ class ConvFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight, bias, stride, padding, dilation, groups,
-                cfg: OpQuantConfig, name=None):
+                cfg: OpQuantConfig, name=None, emit_fn=None):
         ctx.has_bias = bias is not None
         ctx.stride = stride
         ctx.padding = padding
         ctx.dilation = dilation
         ctx.groups = groups
         ctx.name = name
+        ctx.emit_fn = emit_fn
 
         num_spatial_dims = input.ndim - 2
         assert num_spatial_dims in (1, 2, 3)
@@ -91,26 +92,45 @@ class ConvFunction(torch.autograd.Function):
         weight_mx = tuple(s for s in cfg.weight if s.granularity.mode == GranularityMode.PER_BLOCK)
 
         # Elemwise quantize
+        in_idx = 0
         for s in input_elem:
+            fp_in = input
             input = quantize(input, s)
+            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in, input, s)
+            in_idx += 1
         input_post_elem = input
 
+        for s in input_mx:
+            fp_in = input
+            input = quantize(input, s)
+            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in, input, s)
+            in_idx += 1
+
+        wt_idx = 0
         for s in weight_elem:
+            fp_wt = weight
             weight = quantize(weight, s)
+            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_wt, weight, s)
+            wt_idx += 1
         weight_post_elem = weight
 
         # MX quantize (conv uses axis=1 for channel dim)
-        for s in input_mx:
-            input = quantize(input, s)
         for s in weight_mx:
+            fp_wt = weight
             weight = quantize(weight, s)
+            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_wt, weight, s)
+            wt_idx += 1
 
         # Bias quantization
         q_bias = None
         if bias is not None:
             q_bias = bias
+            b_idx = 0
             for s in cfg.bias:
+                fp_b = q_bias
                 q_bias = quantize(q_bias, s)
+                if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
+                b_idx += 1
 
         # Save for backward
         if cfg.is_training:
@@ -129,8 +149,12 @@ class ConvFunction(torch.autograd.Function):
             output = F.conv3d(input, weight, q_bias, stride, padding, dilation, groups)
 
         # Output quantization (single elemwise step — bias already included in conv)
+        out_idx = 0
         if len(cfg.output) > 0:
+            fp_out = output
             output = quantize(output, cfg.output[0])
+            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_out, output, cfg.output[0])
+            out_idx += 1
 
         return output
 
@@ -138,10 +162,15 @@ class ConvFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, weight = ctx.saved_tensors
         cfg: OpQuantConfig = ctx.cfg
+        emit_fn = ctx.emit_fn
 
         # Quantize grad_output
+        go_idx = 0
         for s in cfg.grad_output:
+            fp_go = grad_output
             grad_output = quantize(grad_output, s)
+            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_output, s)
+            go_idx += 1
 
         # --- grad_weight ---
         # input MX along axis=0, grad_output MX along axis=0
@@ -159,8 +188,12 @@ class ConvFunction(torch.autograd.Function):
             dilation=ctx.dilation, groups=ctx.groups,
         )
 
+        gw_idx = 0
         for s in cfg.grad_weight:
+            fp_gw = grad_weight
             grad_weight = quantize(grad_weight, s)
+            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_weight, s)
+            gw_idx += 1
 
         # --- grad_input ---
         # weight MX along axis=0, grad_output MX along axis=1
@@ -178,8 +211,12 @@ class ConvFunction(torch.autograd.Function):
             dilation=ctx.dilation, groups=ctx.groups,
         )
 
+        gi_idx = 0
         for s in cfg.grad_input:
+            fp_gi = grad_input
             grad_input = quantize(grad_input, s)
+            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_input, s)
+            gi_idx += 1
 
         # --- grad_bias ---
         grad_bias = None
@@ -190,7 +227,7 @@ class ConvFunction(torch.autograd.Function):
                 grad_bias = quantize(grad_bias, s)
 
         return (grad_input, grad_weight, grad_bias,
-                None, None, None, None, None, None)
+                None, None, None, None, None, None, None)
 
 
 class QuantizedConv2d(ObservableMixin, nn.Conv2d):
@@ -209,10 +246,11 @@ class QuantizedConv2d(ObservableMixin, nn.Conv2d):
         if self.cfg == OpQuantConfig():
             return self._conv_forward(x, self.weight, self.bias)
 
+        emit_fn = self._emit if self._observers else None
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
-            self.cfg, self._analysis_name,
+            self.cfg, self._analysis_name, emit_fn,
         )
 
 
@@ -232,10 +270,11 @@ class QuantizedConv1d(ObservableMixin, nn.Conv1d):
         if self.cfg == OpQuantConfig():
             return self._conv_forward(x, self.weight, self.bias)
 
+        emit_fn = self._emit if self._observers else None
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
-            self.cfg, self._analysis_name,
+            self.cfg, self._analysis_name, emit_fn,
         )
 
 
@@ -255,10 +294,11 @@ class QuantizedConv3d(ObservableMixin, nn.Conv3d):
         if self.cfg == OpQuantConfig():
             return self._conv_forward(x, self.weight, self.bias)
 
+        emit_fn = self._emit if self._observers else None
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
-            self.cfg, self._analysis_name,
+            self.cfg, self._analysis_name, emit_fn,
         )
 
 
@@ -288,7 +328,7 @@ class ConvTransposeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight, bias, stride, padding, output_padding,
-                dilation, groups, cfg: OpQuantConfig, name=None):
+                dilation, groups, cfg: OpQuantConfig, name=None, emit_fn=None):
         ctx.has_bias = bias is not None
         ctx.stride = stride
         ctx.padding = padding
@@ -296,6 +336,7 @@ class ConvTransposeFunction(torch.autograd.Function):
         ctx.dilation = dilation
         ctx.groups = groups
         ctx.name = name
+        ctx.emit_fn = emit_fn
 
         num_spatial_dims = input.ndim - 2
         assert num_spatial_dims in (1, 2, 3)
@@ -310,26 +351,45 @@ class ConvTransposeFunction(torch.autograd.Function):
         weight_mx = tuple(s for s in cfg.weight if s.granularity.mode == GranularityMode.PER_BLOCK)
 
         # Elemwise quantize
+        in_idx = 0
         for s in input_elem:
+            fp_in = input
             input = quantize(input, s)
+            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in, input, s)
+            in_idx += 1
         input_post_elem = input
 
+        for s in input_mx:
+            fp_in = input
+            input = quantize(input, s)
+            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in, input, s)
+            in_idx += 1
+
+        wt_idx = 0
         for s in weight_elem:
+            fp_wt = weight
             weight = quantize(weight, s)
+            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_wt, weight, s)
+            wt_idx += 1
         weight_post_elem = weight
 
         # MX quantize (conv_transpose: input axis=1, weight axis=0)
-        for s in input_mx:
-            input = quantize(input, s)
         for s in weight_mx:
+            fp_wt = weight
             weight = quantize(weight, s)
+            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_wt, weight, s)
+            wt_idx += 1
 
         # Bias quantization
         q_bias = None
         if bias is not None:
             q_bias = bias
+            b_idx = 0
             for s in cfg.bias:
+                fp_b = q_bias
                 q_bias = quantize(q_bias, s)
+                if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
+                b_idx += 1
 
         # Save for backward
         if cfg.is_training:
@@ -351,8 +411,12 @@ class ConvTransposeFunction(torch.autograd.Function):
                                         output_padding, groups, dilation)
 
         # Output quantization
+        out_idx = 0
         if len(cfg.output) > 0:
+            fp_out = output
             output = quantize(output, cfg.output[0])
+            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_out, output, cfg.output[0])
+            out_idx += 1
 
         return output
 
@@ -360,10 +424,15 @@ class ConvTransposeFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, weight = ctx.saved_tensors
         cfg: OpQuantConfig = ctx.cfg
+        emit_fn = ctx.emit_fn
 
         # Quantize grad_output
+        go_idx = 0
         for s in cfg.grad_output:
+            fp_go = grad_output
             grad_output = quantize(grad_output, s)
+            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_output, s)
+            go_idx += 1
 
         # --- grad_weight ---
         # input MX along axis=0, grad_output MX along axis=0
@@ -381,8 +450,12 @@ class ConvTransposeFunction(torch.autograd.Function):
             dilation=ctx.dilation, groups=ctx.groups,
         )
 
+        gw_idx = 0
         for s in cfg.grad_weight:
+            fp_gw = grad_weight
             grad_weight = quantize(grad_weight, s)
+            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_weight, s)
+            gw_idx += 1
 
         # --- grad_input ---
         # Uses F.conv2d (not conv_transpose) to compute grad_input
@@ -409,8 +482,12 @@ class ConvTransposeFunction(torch.autograd.Function):
                                   stride=ctx.stride, padding=ctx.padding,
                                   dilation=ctx.dilation, groups=ctx.groups)
 
+        gi_idx = 0
         for s in cfg.grad_input:
+            fp_gi = grad_input
             grad_input = quantize(grad_input, s)
+            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_input, s)
+            gi_idx += 1
 
         # --- grad_bias ---
         grad_bias = None
@@ -421,7 +498,7 @@ class ConvTransposeFunction(torch.autograd.Function):
                 grad_bias = quantize(grad_bias, s)
 
         return (grad_input, grad_weight, grad_bias,
-                None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None)
 
 
 class QuantizedConvTranspose2d(ObservableMixin, nn.ConvTranspose2d):
@@ -445,11 +522,12 @@ class QuantizedConvTranspose2d(ObservableMixin, nn.ConvTranspose2d):
             self.kernel_size, self.dilation,
         )
 
+        emit_fn = self._emit if self._observers else None
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
             self.dilation, self.groups,
-            self.cfg, self._analysis_name,
+            self.cfg, self._analysis_name, emit_fn,
         )
 
 
@@ -474,11 +552,12 @@ class QuantizedConvTranspose1d(ObservableMixin, nn.ConvTranspose1d):
             self.kernel_size, self.dilation,
         )
 
+        emit_fn = self._emit if self._observers else None
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
             self.dilation, self.groups,
-            self.cfg, self._analysis_name,
+            self.cfg, self._analysis_name, emit_fn,
         )
 
 
@@ -503,9 +582,10 @@ class QuantizedConvTranspose3d(ObservableMixin, nn.ConvTranspose3d):
             self.kernel_size, self.dilation,
         )
 
+        emit_fn = self._emit if self._observers else None
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
             self.dilation, self.groups,
-            self.cfg, self._analysis_name,
+            self.cfg, self._analysis_name, emit_fn,
         )

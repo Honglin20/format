@@ -38,7 +38,8 @@ class LinearFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, w, b, cfg: OpQuantConfig, name=None):
+    def forward(ctx, x, w, b, cfg: OpQuantConfig, name=None, emit_fn=None):
+        ctx.emit_fn = emit_fn
         # Save raw tensors for STE backward (when is_training=False)
         x_raw, w_raw = x, w
 
@@ -46,30 +47,48 @@ class LinearFunction(torch.autograd.Function):
         input_elem = tuple(s for s in cfg.input if s.granularity.mode != GranularityMode.PER_BLOCK)
         input_mx = tuple(s for s in cfg.input if s.granularity.mode == GranularityMode.PER_BLOCK)
 
+        in_idx = 0
         for s in input_elem:
+            fp_x = x
             x = quantize(x, s)
+            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_x, x, s)
+            in_idx += 1
         x_post_elem = x  # save intermediate for backward
 
         for s in input_mx:
+            fp_x = x
             x = quantize(x, s)
+            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_x, x, s)
+            in_idx += 1
 
         # --- Weight pipeline: elemwise first, then MX ---
         weight_elem = tuple(s for s in cfg.weight if s.granularity.mode != GranularityMode.PER_BLOCK)
         weight_mx = tuple(s for s in cfg.weight if s.granularity.mode == GranularityMode.PER_BLOCK)
 
+        wt_idx = 0
         for s in weight_elem:
+            fp_w = w
             w = quantize(w, s)
+            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_w, w, s)
+            wt_idx += 1
         w_post_elem = w
 
         for s in weight_mx:
+            fp_w = w
             w = quantize(w, s)
+            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_w, w, s)
+            wt_idx += 1
 
         # --- Bias pipeline (elemwise only, no MX) ---
         q_bias = None
         if b is not None:
             q_bias = b
+            b_idx = 0
             for s in cfg.bias:
+                fp_b = q_bias
                 q_bias = quantize(q_bias, s)
+                if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
+                b_idx += 1
 
         # Save for backward: post-elemwise if training, raw if STE
         if cfg.is_training:
@@ -88,14 +107,21 @@ class LinearFunction(torch.autograd.Function):
 
         # Output quantization step 1 (post-matmul, pre-bias)
         out_schemes = cfg.output
+        out_idx = 0
         if len(out_schemes) > 0:
+            fp_y = y
             y = quantize(y, out_schemes[0])
+            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_y, y, out_schemes[0])
+            out_idx += 1
 
         # Add bias + output quantization step 2 (post-bias-add)
         if q_bias is not None:
             y = y + q_bias
             if len(out_schemes) > 1:
+                fp_y = y
                 y = quantize(y, out_schemes[1])
+                if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_y, y, out_schemes[1])
+                out_idx += 1
 
         return y
 
@@ -103,12 +129,17 @@ class LinearFunction(torch.autograd.Function):
     def backward(ctx, grad_y):
         x, w = ctx.saved_tensors
         cfg: OpQuantConfig = ctx.cfg
+        emit_fn = ctx.emit_fn
         out_dim = ctx.out_dim
         in_dim = ctx.in_dim
 
         # Quantize grad_output
+        go_idx = 0
         for s in cfg.grad_output:
+            fp_gy = grad_y
             grad_y = quantize(grad_y, s)
+            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_gy, grad_y, s)
+            go_idx += 1
 
         # --- grad_weight gemm ---
         # Saved tensors are post-elemwise (if training) or raw (if STE).
@@ -124,8 +155,12 @@ class LinearFunction(torch.autograd.Function):
         x_gw_2d = x_gw.reshape(-1, in_dim)
         grad_w = g_gw_2d.T @ x_gw_2d
 
+        gw_idx = 0
         for s in cfg.grad_weight:
+            fp_gw = grad_w
             grad_w = quantize(grad_w, s)
+            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_w, s)
+            gw_idx += 1
 
         # --- grad_input gemm ---
         w_gi = w
@@ -137,8 +172,12 @@ class LinearFunction(torch.autograd.Function):
 
         grad_x = g_gi @ w_gi
 
+        gi_idx = 0
         for s in cfg.grad_input:
+            fp_gx = grad_x
             grad_x = quantize(grad_x, s)
+            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gx, grad_x, s)
+            gi_idx += 1
 
         # --- grad_bias ---
         grad_b = None
@@ -147,7 +186,7 @@ class LinearFunction(torch.autograd.Function):
             for s in cfg.grad_bias:
                 grad_b = quantize(grad_b, s)
 
-        return grad_x, grad_w, grad_b, None, None
+        return grad_x, grad_w, grad_b, None, None, None
 
 
 class QuantizedLinear(ObservableMixin, nn.Linear):
@@ -173,6 +212,7 @@ class QuantizedLinear(ObservableMixin, nn.Linear):
         if self.cfg == OpQuantConfig():
             return F.linear(x, self.weight, self.bias)
 
+        emit_fn = self._emit if self._observers else None
         return LinearFunction.apply(
-            x, self.weight, self.bias, self.cfg, self._analysis_name,
+            x, self.weight, self.bias, self.cfg, self._analysis_name, emit_fn,
         )
