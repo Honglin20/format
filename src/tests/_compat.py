@@ -322,7 +322,7 @@ def _matmul_backward_pipelines(mx_specs, block_size, input_elem, go_elem,
     gi_elem = _elem_scheme(mx_specs, "round_grad_input")
     gi_pipeline = (gi_elem,) if gi_elem is not None else ()
 
-    gw_elem = _elem_scheme(mx_specs, "round_grad_input")
+    gw_elem = _elem_scheme(mx_specs, "round_grad_weight")
     gw_pipeline = (gw_elem,) if gw_elem is not None else ()
 
     gb_elem = _elem_scheme(mx_specs, "round_grad_weight")

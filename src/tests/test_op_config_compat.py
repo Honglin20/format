@@ -127,9 +127,25 @@ def test_no_bp_keys_means_no_mx_backward():
     assert len(cfg.grad_output_gi) == 0
     # But elemwise backward schemes should still be present
     assert cfg.is_training is True
-    """op_type parameter is accepted (currently same logic for linear/matmul)."""
+
+
+def test_op_type_param_accepted():
+    """op_type parameter is accepted (currently different round/axis logic)."""
     mx_specs = {"bfloat": 16}
     cfg_linear = op_config_from_mx_specs(mx_specs, op_type="linear")
     cfg_matmul = op_config_from_mx_specs(mx_specs, op_type="matmul")
     # For bfloat-only configs, both should produce the same result
     assert cfg_linear == cfg_matmul
+
+
+def test_matmul_grad_weight_round_key():
+    """matmul grad_weight respects round_grad_weight, not round_grad_input."""
+    mx_specs = {
+        "bfloat": 16,
+        "round_grad_weight": "floor",
+        "round_grad_input": "even",
+    }
+    cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+    assert len(cfg.grad_weight) >= 1
+    assert cfg.grad_weight[0].round_mode == "floor"
+    assert cfg.grad_input[0].round_mode == "even"
