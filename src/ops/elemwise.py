@@ -105,6 +105,17 @@ class SIMDAdd(torch.autograd.Function):
         else:
             return (g, None, None, None)
 
+    @staticmethod
+    def symbolic(g, in1, in2, inner_scheme, quantize_backprop):
+        from src.onnx.helpers import _emit_quantize_node
+        if inner_scheme is not None:
+            in1 = _emit_quantize_node(g, in1, inner_scheme)
+            in2 = _emit_quantize_node(g, in2, inner_scheme)
+        out = g.op("Add", in1, in2)
+        if inner_scheme is not None:
+            out = _emit_quantize_node(g, out, inner_scheme)
+        return out
+
 
 # ---------------------------------------------------------------------------
 # SIMD Sub
@@ -140,6 +151,17 @@ class SIMDSub(torch.autograd.Function):
             return (g1, g2, None, None)
         else:
             return (g, None, None, None)
+
+    @staticmethod
+    def symbolic(g, in1, in2, inner_scheme, quantize_backprop):
+        from src.onnx.helpers import _emit_quantize_node
+        if inner_scheme is not None:
+            in1 = _emit_quantize_node(g, in1, inner_scheme)
+            in2 = _emit_quantize_node(g, in2, inner_scheme)
+        out = g.op("Sub", in1, in2)
+        if inner_scheme is not None:
+            out = _emit_quantize_node(g, out, inner_scheme)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +215,17 @@ class SIMDMul(torch.autograd.Function):
             in1, = ctx.saved_tensors
             g1 = vec_mul(g, ctx.in2, scheme=scheme)
             return (g1, None, None, None)
+
+    @staticmethod
+    def symbolic(g, in1, in2, inner_scheme, quantize_backprop):
+        from src.onnx.helpers import _emit_quantize_node
+        if inner_scheme is not None:
+            in1 = _emit_quantize_node(g, in1, inner_scheme)
+            in2 = _emit_quantize_node(g, in2, inner_scheme)
+        out = g.op("Mul", in1, in2)
+        if inner_scheme is not None:
+            out = _emit_quantize_node(g, out, inner_scheme)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +282,17 @@ class SIMDDiv(torch.autograd.Function):
             in1, = ctx.saved_tensors
             g1 = vec_div(g, ctx.in2, scheme=scheme)
             return (g1, None, None, None)
+
+    @staticmethod
+    def symbolic(g, in1, in2, inner_scheme, quantize_backprop):
+        from src.onnx.helpers import _emit_quantize_node
+        if inner_scheme is not None:
+            in1 = _emit_quantize_node(g, in1, inner_scheme)
+            in2 = _emit_quantize_node(g, in2, inner_scheme)
+        out = g.op("Div", in1, in2)
+        if inner_scheme is not None:
+            out = _emit_quantize_node(g, out, inner_scheme)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +401,16 @@ class SIMDExp(torch.autograd.Function):
         g = vec_mul(g, exp_x, scheme=scheme)
         return (g, None, None)
 
+    @staticmethod
+    def symbolic(g, in1, inner_scheme, quantize_backprop):
+        from src.onnx.helpers import _emit_quantize_node
+        if inner_scheme is not None:
+            in1 = _emit_quantize_node(g, in1, inner_scheme)
+        out = g.op("Exp", in1)
+        if inner_scheme is not None:
+            out = _emit_quantize_node(g, out, inner_scheme)
+        return out
+
 
 # ---------------------------------------------------------------------------
 # SIMD Log
@@ -387,6 +441,16 @@ class SIMDLog(torch.autograd.Function):
         g = vec_quantize(g, scheme=scheme)
         g = vec_div(g, x, scheme=scheme)
         return (g, None, None)
+
+    @staticmethod
+    def symbolic(g, in1, inner_scheme, quantize_backprop):
+        from src.onnx.helpers import _emit_quantize_node
+        if inner_scheme is not None:
+            in1 = _emit_quantize_node(g, in1, inner_scheme)
+        out = g.op("Log", in1)
+        if inner_scheme is not None:
+            out = _emit_quantize_node(g, out, inner_scheme)
+        return out
 
 
 # ---------------------------------------------------------------------------
