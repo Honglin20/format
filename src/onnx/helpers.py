@@ -28,25 +28,10 @@ def _is_standard_format(scheme) -> bool:
 def _emit_quantize_node(g, x, scheme):
     """Emit a quantize+dequantize pair in the ONNX graph for the given scheme.
 
-    Standard formats → QuantizeLinear(x, scale=1.0, zp=0) → DequantizeLinear.
-    Scale is a placeholder constant (1.0); not intended for runtime inference.
+    Delegates to scheme.format.export_onnx() — each format controls its own
+    ONNX representation (Strategy pattern, consistent with FormatBase.quantize()).
 
-    Non-standard / MX formats → com.microxscaling::MxQuantize custom node
-    with elem_format, block_size, round_mode attributes.
+    Standard formats → QuantizeLinear(x, scale=1.0, zp=0) → DequantizeLinear.
+    Non-standard / MX formats → com.microxscaling::MxQuantize custom node.
     """
-    if _is_standard_format(scheme):
-        scale = g.op("Constant", value_t=torch.tensor(1.0, dtype=torch.float32))
-        zp = g.op("Constant", value_t=torch.tensor(0, dtype=torch.int8))
-        xq = g.op("QuantizeLinear", x, scale, zp)
-        return g.op("DequantizeLinear", xq, scale, zp)
-    else:
-        block_size = (scheme.granularity.block_size
-                      if scheme.granularity.mode == GranularityMode.PER_BLOCK
-                      else 0)
-        return g.op(
-            "com.microxscaling::MxQuantize",
-            x,
-            elem_format_s=scheme.format.name,
-            block_size_i=block_size,
-            round_mode_s=scheme.round_mode,
-        )
+    return scheme.format.export_onnx(g, x, scheme)

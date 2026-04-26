@@ -168,6 +168,33 @@ class FormatBase(ABC):
             axes=granularity.block_axis, round_mode=round_mode,
         )
 
+    def export_onnx(self, g, x, scheme):
+        """Emit ONNX nodes for this format's quantize step.
+
+        Default: emit as com.microxscaling::MxQuantize custom node.
+        Subclasses that have standard ONNX representations (e.g. IntFormat
+        for QDQ, standard FP8 for QDQ) override this.
+
+        Args:
+            g: TorchScript ONNX graph builder.
+            x: Input graph value.
+            scheme: The full QuantScheme (format + granularity + transform).
+
+        Returns:
+            ONNX graph value representing quantized-then-dequantized x.
+        """
+        from src.scheme.granularity import GranularityMode
+        block_size = (scheme.granularity.block_size
+                      if scheme.granularity.mode == GranularityMode.PER_BLOCK
+                      else 0)
+        return g.op(
+            "com.microxscaling::MxQuantize",
+            x,
+            elem_format_s=self.name,
+            block_size_i=block_size,
+            round_mode_s=scheme.round_mode,
+        )
+
     @staticmethod
     def from_str(s: str) -> "FormatBase":
         """Factory: look up format by string name in the registry."""

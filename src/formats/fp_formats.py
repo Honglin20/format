@@ -3,6 +3,7 @@ Float quantization formats: fp8_e5m2, fp8_e4m3, fp6_e3m2, fp6_e2m3, fp4_e2m1.
 
 MX sub-byte floating point formats with various exponent/mantissa distributions.
 """
+import torch
 from .base import FormatBase, compute_min_norm, compute_max_norm
 
 
@@ -50,6 +51,15 @@ class FPFormat(FormatBase):
 
     def __hash__(self):
         return hash(("FPFormat", self.name, self.ebits, self.mbits))
+
+    def export_onnx(self, g, x, scheme):
+        from src.scheme.granularity import GranularityMode
+        if self.name in ("fp8_e4m3", "fp8_e5m2") and scheme.granularity.mode != GranularityMode.PER_BLOCK:
+            scale = g.op("Constant", value_t=torch.tensor(1.0, dtype=torch.float32))
+            zp = g.op("Constant", value_t=torch.tensor(0, dtype=torch.int8))
+            xq = g.op("QuantizeLinear", x, scale, zp)
+            return g.op("DequantizeLinear", xq, scale, zp)
+        return super().export_onnx(g, x, scheme)
 
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
         return super().quantize(x, granularity, round_mode, allow_denorm)
