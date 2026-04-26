@@ -10,7 +10,6 @@ Rewritten from mx/mx_ops.py. Key changes:
 """
 import torch
 from src.formats.base import FormatBase
-from src.quantize.elemwise import _quantize_elemwise_core
 
 FP32_EXPONENT_BIAS = 127
 FP32_MIN_NORMAL = 2 ** (-FP32_EXPONENT_BIAS + 1)
@@ -146,15 +145,11 @@ def _quantize_mx(
     axes = [axes] if type(axes) == int else axes
     axes = [x + A.ndim if x < 0 else x for x in axes]
 
-    # Get format parameters from FormatBase
+    # Get format instance
     if isinstance(elem_format, str):
         fmt = FormatBase.from_str(elem_format)
     else:
         fmt = elem_format
-    ebits = fmt.ebits
-    mbits = fmt.mbits
-    emax = fmt.emax
-    max_norm = fmt.max_norm
 
     # Perform tiling to the hardware vector size
     if block_size > 0:
@@ -173,7 +168,7 @@ def _quantize_mx(
         A = A * (shared_exp > -FP32_EXPONENT_BIAS).type(A.dtype)
 
     # Offset the max exponent by the largest representable exponent
-    shared_exp = shared_exp - emax
+    shared_exp = shared_exp - fmt.emax
 
     scale_emax = 2**(scale_bits-1) - 1
     shared_exp[shared_exp > scale_emax] = float("NaN")
@@ -181,9 +176,8 @@ def _quantize_mx(
 
     A = A / (2**shared_exp)
 
-    A = _quantize_elemwise_core(
-            A, mbits, ebits, max_norm, round_mode=round_mode,
-            allow_denorm=True, saturate_normals=True)
+    A = fmt.quantize_elemwise(A, round_mode=round_mode,
+                              allow_denorm=True, saturate_normals=True)
 
     A = A * (2**shared_exp)
 

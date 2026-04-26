@@ -121,10 +121,9 @@ def _quantize_elemwise(A, elem_format, round_mode='nearest',
 
     fmt = FormatBase.from_str(elem_format) if isinstance(elem_format, str) else elem_format
 
-    return _quantize_elemwise_core(
-            A, fmt.mbits, fmt.ebits, fmt.max_norm,
-            round_mode=round_mode, allow_denorm=allow_denorm,
-            saturate_normals=saturate_normals)
+    return fmt.quantize_elemwise(A, round_mode=round_mode,
+                                 allow_denorm=allow_denorm,
+                                 saturate_normals=saturate_normals)
 
 
 def _quantize_bfloat(A, bfloat, round_mode='nearest', allow_denorm=True):
@@ -133,10 +132,12 @@ def _quantize_bfloat(A, bfloat, round_mode='nearest', allow_denorm=True):
         return A
 
     max_norm = compute_max_norm(8, bfloat - 7)
-
-    return _quantize_elemwise_core(
-            A, bits=bfloat-7, exp_bits=8, max_norm=max_norm, round_mode=round_mode,
-            allow_denorm=allow_denorm)
+    from src.formats.fp_formats import FPFormat
+    fmt = FPFormat(name=f"bfloat{bfloat}", ebits=8, mbits=bfloat - 7,
+                   max_norm_override=max_norm)
+    return fmt.quantize_elemwise(A, round_mode=round_mode,
+                                 allow_denorm=allow_denorm,
+                                 saturate_normals=False)
 
 
 def _quantize_fp(A, exp_bits=None, mantissa_bits=None,
@@ -146,10 +147,12 @@ def _quantize_fp(A, exp_bits=None, mantissa_bits=None,
         return A
 
     max_norm = compute_max_norm(exp_bits, mantissa_bits + 2)
-
-    return _quantize_elemwise_core(
-            A, bits=mantissa_bits + 2, exp_bits=exp_bits,
-            max_norm=max_norm, round_mode=round_mode, allow_denorm=allow_denorm)
+    from src.formats.fp_formats import FPFormat
+    fmt = FPFormat(name=f"fp_e{exp_bits}m{mantissa_bits}", ebits=exp_bits,
+                   mbits=mantissa_bits + 2, max_norm_override=max_norm)
+    return fmt.quantize_elemwise(A, round_mode=round_mode,
+                                 allow_denorm=allow_denorm,
+                                 saturate_normals=False)
 
 
 # ---------------------------------------------------------------------------

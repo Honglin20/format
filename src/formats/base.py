@@ -71,6 +71,38 @@ class FormatBase(ABC):
     def is_integer(self) -> bool:
         return self.ebits == 0
 
+    def quantize_elemwise(self, x, round_mode="nearest", allow_denorm=True,
+                          saturate_normals=None):
+        """Element-wise quantization — the format's atomic quantization operation.
+
+        Maps values in the representable range to the format's discrete levels.
+        This is the unified, mandatory step that EVERY quantization pipeline
+        (per-tensor, per-channel, per-block) must go through.
+
+        Subclasses with non-standard quantization algorithms (e.g., NF4 with
+        a lookup table) should override this method. The default implementation
+        uses sign-magnitude representation with ebits/mbits/max_norm.
+
+        Args:
+            x: Input tensor, assumed scaled to the format's representable range.
+            round_mode: "nearest" | "floor" | "even" | "dither"
+            allow_denorm: If False, flush subnormal values to zero.
+            saturate_normals: If None, defaults to True for integer formats
+                (ebits==0) and False for float formats. If True, values
+                exceeding max_norm are clamped; if False, set to ±Inf.
+
+        Returns:
+            Quantized tensor with same shape as x.
+        """
+        from src.quantize.elemwise import _quantize_elemwise_core
+        if saturate_normals is None:
+            saturate_normals = (self.ebits == 0)
+        return _quantize_elemwise_core(
+            x, self.mbits, self.ebits, self.max_norm,
+            round_mode=round_mode, allow_denorm=allow_denorm,
+            saturate_normals=saturate_normals,
+        )
+
     @abstractmethod
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
         """Quantize tensor x to this format.
@@ -103,17 +135,12 @@ class FormatBase(ABC):
         raise ValueError(f"Unknown granularity mode: {mode}")
 
     def _quantize_per_tensor(self, x, round_mode, allow_denorm=True):
-        """Default per-tensor quantization using elemwise core."""
-        from src.quantize.elemwise import _quantize_elemwise_core
-        return _quantize_elemwise_core(
-            x, self.mbits, self.ebits, self.max_norm,
-            round_mode=round_mode, allow_denorm=allow_denorm,
-            saturate_normals=(self.ebits == 0),
-        )
+        """Default per-tensor quantization: element-wise only (no scaling)."""
+        return self.quantize_elemwise(x, round_mode=round_mode,
+                                      allow_denorm=allow_denorm)
 
     def _quantize_per_channel(self, x, granularity, round_mode, allow_denorm=True):
         """Default per-channel quantization: compute per-channel scale, then elemwise."""
-        from src.quantize.elemwise import _quantize_elemwise_core
         axis = granularity.channel_axis
         if axis < 0:
             axis = x.ndim + axis
@@ -128,11 +155,8 @@ class FormatBase(ABC):
 
         # Normalize to [-1, 1], quantize, then rescale
         x_norm = x / amax
-        x_q = _quantize_elemwise_core(
-            x_norm, self.mbits, self.ebits, self.max_norm,
-            round_mode=round_mode, allow_denorm=allow_denorm,
-            saturate_normals=(self.ebits == 0),
-        )
+        x_q = self.quantize_elemwise(x_norm, round_mode=round_mode,
+                                     allow_denorm=allow_denorm)
         return x_q * amax
 
     def _quantize_per_block(self, x, granularity, round_mode):
