@@ -10,3 +10,5 @@ from .slicing import iter_slices, SliceKey
 from .observers import DistributionObserver, QSNRObserver, MSEObserver, HistogramObserver
 from .context import AnalysisContext
 from .report import Report
+from .compare import compare_formats, ComparisonReport, higher_is_better
+from .eval_performance import evaluate_performance, PerformanceReport

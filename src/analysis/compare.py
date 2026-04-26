@@ -11,14 +11,46 @@ from src.analysis.observers import QSNRObserver, DistributionObserver
 from src.analysis.report import Report
 
 
+# ---------------------------------------------------------------------------
+# Metric metadata — higher_is_better for ranking / recommendation
+# ---------------------------------------------------------------------------
+
+_HIGHER_IS_BETTER = {
+    "qsnr_db": True,
+    "mse": False,
+    "dynamic_range_bits": False,
+    "sparse_ratio": False,
+    "skewness": False,
+    "kurtosis": False,
+    "norm_entropy": False,
+    "outlier_ratio": False,
+    "mean": False,
+    "std": False,
+    "excess_kurtosis": False,
+    "bimodality_coefficient": False,
+}
+
+
+def higher_is_better(metric: str) -> bool:
+    """True if higher values of this metric are better. Unknown metrics default to True."""
+    return _HIGHER_IS_BETTER.get(metric, True)
+
+
+# ---------------------------------------------------------------------------
+# ComparisonReport
+# ---------------------------------------------------------------------------
+
 class ComparisonReport:
     """Holds reports from multiple format configurations for comparison.
 
-    Provides aggregation, ranking, and per-layer recommendation.
+    Provides aggregation, ranking, per-layer recommendation, and
+    formatted printing.
     """
 
     def __init__(self, reports: dict[str, Report]):
         self.reports = reports
+
+    # ---- Data access -------------------------------------------------------
 
     def to_dataframe(self):
         """Flatten all format reports into a single DataFrame.
@@ -67,7 +99,6 @@ class ComparisonReport:
                 total_qsnr += stats.get("avg_qsnr_db", 0)
                 total_mse += stats.get("avg_mse", 0)
                 total_roles += 1
-            # Count unique layers
             layer_set.update(report.keys())
 
             result[fmt_name] = {
@@ -78,50 +109,94 @@ class ComparisonReport:
             }
         return result
 
-    def rank_formats(self, metric="qsnr_db") -> list:
-        """Rank formats by a metric (higher QSNR = better, lower MSE = better).
+    # ---- Ranking -----------------------------------------------------------
+
+    def rank_formats(self, metric="qsnr_db", role=None) -> list:
+        """Rank formats by a metric, respecting higher_is_better.
+
+        Args:
+            metric: Metric name (e.g. "qsnr_db", "mse").
+            role: Optional role filter ("input", "weight", "output", "bias").
+                  None = all roles combined.
 
         Returns:
             [(format_name, metric_value), ...] sorted best-to-worst.
         """
+        hi_better = higher_is_better(metric)
+
+        if role:
+            return self._rank_formats_by_role(metric, role, hi_better)
+
         summary = self.summary()
-        reverse = True if metric == "qsnr_db" else False
-        items = [(name, s.get(f"avg_{metric}", 0)) for name, s in summary.items()]
-        return sorted(items, key=lambda x: x[1], reverse=reverse)
+        avg_key = f"avg_{metric}"
+        items = [(name, s.get(avg_key, 0)) for name, s in summary.items()]
+        return sorted(items, key=lambda x: x[1], reverse=hi_better)
 
-    def recommend(self) -> dict:
-        """Per-layer best format recommendation based on QSNR.
+    def _rank_formats_by_role(self, metric: str, role: str, hi_better: bool) -> list:
+        """Rank formats for a specific tensor role."""
+        role_avg = {}
+        role_count = {}
+        for fmt_name, report in self.reports.items():
+            for _, roles in report._raw.items():
+                if role not in roles:
+                    continue
+                stages = roles[role]
+                for _, slices in stages.items():
+                    for _, metrics in slices.items():
+                        if metric in metrics:
+                            role_avg.setdefault(fmt_name, 0.0)
+                            role_avg[fmt_name] += metrics[metric]
+                            role_count.setdefault(fmt_name, 0)
+                            role_count[fmt_name] += 1
+        items = []
+        for fmt_name in role_avg:
+            avg = role_avg[fmt_name] / role_count[fmt_name] if role_count.get(fmt_name, 0) > 0 else 0
+            items.append((fmt_name, avg))
+        return sorted(items, key=lambda x: x[1], reverse=hi_better)
 
-        For each layer, pick the format with highest average QSNR across all roles.
+    # ---- Recommendation ----------------------------------------------------
+
+    def recommend(self, metric="qsnr_db") -> dict:
+        """Per-layer best format recommendation.
+
+        For each layer, picks the format with the best metric value across
+        all roles, respecting higher_is_better.
+
+        Args:
+            metric: Metric to use for recommendation (e.g. "qsnr_db", "mse").
 
         Returns:
-            {layer_name: {"best_format": str, "qsnr_by_format": {fmt: qsnr, ...}}}
+            {layer_name: {"best_format": str, "scores_by_format": {fmt: score, ...}}}
         """
-        # Build per-layer per-format QSNR map
-        layer_qsnr = {}
+        hi_better = higher_is_better(metric)
+        layer_scores = {}
+
         for fmt_name, report in self.reports.items():
             for layer, roles in report._raw.items():
-                entry = layer_qsnr.setdefault(layer, {})
-                total_qsnr = 0.0
-                role_count = 0
-                for role, stages in roles.items():
-                    for stage, slices in stages.items():
-                        for slice_key, metrics in slices.items():
-                            if "qsnr_db" in metrics:
-                                total_qsnr += metrics["qsnr_db"]
-                                role_count += 1
-                entry[fmt_name] = total_qsnr / role_count if role_count > 0 else 0
+                entry = layer_scores.setdefault(layer, {})
+                total = 0.0
+                count = 0
+                for _, stages in roles.items():
+                    for _, slices in stages.items():
+                        for _, mdict in slices.items():
+                            if metric in mdict:
+                                total += mdict[metric]
+                                count += 1
+                entry[fmt_name] = total / count if count > 0 else 0
 
         recommendations = {}
-        for layer, fmt_qsnr in layer_qsnr.items():
-            if not fmt_qsnr:
+        for layer, fmt_scores in layer_scores.items():
+            if not fmt_scores:
                 continue
-            best_fmt = max(fmt_qsnr, key=fmt_qsnr.get)
+            best = max if hi_better else min
+            best_fmt = best(fmt_scores, key=fmt_scores.get)
             recommendations[layer] = {
                 "best_format": best_fmt,
-                "qsnr_by_format": fmt_qsnr,
+                "scores_by_format": fmt_scores,
             }
         return recommendations
+
+    # ---- Printing ----------------------------------------------------------
 
     def print_comparison(self):
         """Print formatted comparison summary."""
@@ -129,6 +204,7 @@ class ComparisonReport:
         print(f"Configurations: {list(self.reports.keys())}")
         print()
 
+        # Overall summary
         summary = self.summary()
         header = f"  {'Format':<20} {'Avg QSNR':>10} {'Avg MSE':>12} {'Layers':>8}"
         print(header)
@@ -137,22 +213,50 @@ class ComparisonReport:
             print(f"  {fmt_name:<20} {stats['avg_qsnr_db']:>10.1f} "
                   f"{stats['avg_mse']:>12.2e} {stats['total_layers']:>8}")
 
+        # Overall ranking
         ranked = self.rank_formats()
-        print(f"\nFormat ranking (best → worst by QSNR):")
+        print(f"\nOverall ranking (best → worst by QSNR):")
         for i, (name, qsnr) in enumerate(ranked, 1):
             print(f"  {i}. {name} — {qsnr:.1f} dB")
 
+        # Per-role ranking
+        print(f"\nPer-role QSNR (dB):")
+        roles = ["input", "weight", "output", "bias"]
+        active_roles = []
+        for role in roles:
+            r = self.rank_formats(role=role)
+            if any(v > 0 for _, v in r):
+                active_roles.append((role, r))
+
+        if active_roles:
+            fmt_names = [fmt for fmt in self.reports]
+            role_header = f"  {'Role':<12}"
+            for fmt in fmt_names:
+                role_header += f" {fmt:>12}"
+            print(role_header)
+            print(f"  {'-'*12}{' ' + '-'*12 * len(fmt_names)}")
+            for role, ranking in active_roles:
+                fmt_map = dict(ranking)
+                row = f"  {role:<12}"
+                for fmt in fmt_names:
+                    row += f" {fmt_map.get(fmt, 0):>12.1f}"
+                print(row)
+
+        # Per-layer recommendations
         recs = self.recommend()
         if recs:
             print(f"\nPer-layer recommendations:")
             fmt_width = max(len(r["best_format"]) for r in recs.values()) + 2
-            header = f"  {'Layer':<20} {'Best Format':<{fmt_width}} {'QSNR (dB)':>10}"
-            print(header)
-            print(f"  {'-'*20} {'-'*fmt_width} {'-'*10}")
+            rec_header = f"  {'Layer':<20} {'Best Format':<{fmt_width}}"
+            print(rec_header)
+            print(f"  {'-'*20} {'-'*fmt_width}")
             for layer, rec in recs.items():
-                best_qsnr = rec["qsnr_by_format"].get(rec["best_format"], 0)
-                print(f"  {layer:<20} {rec['best_format']:<{fmt_width}} {best_qsnr:>10.1f}")
+                print(f"  {layer:<20} {rec['best_format']:<{fmt_width}}")
 
+
+# ---------------------------------------------------------------------------
+# compare_formats entry point
+# ---------------------------------------------------------------------------
 
 def compare_formats(
     build_model_fn,
