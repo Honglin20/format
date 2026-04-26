@@ -1,13 +1,25 @@
 """
-quantize_model: recursively replace nn.Module subclasses with Quantized* equivalents.
+quantize_model: unified entry point for all-op quantization.
 
-Matches the behaviour of mx/mx_mapping.py but uses OpQuantConfig instead of mx_specs.
+1. Recursively replaces nn.Module subclasses with Quantized* equivalents
+   (nn.Conv2d → QuantizedConv2d, nn.BatchNorm2d → QuantizedBatchNorm2d, etc.)
+2. Patches model.forward to auto-wrap in QuantizeContext, so inline ops
+   (torch.matmul, torch.add, torch.exp, etc.) are also intercepted.
+
+After quantize_model(model, cfg), simply calling model(x) gives fully
+quantized forward + backward. model.export_onnx(x, path) is also added.
+
+Module-level ops → QuantizedXxx classes (explicit, cfg baked into module)
+Inline ops         → QuantizeContext wrapping (automatic, no model surgery)
+Both paths converge at the same XxxFunction.apply() for bit-exact consistency.
 """
+import types
 from typing import Dict, Optional, Union
 
 import torch.nn as nn
 
 from src.scheme.op_config import OpQuantConfig
+from src.context.quantize_context import QuantizeContext
 
 # ---------------------------------------------------------------------------
 # Module type → Quantized constructor + param extractor
@@ -220,6 +232,17 @@ def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, na
 _EMPTY_CFG = OpQuantConfig()
 
 
+def _resolve_context_cfg(cfg: Union[OpQuantConfig, Dict[str, OpQuantConfig], None]) -> OpQuantConfig:
+    """Resolve a single OpQuantConfig for QuantizeContext inline-op quantization.
+
+    If cfg is a dict (per-name module configs), inline ops get _EMPTY_CFG
+    (passthrough) unless the user also passes op_cfgs for per-op overrides.
+    """
+    if isinstance(cfg, OpQuantConfig):
+        return cfg
+    return _EMPTY_CFG
+
+
 # ---------------------------------------------------------------------------
 # Module mapping table
 # ---------------------------------------------------------------------------
@@ -250,6 +273,64 @@ _MODULE_MAPPING = {
 
 
 # ---------------------------------------------------------------------------
+# Forward patching for inline-op quantization
+# ---------------------------------------------------------------------------
+
+def _patch_forward(
+    model: nn.Module,
+    ctx_cfg: OpQuantConfig,
+    *,
+    op_cfgs: Optional[Dict[str, OpQuantConfig]] = None,
+    observers: Optional[list] = None,
+) -> None:
+    """Replace model.forward with a version auto-wrapped in QuantizeContext.
+
+    Also attaches model.export_onnx(dummy_input, path) convenience method.
+
+    Guarded by model._quantize_forward_patched — calling twice is a no-op.
+    """
+    if getattr(model, '_quantize_forward_patched', False):
+        return
+
+    # model.forward at this point is a bound method of the model.
+    # Capture it before reassigning model.forward to our wrapper.
+    original_forward = model.forward
+
+    def _wrapped_forward(*args, **kwargs):
+        with QuantizeContext(
+            model,
+            ctx_cfg,
+            op_cfgs=op_cfgs,
+            observers=observers,
+        ):
+            return original_forward(*args, **kwargs)
+
+    # Assign as a regular function (not MethodType). nn.Module.__call__
+    # calls self.forward(*args, **kwargs) — a plain function here
+    # receives exactly the user's arguments, no implicit self.
+    # original_forward is already a bound method, so calling it with
+    # the same args restores the original behaviour.
+    model.forward = _wrapped_forward
+
+    # Store for export_onnx to use without re-entering quantize_model
+    model._quantize_cfg = ctx_cfg
+    model._quantize_op_cfgs = op_cfgs or {}
+    model._quantize_observers = observers or []
+
+    def _export_onnx(self, dummy_input, output_path: str, opset_version: int = 17):
+        with QuantizeContext(
+            self,
+            self._quantize_cfg,
+            op_cfgs=self._quantize_op_cfgs,
+            observers=self._quantize_observers,
+        ) as ctx:
+            ctx.export_onnx(dummy_input, output_path, opset_version=opset_version)
+
+    model.export_onnx = types.MethodType(_export_onnx, model)
+    model._quantize_forward_patched = True
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -258,29 +339,55 @@ def quantize_model(
     cfg: Union[OpQuantConfig, Dict[str, OpQuantConfig], None] = None,
     *,
     prefix: str = "",
+    op_cfgs: Optional[Dict[str, OpQuantConfig]] = None,
+    observers: Optional[list] = None,
+    _patch_root: bool = True,
 ) -> nn.Module:
-    """Recursively replace nn.Module subclasses with Quantized* equivalents.
+    """Unified entry point: module replacement + inline-op quantization.
+
+    1. Recursively replaces known nn.Module subclasses with Quantized* equivalents
+       (module-level ops like Conv, BN, Norm, Activation, Softmax, Pool).
+    2. Patches model.forward to auto-wrap in QuantizeContext, intercepting
+       inline torch ops (torch.matmul, torch.add, torch.sub, torch.mul,
+       torch.div, torch.exp, torch.log) — no separate context manager needed.
+
+    After calling this function, model(x) produces fully-quantized output.
+    model.export_onnx(dummy_input, path) is also added for convenience.
 
     Args:
         model: Root nn.Module to quantize.
-        cfg: OpQuantConfig for all modules, or a dict mapping name patterns
-             (e.g. "fc" or "conv*") to OpQuantConfig.
-        prefix: Internal prefix for nested child naming.
+        cfg: OpQuantConfig applied to all modules AND inline ops,
+             or a dict mapping name patterns ("fc", "conv*") to OpQuantConfig.
+             If a dict, inline ops get no quantization (use op_cfgs for that).
+        op_cfgs: Optional per-op-type overrides for inline ops only.
+                 Valid keys: "matmul", "mm", "bmm", "linear",
+                 "add", "sub", "mul", "div", "exp", "log".
+        observers: Optional observers for analysis (same as QuantizeContext).
+        prefix: Internal. For nested child naming in recursive calls.
+        _patch_root: Internal. Set False to skip forward patching (recursive).
 
     Returns:
-        The model with known modules replaced in-place (same model object).
+        The same model object, with modules replaced in-place and
+        forward patched for inline-op quantization.
     """
     if cfg is None:
         cfg = _EMPTY_CFG
 
-    # Replace children in-place
+    # Step 1: Replace module subclasses in-place
     for child_name, child in list(model.named_children()):
         child_prefix = f"{prefix}.{child_name}" if prefix else child_name
         quantized_child = _replace_module(child, cfg, child_prefix)
         if quantized_child is not None:
             setattr(model, child_name, quantized_child)
         elif isinstance(child, nn.Module):
-            quantize_model(child, cfg, prefix=child_prefix)
+            quantize_model(child, cfg, prefix=child_prefix,
+                           op_cfgs=op_cfgs, observers=observers,
+                           _patch_root=False)
+
+    # Step 2: Patch forward on the root model only
+    if _patch_root:
+        ctx_cfg = _resolve_context_cfg(cfg)
+        _patch_forward(model, ctx_cfg, op_cfgs=op_cfgs, observers=observers)
 
     return model
 

@@ -75,20 +75,43 @@ conv = QuantizedConv2d(in_channels=3, out_channels=64, kernel_size=3, cfg=cfg)
 norm = QuantizedLayerNorm(normalized_shape=[768], cfg=cfg)
 ```
 
-### 3. 替换整个模型（quantize_model）
+### 3. 统一入口：quantize_model（推荐）
+
+`quantize_model` 是**一键量化整个模型的唯一入口**，自动处理两类算子：
+
+| 算子类型 | 量化方式 | 示例 |
+|---|---|---|
+| Module 级（Conv, BN, Norm, Activation, Softmax, Pool） | 原地替换为 `Quantized*` 类 | `nn.Conv2d` → `QuantizedConv2d` |
+| Inline 级（forward 中的 `torch.matmul`, `torch.add`, `torch.exp` 等） | 自动注入 `QuantizeContext`，截获 `torch`/`F` 命名空间 | `torch.matmul(q, k.T)` |
+
+两种路径在底层收敛到同一 `XxxFunction.apply()`，bit-exact 一致。
 
 ```python
 from src.mapping.quantize_model import quantize_model
 
 model = MyModel()
 
-# 全模型统一 cfg
-quantize_model(model, cfg=cfg)
+# 全模型统一 cfg（Module 替换 + inline op 均量化）
+model = quantize_model(model, cfg=cfg)
 
-# 或按名称 / 通配符分层配置
+# 前向/反向全量化，无需手动管理 context
+output = model(x)
+loss = output.sum()
+loss.backward()           # QAT backward 同样量化
+
+# ONNX 导出（便捷方法）
+model.export_onnx(x, "model.onnx")
+
+# 按名称 / 通配符分层配置
 quantize_model(model, cfg={
-    "encoder.*":  OpQuantConfig(input=(int8_scheme,), weight=(int8_scheme,), output=(int8_scheme,)),
-    "decoder.*":  OpQuantConfig(input=(fp4_scheme,),  weight=(fp4_scheme,),  output=(fp4_scheme,)),
+    "encoder.*":  encoder_cfg,
+    "decoder.*":  decoder_cfg,
+})
+
+# per-op type 覆盖（仅 inline ops）
+quantize_model(model, cfg=default_cfg, op_cfgs={
+    "matmul": matmul_cfg,
+    "add":    add_cfg,
 })
 ```
 
@@ -98,6 +121,18 @@ quantize_model(model, cfg={
 from src.quantize import quantize
 
 x_q = quantize(x, scheme)
+```
+
+### 5. QuantizeContext（高级：手动 inline-op 控制）
+
+如果只需量化 inline torch ops 而不替换 Module：
+
+```python
+from src.context.quantize_context import QuantizeContext
+
+with QuantizeContext(model, cfg) as ctx:
+    output = model(x)          # torch.matmul / torch.add / torch.exp 等被截获
+    ctx.export_onnx(x, "m.onnx")
 ```
 
 ---
@@ -159,10 +194,21 @@ print(report)
 
 ## ONNX 导出（Phase 5）
 
+三种方式，任选其一：
+
 ```python
-from src.onnx import export_quantized_model
 import torch
 
+# 1. quantize_model 后直接调用（推荐）
+model = quantize_model(MyModel(), cfg)
+model.export_onnx(torch.randn(1, 768), "model.onnx")
+
+# 2. QuantizeContext 内调用
+with QuantizeContext(model, cfg) as ctx:
+    ctx.export_onnx(torch.randn(1, 768), "model.onnx")
+
+# 3. 独立导出函数（需模型已量化为 Quantized* 模块）
+from src.onnx import export_quantized_model
 model = QuantizedLinear(768, 768, cfg=cfg)
 export_quantized_model(model, torch.randn(1, 768), "model.onnx")
 ```
@@ -171,10 +217,11 @@ export_quantized_model(model, torch.randn(1, 768), "model.onnx")
 
 | 量化方案 | ONNX 节点 |
 |---|---|
-| int8/int4/int2/fp8 + per_tensor/per_channel | `QuantizeLinear` / `DequantizeLinear`（标准 QDQ） |
+| int8/int4/fp8 + per_tensor/per_channel | `QuantizeLinear` / `DequantizeLinear`（标准 QDQ） |
 | 任意格式 + per_block（MX block） | `com.microxscaling::MxQuantize`（自定义 domain） |
+| fp6/fp4/bf16/fp16（非标准格式） | `com.microxscaling::MxQuantize`（自定义 domain） |
 
-导出目标：图结构正确 + `onnx.checker` 通过。Scale 为占位常量（1.0），不保证 runtime 可推理。
+导出目标：图结构正确 + `onnx.checker` 通过。已知局限：int2 格式和 int/int4 per_block + SIMD ops 组合有 JIT tracer 问题（记录为 xfail）。
 
 ---
 

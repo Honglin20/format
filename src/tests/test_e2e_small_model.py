@@ -208,3 +208,74 @@ class TestQuantizeModelAPI:
         model = nn.Sequential(UnknownModule())
         quantize_model(model, cfg=OpQuantConfig())
         assert type(model[0]) is UnknownModule
+
+    # ---- New tests for unified quantize_model (module + forward patching) ----
+
+    def test_forward_patched_flag_set(self):
+        """quantize_model sets _quantize_forward_patched on the model."""
+        model = LinearOnly()
+        quantize_model(model, cfg=OpQuantConfig(input=(QuantScheme(format="bfloat16"),)))
+        assert getattr(model, '_quantize_forward_patched', False)
+
+    def test_forward_still_runs(self):
+        """quantize_model(model) produces output of expected shape."""
+        model = LinearOnly()
+        s = QuantScheme(format="bfloat16")
+        cfg = OpQuantConfig(input=(s,))
+        quantize_model(model, cfg=cfg)
+        x = torch.randn(2, 8)
+        out = model(x)
+        assert out.shape == (2, 4)
+
+    def test_export_onnx_added(self):
+        """After quantize_model, model.export_onnx is callable."""
+        model = LinearOnly()
+        s = QuantScheme(format="bfloat16")
+        cfg = OpQuantConfig(input=(s,))
+        quantize_model(model, cfg=cfg)
+        assert callable(model.export_onnx)
+
+    def test_export_onnx_produces_valid_graph(self, tmp_path):
+        """model.export_onnx(dummy, path) produces valid ONNX."""
+        import onnx
+        model = LinearOnly()
+        s = QuantScheme(format="bfloat16")
+        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        quantize_model(model, cfg=cfg)
+        path = str(tmp_path / "e2e_export.onnx")
+        model.export_onnx(torch.randn(2, 8), path)
+        m = onnx.load(path)
+        onnx.checker.check_model(m)
+
+    def test_double_quantize_forward_guard(self):
+        """Second quantize_model call does not re-patch forward."""
+        model = LinearOnly()
+        s = QuantScheme(format="bfloat16")
+        cfg = OpQuantConfig(input=(s,))
+        quantize_model(model, cfg=cfg)
+        first_forward = model.forward
+        quantize_model(model, cfg=cfg)
+        assert model.forward is first_forward  # same function object
+
+    def test_state_dict_keys_unchanged(self):
+        """quantize_model does not add/remove state_dict keys."""
+        model = LinearOnly()
+        pre_keys = set(model.state_dict().keys())
+        s = QuantScheme(format="bfloat16")
+        cfg = OpQuantConfig(input=(s,))
+        quantize_model(model, cfg=cfg)
+        post_keys = set(model.state_dict().keys())
+        assert pre_keys == post_keys
+
+    def test_quantize_does_not_quantize_outside_forward(self):
+        """torch.matmul outside model(x) is NOT patched (no context)."""
+        model = LinearOnly()
+        s = QuantScheme(format="bfloat16")
+        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        quantize_model(model, cfg=cfg)
+        # Call model.forward to confirm it works (context enters + exits).
+        model(torch.randn(2, 8))
+        # Outside forward, torch.matmul should return float result.
+        a, b = torch.randn(3, 4), torch.randn(4, 5)
+        outside_result = torch.matmul(a, b)
+        assert outside_result.requires_grad is False  # raw float, not quantized

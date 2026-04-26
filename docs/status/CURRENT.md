@@ -7,7 +7,7 @@
 
 ## 完成状态
 
-所有计划 Phase 全部完成，1003 tests passing。
+所有计划 Phase 全部完成，1067 tests passing (1003 + 52 integration + 12 quantize_model unified)。
 
 - [x] **Phase 2**：三轴架构扶正（Format + Granularity + Transform）+ P2F-7 缺陷收口
 - [x] **Phase 3**：全算子层（P3.0–P3.6）
@@ -25,7 +25,11 @@
   - Module-stack hooks 支持 Observer 层名追踪
   - ONNX export via ctx.export_onnx()（在激活 context 内运行，symbolic() 正常触发）
   - MatMulFunction、BMMFunction、6 个 SIMD Function 新增 symbolic() 方法
-  - 实现计划：docs/plans/2026-04-26-quantize-context.md
+- [x] **Unified quantize_model（Phase 7）**：两条路径统一入口
+  - Module 替换（nn.Conv2d → QuantizedConv2d 等 19 种）+ 自动 QuantizeContext forward wrapping
+  - `model.forward` 自动注入 QuantizeContext，`model.export_onnx(x, p)` 便捷方法
+  - Module 替换 + inline patch 两条路径收敛于同一 `XxxFunction.apply()`
+  - 实现计划：docs/plans/purring-juggling-meteor.md（plan file）
 
 ---
 
@@ -36,6 +40,7 @@
 - ORT / TensorRT runtime 适配
 - RNN 家族算子（原计划排除）
 - 动态分组量化（iter_slices 已预留扩展位）
+- `_reshape_to_blocks` JIT 兼容性修复（消除唯一的 xfail）
 
 ---
 
@@ -49,3 +54,6 @@
 6. **emit_fn 回调模式**：`_emit` 只在 `QuantizedXxx.forward()` 中持有，通过 `emit_fn` 参数传入 Function
 7. **namespace patch 的延迟导入陷阱**：`_patches.py` 中不能用延迟 import（函数体内 `from src.ops.matmul import ...`）。若 matmul.py 在 patches 激活后才首次被导入，`_torch_matmul = torch.matmul` 会捕获已打补丁的版本，导致无限递归。所有 Function 类必须在 `_patches.py` 模块顶层 eager import。
 8. **torch namespace patch 不影响已保存引用**：`_torch_matmul = torch.matmul`（模块加载时）之后 `torch.matmul = _patched_matmul` 不会修改 `_torch_matmul`，但前提是 eager import 先于任何 patch（见经验 7）。
+9. **Forward patching 比 Module 容器更优**：统一入口的 `model.forward` 替换方案避免了 `state_dict` key 前缀问题（容器包装会导致 `"container.model.fc1.weight"` 而非 `"fc1.weight"`），且 `parameters()` / `named_modules()` / optimizer 完全透明。
+10. **Forward patching 必须用闭包而非 `types.MethodType`**：`MethodType` 会额外传入 `self`，导致 `original_forward`（已是 bound method）收到双重 `self`。直接用闭包捕获 `original_forward` 即可。
+11. **`torch.onnx.dynamo_export` 不可用**：Pytorch 2.2.2 的 Dynamo tracer 不支持 `contextvars.ContextVar`（`_ctx_state` 的核心机制）。迁移需重写状态传递，工作量 1-2 周。
