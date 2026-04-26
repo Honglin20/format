@@ -1,51 +1,43 @@
 # Current Task
 
-**Task ID**: Phase 5 — ONNX Export（已完成）
-**Plan**: `docs/plans/2026-04-26-phase5-onnx-export.md`
+**Task ID**: 全部完成
 **Branch**: `feature/refactor-src`
 
 ---
 
-## Progress
+## 完成状态
 
-- [x] Task 1: `src/onnx/helpers.py` — `_is_standard_format()` + `_emit_quantize_node()`
-- [x] Task 2: `LinearFunction.symbolic()`
-- [x] Task 3: `ConvFunction.symbolic()` + `ConvTransposeFunction.symbolic()`
-- [x] Task 4: `export_quantized_model()` + 端到端测试
-- [x] Task 5: 更新 CURRENT.md
+所有计划 Phase 全部完成，973 tests passing。
 
----
-
-## 当前状态
-
-**Phase 5 完成。** 973 tests passing（958 原有 + 15 新增 ONNX 测试）。
+- [x] **Phase 2**：三轴架构扶正（Format + Granularity + Transform）+ P2F-7 缺陷收口
+- [x] **Phase 3**：全算子层（P3.0–P3.6）
+  - [x] P3.0: P2F-7 granularity 类型 guard + channel_axis 越界断言
+  - [x] P3.1: OpQuantConfig、ObservableMixin、iter_slices、Linear/Matmul/BMM
+  - [x] P3.2: Conv1d/2d/3d + ConvTranspose1d/2d/3d
+  - [x] P3.3: BatchNorm1d/2d/3d + LayerNorm + GroupNorm + RMSNorm
+  - [x] P3.4: 7 种激活函数 + Softmax + AdaptiveAvgPool
+  - [x] P3.5: Elementwise 算子 + SIMD / vec_ops
+  - [x] P3.6: quantize_model 入口 + 端到端 small model bit-exact 验证
+- [x] **Phase 4**：层级误差分析（AnalysisContext + QSNR/MSE/Histogram/Distribution Observer）
+- [x] **Phase 5**：ONNX export（QDQ + com.microxscaling::MxQuantize）
 
 ---
 
 ## 下一步
 
-Phase 1–5 全部完成。可选方向：
-
-1. **P2F-7** — Phase 2 review 遗留缺陷收口（granularity 类型 guard、channel_axis 越界断言、silent default docstring）
-2. **后续扩展** — 新格式、新算子、ORT runtime 适配等
-
----
-
-## 断点续传必读文件
-
-1. `docs/plans/2026-04-26-phase5-onnx-export.md`（全文，了解设计决策）
-2. `src/onnx/helpers.py`（全文）
-3. `src/onnx/export.py`（全文）
-4. `src/ops/linear.py`（185–220 行，`symbolic()` 实现）
-5. `src/ops/conv.py`（230–310 行，`symbolic()` 实现）
+无计划内未完成项。可选扩展方向：
+- 新格式（如 fp4_e3m0、int1）
+- ORT / TensorRT runtime 适配
+- RNN 家族算子（原计划排除）
+- 动态分组量化（iter_slices 已预留扩展位）
 
 ---
 
 ## 关键经验记录
 
-1. **JIT 追踪时 size() 返回 Tensor**：`torch.jit.trace` 内 `A.size()[i]` 返回 `torch.Tensor`（非 Python int）。`_reshape_to_blocks` 原代码用 TorchScript 专有 `.value` 导致崩溃，改为 `.item()` 修复。
-2. **MX block 格式统一走自定义 op**：int8/fp4/fp6 + PER_BLOCK 全部走 `com.microxscaling::MxQuantize`，不走 QDQ。标准 QDQ 只给 int8/int4/int2/fp8 + per_tensor/per_channel。
-3. **ONNX 追踪两阶段**：PyTorch ONNX 导出先用具体 dummy input 执行 `forward()`（JIT trace），再调用 `symbolic()` 生成 ONNX 节点。`forward()` 必须能跑通，`symbolic()` 才能被触发。
-4. **QDQ scale 占位常量**：scale=1.0 / zp=0 是合法占位值，`onnx.checker` 可通过，不要求 runtime。
-5. **Conv kernel_shape**：通过 `weight.type().sizes()[2:]` 在 `symbolic()` 内获取（static shape export 时可知）。
-6. **custom_opsets 必须注册**：`torch.onnx.export(..., custom_opsets={"com.microxscaling": 1})` 是必须参数，否则 checker 拒绝自定义 domain 节点。
+1. **MX block 格式走自定义 op**：per_block 一律 `com.microxscaling::MxQuantize`，其余走 QDQ
+2. **JIT 追踪时 size() 返回 Tensor**：`_reshape_to_blocks` 的 `.value` 改为 `.item()`
+3. **ONNX 导出两阶段**：先执行 `forward()` 建图（需跑通），再调 `symbolic()` 生成节点
+4. **`_bp` vs forward format keys**：linear backward 用 `_bp` key，conv backward 用 forward key
+5. **backward 保存 post-elemwise 张量**：所有 ops 在 backward 中保存 elemwise 后（pre-MX）的张量
+6. **emit_fn 回调模式**：`_emit` 只在 `QuantizedXxx.forward()` 中持有，通过 `emit_fn` 参数传入 Function
