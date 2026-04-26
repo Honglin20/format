@@ -149,6 +149,19 @@ class BMMFunction(torch.autograd.Function):
 
         return grad_in1, grad_in2, None, None, None
 
+    @staticmethod
+    def symbolic(g, in1, in2, cfg, name, emit_fn):
+        """ONNX symbolic: Q/DQ wrappers + MatMul (ONNX MatMul supports batched)."""
+        from src.onnx.helpers import _emit_quantize_node
+        for scheme in cfg.input:
+            in1 = _emit_quantize_node(g, in1, scheme)
+        for scheme in cfg.weight:
+            in2 = _emit_quantize_node(g, in2, scheme)
+        out = g.op("MatMul", in1, in2)
+        if len(cfg.output) > 0:
+            out = _emit_quantize_node(g, out, cfg.output[0])
+        return out
+
 
 def quantized_bmm(in1, in2, cfg=None, name=None):
     """Functional API: quantized bmm with OpQuantConfig."""

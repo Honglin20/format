@@ -194,6 +194,26 @@ class MatMulFunction(torch.autograd.Function):
 
         return grad_in1, grad_in2, grad_bias, None, None, None, None
 
+    @staticmethod
+    def symbolic(g, in1, in2, bias, cfg, name, mode_config, emit_fn):
+        """ONNX symbolic: Q/DQ wrappers + MatMul + optional Add."""
+        from src.onnx.helpers import _emit_quantize_node
+        for scheme in cfg.input:
+            in1 = _emit_quantize_node(g, in1, scheme)
+        for scheme in cfg.weight:
+            in2 = _emit_quantize_node(g, in2, scheme)
+        out = g.op("MatMul", in1, in2)
+        if len(cfg.output) > 0:
+            out = _emit_quantize_node(g, out, cfg.output[0])
+        if bias is not None:
+            qb = bias
+            for scheme in cfg.bias:
+                qb = _emit_quantize_node(g, qb, scheme)
+            out = g.op("Add", out, qb)
+            if len(cfg.output) > 1:
+                out = _emit_quantize_node(g, out, cfg.output[1])
+        return out
+
 
 def quantized_matmul(in1, in2, bias=None, cfg=None, name=None, mode_config='aa'):
     """Functional API: quantized matmul with OpQuantConfig."""
