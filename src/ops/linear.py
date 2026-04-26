@@ -188,6 +188,34 @@ class LinearFunction(torch.autograd.Function):
 
         return grad_x, grad_w, grad_b, None, None, None
 
+    @staticmethod
+    def symbolic(g, x, w, b, cfg, name, emit_fn):
+        """ONNX symbolic: emit quantize nodes + MatMul + optional Add."""
+        from src.onnx.helpers import _emit_quantize_node
+
+        for scheme in cfg.input:
+            x = _emit_quantize_node(g, x, scheme)
+
+        for scheme in cfg.weight:
+            w = _emit_quantize_node(g, w, scheme)
+
+        wt = g.op("Transpose", w, perm_i=[1, 0])
+        y = g.op("MatMul", x, wt)
+
+        if len(cfg.output) > 0:
+            y = _emit_quantize_node(g, y, cfg.output[0])
+
+        if b is not None:
+            qb = b
+            for scheme in cfg.bias:
+                qb = _emit_quantize_node(g, qb, scheme)
+            y = g.op("Add", y, qb)
+
+            if len(cfg.output) > 1:
+                y = _emit_quantize_node(g, y, cfg.output[1])
+
+        return y
+
 
 class QuantizedLinear(ObservableMixin, nn.Linear):
     """Drop-in replacement for mx.Linear using OpQuantConfig.

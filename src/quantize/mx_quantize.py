@@ -80,7 +80,7 @@ def _reshape_to_blocks(A, axes, block_size):
     for axis in axes:
         pre_pad_size = orig_shape[axis]
         if isinstance(pre_pad_size, torch.Tensor):
-            pre_pad_size = int(pre_pad_size.value)
+            pre_pad_size = int(pre_pad_size.item())
         if pre_pad_size % block_size == 0:
             pad[2 * axis] = 0
         else:
