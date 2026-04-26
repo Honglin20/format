@@ -110,7 +110,9 @@ class SIMDAdd(torch.autograd.Function):
         from src.onnx.helpers import _emit_quantize_node
         if inner_scheme is not None:
             in1 = _emit_quantize_node(g, in1, inner_scheme)
-            in2 = _emit_quantize_node(g, in2, inner_scheme)
+            # Only quantize in2 when it's an ONNX graph Value (tensor), not a scalar constant
+            if isinstance(in2, torch._C.Value):
+                in2 = _emit_quantize_node(g, in2, inner_scheme)
         out = g.op("Add", in1, in2)
         if inner_scheme is not None:
             out = _emit_quantize_node(g, out, inner_scheme)
@@ -157,7 +159,8 @@ class SIMDSub(torch.autograd.Function):
         from src.onnx.helpers import _emit_quantize_node
         if inner_scheme is not None:
             in1 = _emit_quantize_node(g, in1, inner_scheme)
-            in2 = _emit_quantize_node(g, in2, inner_scheme)
+            if isinstance(in2, torch._C.Value):
+                in2 = _emit_quantize_node(g, in2, inner_scheme)
         out = g.op("Sub", in1, in2)
         if inner_scheme is not None:
             out = _emit_quantize_node(g, out, inner_scheme)
@@ -221,7 +224,8 @@ class SIMDMul(torch.autograd.Function):
         from src.onnx.helpers import _emit_quantize_node
         if inner_scheme is not None:
             in1 = _emit_quantize_node(g, in1, inner_scheme)
-            in2 = _emit_quantize_node(g, in2, inner_scheme)
+            if isinstance(in2, torch._C.Value):
+                in2 = _emit_quantize_node(g, in2, inner_scheme)
         out = g.op("Mul", in1, in2)
         if inner_scheme is not None:
             out = _emit_quantize_node(g, out, inner_scheme)
@@ -288,7 +292,8 @@ class SIMDDiv(torch.autograd.Function):
         from src.onnx.helpers import _emit_quantize_node
         if inner_scheme is not None:
             in1 = _emit_quantize_node(g, in1, inner_scheme)
-            in2 = _emit_quantize_node(g, in2, inner_scheme)
+            if isinstance(in2, torch._C.Value):
+                in2 = _emit_quantize_node(g, in2, inner_scheme)
         out = g.op("Div", in1, in2)
         if inner_scheme is not None:
             out = _emit_quantize_node(g, out, inner_scheme)

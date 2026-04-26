@@ -282,6 +282,66 @@ def test_context_no_double_quantization():
     assert torch.equal(r1, r2)  # deterministic = no unintended extra quantization
 
 
+def test_context_restores_ops_on_exception():
+    """Patches must be removed even when the with-block raises."""
+    from src.context.quantize_context import QuantizeContext
+    cfg = _make_cfg()
+    model = nn.Linear(1, 1)
+    try:
+        with QuantizeContext(model, cfg):
+            raise RuntimeError("forced")
+    except RuntimeError:
+        pass
+    result = torch.matmul(torch.randn(2, 3), torch.randn(3, 4))
+    assert result.requires_grad is False  # plain float output, not a Function result
+
+
+def test_nested_contexts_isolate_cfg():
+    """Inner context cfg does not bleed into outer after inner exits."""
+    from src.context.quantize_context import QuantizeContext
+    outer_cfg = OpQuantConfig()        # no quantization
+    inner_cfg = _make_cfg()
+    model = nn.Linear(1, 1)
+    a, b = torch.randn(3, 4), torch.randn(4, 5)
+
+    with QuantizeContext(model, outer_cfg):
+        plain_inside_outer = torch.matmul(a, b)   # no quant (outer_cfg is empty)
+        with QuantizeContext(model, inner_cfg):
+            quant_inside_inner = torch.matmul(a, b)
+        plain_after_inner = torch.matmul(a, b)    # back to outer_cfg (no quant)
+
+    assert torch.equal(plain_inside_outer, torch.matmul(a, b))
+    assert not torch.equal(quant_inside_inner, torch.matmul(a, b))
+    assert torch.equal(plain_after_inner, torch.matmul(a, b))
+
+
+def test_patched_mm_quantizes_with_active_context():
+    """torch.mm should be intercepted and quantized like torch.matmul."""
+    from src.context.quantize_context import QuantizeContext
+    cfg = _make_cfg()
+    model = nn.Linear(1, 1)
+    a, b = torch.randn(3, 4), torch.randn(4, 5)
+    plain = torch.mm(a, b)
+
+    with QuantizeContext(model, cfg):
+        result = torch.mm(a, b)
+
+    assert not torch.equal(result, plain)
+
+
+def test_patched_mul_scalar_first_passthrough():
+    """torch.mul(scalar, tensor) must not crash when context is active."""
+    from src.context.quantize_context import QuantizeContext
+    cfg = _make_cfg()
+    model = nn.Linear(1, 1)
+    t = torch.randn(3, 4)
+
+    with QuantizeContext(model, cfg):
+        result = torch.mul(2.0, t)   # scalar-first
+
+    assert torch.equal(result, 2.0 * t)
+
+
 def test_context_is_not_active_outside_with_block():
     from src.context.quantize_context import QuantizeContext
     cfg = _make_cfg()

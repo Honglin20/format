@@ -17,6 +17,16 @@ import torch.nn.functional as F
 from src.context._state import _ctx_state, _EMPTY_CFG
 from src.context._stack import get_layer_name
 
+# Eagerly import Function classes so their module-level _torch_* saves are
+# captured BEFORE apply_patches() is ever called. If these were deferred
+# imports (inside function bodies), matmul.py etc. could be imported while
+# patches are already active — causing _torch_matmul to capture _patched_matmul
+# and creating infinite recursion on the very first forward call.
+from src.ops.matmul import MatMulFunction
+from src.ops.bmm import BMMFunction
+from src.ops.linear import LinearFunction
+from src.ops.elemwise import SIMDAdd, SIMDSub, SIMDMul, SIMDDiv, SIMDExp, SIMDLog
+
 # Originals captured at import time (before any patching occurs).
 _orig_torch_matmul = torch.matmul
 _orig_torch_mm     = torch.mm
@@ -79,7 +89,6 @@ def _patched_matmul(a, b):
     cfg = state.resolve("matmul")
     if cfg == _EMPTY_CFG:
         return _orig_torch_matmul(a, b)
-    from src.ops.matmul import MatMulFunction
     name = get_layer_name()
     return MatMulFunction.apply(a, b, None, cfg, name, "aa", _make_emit_fn(state, name, "matmul"))
 
@@ -91,7 +100,6 @@ def _patched_mm(a, b):
     cfg = state.resolve("mm")
     if cfg == _EMPTY_CFG:
         return _orig_torch_mm(a, b)
-    from src.ops.matmul import MatMulFunction
     name = get_layer_name()
     return MatMulFunction.apply(a, b, None, cfg, name, "aa", _make_emit_fn(state, name, "mm"))
 
@@ -103,7 +111,6 @@ def _patched_bmm(a, b):
     cfg = state.resolve("bmm")
     if cfg == _EMPTY_CFG:
         return _orig_torch_bmm(a, b)
-    from src.ops.bmm import BMMFunction
     name = get_layer_name()
     return BMMFunction.apply(a, b, cfg, name, _make_emit_fn(state, name, "bmm"))
 
@@ -115,7 +122,6 @@ def _patched_F_linear(input, weight, bias=None):
     cfg = state.resolve("linear")
     if cfg == _EMPTY_CFG:
         return _orig_F_linear(input, weight, bias)
-    from src.ops.linear import LinearFunction
     name = get_layer_name()
     return LinearFunction.apply(input, weight, bias, cfg, name, _make_emit_fn(state, name, "linear"))
 
@@ -126,12 +132,11 @@ def _patched_F_linear(input, weight, bias=None):
 
 def _patched_add(a, b, *, alpha=1):
     state = _get_state()
-    if state is None or not isinstance(b, torch.Tensor):
+    if state is None or not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         return _orig_torch_add(a, b, alpha=alpha)
     cfg = state.resolve("add")
     if cfg == _EMPTY_CFG:
         return _orig_torch_add(a, b, alpha=alpha)
-    from src.ops.elemwise import SIMDAdd
     if alpha != 1:
         b = b * alpha
     return SIMDAdd.apply(a, b, _simd_inner_scheme(cfg), True)
@@ -139,12 +144,11 @@ def _patched_add(a, b, *, alpha=1):
 
 def _patched_sub(a, b, *, alpha=1):
     state = _get_state()
-    if state is None or not isinstance(b, torch.Tensor):
+    if state is None or not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         return _orig_torch_sub(a, b, alpha=alpha)
     cfg = state.resolve("sub")
     if cfg == _EMPTY_CFG:
         return _orig_torch_sub(a, b, alpha=alpha)
-    from src.ops.elemwise import SIMDSub
     if alpha != 1:
         b = b * alpha
     return SIMDSub.apply(a, b, _simd_inner_scheme(cfg), True)
@@ -152,23 +156,21 @@ def _patched_sub(a, b, *, alpha=1):
 
 def _patched_mul(a, b):
     state = _get_state()
-    if state is None or not isinstance(b, torch.Tensor):
+    if state is None or not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         return _orig_torch_mul(a, b)
     cfg = state.resolve("mul")
     if cfg == _EMPTY_CFG:
         return _orig_torch_mul(a, b)
-    from src.ops.elemwise import SIMDMul
     return SIMDMul.apply(a, b, _simd_inner_scheme(cfg), True)
 
 
 def _patched_div(a, b):
     state = _get_state()
-    if state is None or not isinstance(b, torch.Tensor):
+    if state is None or not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         return _orig_torch_div(a, b)
     cfg = state.resolve("div")
     if cfg == _EMPTY_CFG:
         return _orig_torch_div(a, b)
-    from src.ops.elemwise import SIMDDiv
     return SIMDDiv.apply(a, b, _simd_inner_scheme(cfg), True)
 
 
@@ -183,7 +185,6 @@ def _patched_exp(x):
     cfg = state.resolve("exp")
     if cfg == _EMPTY_CFG:
         return _orig_torch_exp(x)
-    from src.ops.elemwise import SIMDExp
     return SIMDExp.apply(x, _simd_inner_scheme(cfg), True)
 
 
@@ -194,7 +195,6 @@ def _patched_log(x):
     cfg = state.resolve("log")
     if cfg == _EMPTY_CFG:
         return _orig_torch_log(x)
-    from src.ops.elemwise import SIMDLog
     return SIMDLog.apply(x, _simd_inner_scheme(cfg), True)
 
 

@@ -62,14 +62,24 @@ class QuantizeContext:
 
     def __enter__(self):
         self._ctx_token = _ctx_state.set(self._state)
-        self._hook_handles = install_stack_hooks(self.model)
-        self._saved_ops = apply_patches()
+        try:
+            self._hook_handles = install_stack_hooks(self.model)
+            self._saved_ops = apply_patches()
+        except:
+            _ctx_state.reset(self._ctx_token)
+            self._ctx_token = None
+            raise
         return self
 
     def __exit__(self, *args):
-        remove_patches(self._saved_ops)
-        remove_stack_hooks(self._hook_handles)
-        _ctx_state.reset(self._ctx_token)
+        try:
+            remove_patches(self._saved_ops)
+        finally:
+            try:
+                remove_stack_hooks(self._hook_handles)
+            finally:
+                if self._ctx_token is not None:
+                    _ctx_state.reset(self._ctx_token)
         self._saved_ops = {}
         self._hook_handles = []
         self._ctx_token = None
