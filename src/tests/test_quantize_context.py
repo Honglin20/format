@@ -86,7 +86,7 @@ def test_stack_records_module_name_during_forward():
     hooks = install_stack_hooks(model)
     model(torch.zeros(1))
     remove_stack_hooks(hooks)
-    assert "0" in captured[0]
+    assert captured[0] == "0"
 
 
 def test_stack_cleans_up_after_forward():

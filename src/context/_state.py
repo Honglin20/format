@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from src.scheme.op_config import OpQuantConfig
 
+# Singleton used as sentinel for "no quantization" equality checks in _patches.py.
 _EMPTY_CFG = OpQuantConfig()
 
 

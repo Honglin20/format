@@ -13,6 +13,7 @@ import torch
 from src.scheme.op_config import OpQuantConfig
 
 _torch_matmul = torch.matmul
+_torch_addmm = torch.addmm
 from src.quantize import quantize
 from src.scheme.granularity import GranularityMode
 
@@ -195,7 +196,7 @@ class MatMulFunction(torch.autograd.Function):
         return grad_in1, grad_in2, grad_bias, None, None, None, None
 
     @staticmethod
-    def symbolic(g, in1, in2, bias, cfg, name, mode_config, emit_fn):
+    def symbolic(g, in1, in2, bias, cfg, name, mode_config, emit_fn=None):
         """ONNX symbolic: Q/DQ wrappers + MatMul + optional Add."""
         from src.onnx.helpers import _emit_quantize_node
         for scheme in cfg.input:
@@ -220,6 +221,6 @@ def quantized_matmul(in1, in2, bias=None, cfg=None, name=None, mode_config='aa')
     if cfg is None or cfg == OpQuantConfig():
         if bias is None:
             return _torch_matmul(in1, in2)
-        return torch.addmm(bias, in1, in2)
+        return _torch_addmm(bias, in1, in2)
 
     return MatMulFunction.apply(in1, in2, bias, cfg, name, mode_config)
