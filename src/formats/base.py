@@ -160,7 +160,14 @@ class FormatBase(ABC):
         return x_q * amax
 
     def _quantize_per_block(self, x, granularity, round_mode):
-        """Default per-block quantization: delegate to _quantize_mx."""
+        """Default per-block quantization: delegate to _quantize_mx.
+
+        During JIT tracing (ONNX export), return x unchanged — the Function's
+        symbolic() method handles quantization in the ONNX graph.  The traced
+        forward() is only used for shape inference.
+        """
+        if torch.jit.is_tracing():
+            return x
         from src.quantize.mx_quantize import _quantize_mx
         return _quantize_mx(
             x, scale_bits=8, elem_format=self,
