@@ -10,6 +10,8 @@ No bias support (matches mx/bmm.py).
 import torch
 
 from src.scheme.op_config import OpQuantConfig
+
+_torch_bmm = torch.bmm
 from src.quantize import quantize
 from src.scheme.granularity import GranularityMode
 
@@ -78,7 +80,7 @@ class BMMFunction(torch.autograd.Function):
         ctx.name = name
 
         # Compute bmm
-        out = torch.bmm(in1, in2)
+        out = _torch_bmm(in1, in2)
 
         # Output quantization (single elemwise step, no bias)
         out_idx = 0
@@ -125,10 +127,10 @@ class BMMFunction(torch.autograd.Function):
             g_for_grad_in1 = quantize(g_for_grad_in1, s)
 
         # grad_in1 = grad_out @ in2^T
-        grad_in1 = torch.bmm(g_for_grad_in1, in2_for_grad_in1.transpose(-1, -2))
+        grad_in1 = _torch_bmm(g_for_grad_in1, in2_for_grad_in1.transpose(-1, -2))
 
         # grad_in2 = in1^T @ grad_out
-        grad_in2 = torch.bmm(in1_for_grad_in2.transpose(-1, -2), g_for_grad_in2)
+        grad_in2 = _torch_bmm(in1_for_grad_in2.transpose(-1, -2), g_for_grad_in2)
 
         # Exit elemwise quantize
         gi_idx = 0
@@ -151,6 +153,6 @@ class BMMFunction(torch.autograd.Function):
 def quantized_bmm(in1, in2, cfg=None, name=None):
     """Functional API: quantized bmm with OpQuantConfig."""
     if cfg is None or cfg == OpQuantConfig():
-        return torch.bmm(in1, in2)
+        return _torch_bmm(in1, in2)
 
     return BMMFunction.apply(in1, in2, cfg, name)

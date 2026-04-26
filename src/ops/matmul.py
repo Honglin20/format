@@ -11,6 +11,8 @@ import numpy as np
 import torch
 
 from src.scheme.op_config import OpQuantConfig
+
+_torch_matmul = torch.matmul
 from src.quantize import quantize
 from src.scheme.granularity import GranularityMode
 
@@ -101,7 +103,7 @@ class MatMulFunction(torch.autograd.Function):
         ctx.name = name
 
         # Compute matmul
-        out = torch.matmul(in1, in2)
+        out = _torch_matmul(in1, in2)
 
         # Output quantization step 1 (post-matmul)
         out_idx = 0
@@ -160,10 +162,10 @@ class MatMulFunction(torch.autograd.Function):
             g_for_grad_in1 = quantize(g_for_grad_in1, s)
 
         # grad_in1 = grad_out @ in2^T
-        grad_in1 = torch.matmul(g_for_grad_in1, in2_for_grad_in1.transpose(-1, -2))
+        grad_in1 = _torch_matmul(g_for_grad_in1, in2_for_grad_in1.transpose(-1, -2))
 
         # grad_in2 = in1^T @ grad_out
-        grad_in2 = torch.matmul(in1_for_grad_in2.transpose(-1, -2), g_for_grad_in2)
+        grad_in2 = _torch_matmul(in1_for_grad_in2.transpose(-1, -2), g_for_grad_in2)
 
         # Exit elemwise quantize
         gi_idx = 0
@@ -197,7 +199,7 @@ def quantized_matmul(in1, in2, bias=None, cfg=None, name=None, mode_config='aa')
     """Functional API: quantized matmul with OpQuantConfig."""
     if cfg is None or cfg == OpQuantConfig():
         if bias is None:
-            return torch.matmul(in1, in2)
+            return _torch_matmul(in1, in2)
         return torch.addmm(bias, in1, in2)
 
     return MatMulFunction.apply(in1, in2, bias, cfg, name, mode_config)

@@ -12,6 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.scheme.op_config import OpQuantConfig
+
+_F_linear = F.linear
 from src.quantize import quantize
 from src.analysis.mixin import ObservableMixin
 from src.scheme.granularity import GranularityMode
@@ -103,7 +105,7 @@ class LinearFunction(torch.autograd.Function):
         ctx.name = name
 
         # Compute linear (no bias)
-        y = F.linear(x, w)
+        y = _F_linear(x, w)
 
         # Output quantization step 1 (post-matmul, pre-bias)
         out_schemes = cfg.output
