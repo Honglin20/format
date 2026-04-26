@@ -229,6 +229,46 @@ class ConvFunction(torch.autograd.Function):
         return (grad_input, grad_weight, grad_bias,
                 None, None, None, None, None, None, None)
 
+    @staticmethod
+    def symbolic(g, input, weight, bias, stride, padding, dilation, groups,
+                 cfg, name, emit_fn):
+        """ONNX symbolic: emit quantize nodes + Conv."""
+        from src.onnx.helpers import _emit_quantize_node
+
+        for scheme in cfg.input:
+            input = _emit_quantize_node(g, input, scheme)
+        for scheme in cfg.weight:
+            weight = _emit_quantize_node(g, weight, scheme)
+
+        if bias is not None:
+            for scheme in cfg.bias:
+                bias = _emit_quantize_node(g, bias, scheme)
+
+        weight_sizes = weight.type().sizes()
+        kernel_shape = list(weight_sizes[2:]) if weight_sizes is not None else None
+
+        pad_list = list(padding) if hasattr(padding, '__iter__') else [padding]
+        onnx_pads = pad_list + pad_list  # symmetric
+
+        conv_kwargs = dict(
+            dilations_i=list(dilation) if hasattr(dilation, '__iter__') else [dilation],
+            group_i=groups,
+            pads_i=onnx_pads,
+            strides_i=list(stride) if hasattr(stride, '__iter__') else [stride],
+        )
+        if kernel_shape is not None:
+            conv_kwargs["kernel_shape_i"] = kernel_shape
+
+        if bias is not None:
+            output = g.op("Conv", input, weight, bias, **conv_kwargs)
+        else:
+            output = g.op("Conv", input, weight, **conv_kwargs)
+
+        for scheme in cfg.output:
+            output = _emit_quantize_node(g, output, scheme)
+
+        return output
+
 
 class QuantizedConv2d(ObservableMixin, nn.Conv2d):
     """Drop-in replacement for mx.Conv2d using OpQuantConfig."""
@@ -499,6 +539,46 @@ class ConvTransposeFunction(torch.autograd.Function):
 
         return (grad_input, grad_weight, grad_bias,
                 None, None, None, None, None, None, None, None)
+
+    @staticmethod
+    def symbolic(g, input, weight, bias, stride, padding, output_padding,
+                 dilation, groups, cfg, name, emit_fn):
+        """ONNX symbolic: emit quantize nodes + ConvTranspose."""
+        from src.onnx.helpers import _emit_quantize_node
+
+        for scheme in cfg.input:
+            input = _emit_quantize_node(g, input, scheme)
+        for scheme in cfg.weight:
+            weight = _emit_quantize_node(g, weight, scheme)
+        if bias is not None:
+            for scheme in cfg.bias:
+                bias = _emit_quantize_node(g, bias, scheme)
+
+        weight_sizes = weight.type().sizes()
+        kernel_shape = list(weight_sizes[2:]) if weight_sizes is not None else None
+
+        pad_list = list(padding) if hasattr(padding, '__iter__') else [padding]
+        onnx_pads = pad_list + pad_list  # symmetric
+
+        conv_kwargs = dict(
+            dilations_i=list(dilation) if hasattr(dilation, '__iter__') else [dilation],
+            group_i=groups,
+            output_padding_i=list(output_padding) if hasattr(output_padding, '__iter__') else [output_padding],
+            pads_i=onnx_pads,
+            strides_i=list(stride) if hasattr(stride, '__iter__') else [stride],
+        )
+        if kernel_shape is not None:
+            conv_kwargs["kernel_shape_i"] = kernel_shape
+
+        if bias is not None:
+            output = g.op("ConvTranspose", input, weight, bias, **conv_kwargs)
+        else:
+            output = g.op("ConvTranspose", input, weight, **conv_kwargs)
+
+        for scheme in cfg.output:
+            output = _emit_quantize_node(g, output, scheme)
+
+        return output
 
 
 class QuantizedConvTranspose2d(ObservableMixin, nn.ConvTranspose2d):
