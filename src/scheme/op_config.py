@@ -1,11 +1,14 @@
 """
-OpQuantConfig: operator-level quantization configuration.
+OpQuantConfig: operator-level quantization configuration — two-level model.
 
-Each field is a tuple[QuantScheme, ...] pipeline applied to a specific tensor
-role. Empty tuple = no quantization (identity pass-through).
+Quantization has exactly two types:
+- storage: storage precision (per-tensor elemwise cast), uniform across all tensors
+- compute: compute quantization (per-block MX etc.), per-role
+
+Each field is QuantScheme | None. No tuples, no pipelines, no iteration.
 """
 from dataclasses import dataclass, fields
-from typing import Tuple
+from typing import Optional
 
 from .quant_scheme import QuantScheme
 
@@ -19,58 +22,45 @@ _BACKWARD_FIELD_NAMES = frozenset((
 class OpQuantConfig:
     """Operator-level quantization configuration.
 
-    Each field is a tuple[QuantScheme, ...] pipeline:
-    - Empty tuple = no quantization for that role
-    - Single scheme = one quantization step
-    - Multiple schemes = chained pipeline: x -> quantize(x, s1) -> quantize(., s2) -> ...
+    Two-level quantization model:
+    - storage: applied to EVERY tensor at every quantization point,
+      always first (elemwise storage precision cast, e.g. bfloat16)
+    - compute: role-specific compute quantization (e.g. fp8 MX per-block)
 
-    Default construction (no arguments) produces a configuration with no
-    quantization on any role — all 12 pipelines are empty.
-
-    Forward roles: input, weight, bias, output
-    Backward roles (QAT): grad_output, grad_input, grad_weight, grad_bias
-    Backward gemm re-quantization: input_gw, grad_output_gw, weight_gi, grad_output_gi
-
-    Non-matmul operators (activation, softmax, norm, elemwise) use only
-    input/output (+ optional grad_output/grad_input); other fields remain ().
+    Default construction (no arguments) = no quantization on any role.
     """
 
-    # ---------- forward ----------
-    input:  Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    weight: Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    bias:   Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    output: Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    # ---- Storage (uniform across all tensors in the model) ----
+    storage: Optional[QuantScheme] = None
 
-    # ---------- backward (QAT) ----------
-    grad_output: Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    grad_input:  Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    grad_weight: Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    grad_bias:   Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    # ---- Compute quantization (one per role, None = no compute quant) ----
+    input:  Optional[QuantScheme] = None
+    weight: Optional[QuantScheme] = None
+    bias:   Optional[QuantScheme] = None
+    output: Optional[QuantScheme] = None
 
-    # ---------- backward gemm re-quantization ----------
-    input_gw:       Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    grad_output_gw: Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    weight_gi:       Tuple[QuantScheme, ...] = ()   # Default: no quantization
-    grad_output_gi:  Tuple[QuantScheme, ...] = ()   # Default: no quantization
+    # ---- Backward (QAT) ----
+    grad_output: Optional[QuantScheme] = None
+    grad_input:  Optional[QuantScheme] = None
+    grad_weight: Optional[QuantScheme] = None
+    grad_bias:   Optional[QuantScheme] = None
+
+    # ---- Backward gemm re-quantization ----
+    input_gw:       Optional[QuantScheme] = None
+    grad_output_gw: Optional[QuantScheme] = None
+    weight_gi:       Optional[QuantScheme] = None
+    grad_output_gi:  Optional[QuantScheme] = None
 
     def __post_init__(self):
-        # All current fields are tuple[QuantScheme, ...] pipelines.
-        # If a non-pipeline field is added, this loop needs a type dispatch.
         for f in fields(self):
             value = getattr(self, f.name)
-            if not isinstance(value, tuple):
+            if value is not None and not isinstance(value, QuantScheme):
                 raise TypeError(
-                    f"OpQuantConfig.{f.name} must be tuple[QuantScheme, ...], "
+                    f"OpQuantConfig.{f.name} must be QuantScheme or None, "
                     f"got {type(value).__name__}"
                 )
-            for i, s in enumerate(value):
-                if not isinstance(s, QuantScheme):
-                    raise TypeError(
-                        f"OpQuantConfig.{f.name}[{i}] must be QuantScheme, "
-                        f"got {type(s).__name__}"
-                    )
 
     @property
     def is_training(self) -> bool:
-        """True if any backward field is non-empty (QAT active)."""
-        return any(getattr(self, name) for name in _BACKWARD_FIELD_NAMES)
+        """True if any backward field is non-None (QAT active)."""
+        return any(getattr(self, name) is not None for name in _BACKWARD_FIELD_NAMES)

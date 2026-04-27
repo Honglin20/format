@@ -51,7 +51,7 @@ class TestSoftmax:
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
         cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
@@ -66,7 +66,7 @@ class TestSoftmax:
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
         cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
@@ -83,7 +83,7 @@ class TestSoftmax:
 
         mx_out = mx.softmax(mx_x, dim=0, mx_specs=mx_specs)
         cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, 0, inner, exp2, qbp)
 
@@ -98,7 +98,7 @@ class TestSoftmax:
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
         cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
@@ -113,7 +113,7 @@ class TestSoftmax:
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
         cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 
@@ -132,7 +132,7 @@ class TestSoftmaxSTE:
 
         mx_out = mx.softmax(mx_x, dim=-1, mx_specs=mx_specs)
         cfg, exp2 = softmax_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SoftmaxFunction.apply(src_x, -1, inner, exp2, qbp)
 

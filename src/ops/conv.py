@@ -4,8 +4,9 @@ QuantizedConv: OpQuantConfig-driven replacement for mx.Conv{1,2,3}d.
 Forward + backward are bit-exact equivalent to mx/convolution.py when driven
 by the same OpQuantConfig produced by op_config_from_mx_specs.
 
-Conv uses axis=1 (channel dim) for MX block quantization on both input
-and weight in forward, and different axes in backward gemm operations.
+Two-level quantization model (storage → compute):
+- storage: applied first, always per-tensor elemwise (e.g. bfloat16)
+- compute: per-role quantization (e.g. fp8 MX per-block)
 """
 import torch
 import torch.nn as nn
@@ -16,7 +17,6 @@ from torch.nn.modules.utils import _single, _pair, _triple
 from src.scheme.op_config import OpQuantConfig
 from src.quantize import quantize
 from src.analysis.mixin import ObservableMixin
-from src.scheme.granularity import GranularityMode
 
 
 def _conv_weight(input, weight_shape, grad_output, stride=1, padding=0,
@@ -28,21 +28,15 @@ def _conv_weight(input, weight_shape, grad_output, stride=1, padding=0,
     """
     num_spatial_dims = input.ndim - 2
     if num_spatial_dims == 1:
-        _p = _single
-        _conv = F.conv1d
-        _conv_weight = nn_grad.conv1d_weight
+        _conv_weight_impl = nn_grad.conv1d_weight
     elif num_spatial_dims == 2:
-        _p = _pair
-        _conv = F.conv2d
-        _conv_weight = nn_grad.conv2d_weight
+        _conv_weight_impl = nn_grad.conv2d_weight
     elif num_spatial_dims == 3:
-        _p = _triple
-        _conv = F.conv3d
-        _conv_weight = nn_grad.conv3d_weight
+        _conv_weight_impl = nn_grad.conv3d_weight
     else:
         raise ValueError(f"conv_weight does not support ndim={input.ndim}")
 
-    return _conv_weight(
+    return _conv_weight_impl(
         input, weight_shape, grad_output,
         stride=stride, padding=padding,
         dilation=dilation, groups=groups,
@@ -54,12 +48,13 @@ class ConvFunction(torch.autograd.Function):
 
     Supports Conv1d, Conv2d, Conv3d (detected by input ndim).
 
-    Forward flow (matches mx/convolution.py):
-      1. elemwise quantize input, weight, bias
-      2. MX quantize input along axis=1 (in_channels)
-      3. MX quantize weight along axis=1 (in_channels/groups)
+    Forward flow:
+      1. storage quantize input, weight, bias
+      2. compute quantize input
+      3. compute quantize weight
       4. F.conv{1,2,3}d(qinput, qweight, qbias, ...)
-      5. elemwise quantize output
+      5. storage quantize output
+      6. compute quantize output
     """
 
     @staticmethod
@@ -84,57 +79,33 @@ class ConvFunction(torch.autograd.Function):
 
         input_raw, weight_raw = input, weight
 
-        # Split pipelines into elemwise + MX
-        input_elem = tuple(s for s in cfg.input if s.granularity.mode != GranularityMode.PER_BLOCK)
-        input_mx = tuple(s for s in cfg.input if s.granularity.mode == GranularityMode.PER_BLOCK)
+        # input: storage → compute
+        if cfg.storage is not None:
+            fp_in = input; input = quantize(input, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, cfg.storage)
+        input_post_storage = input
+        if cfg.input is not None:
+            fp_in = input; input = quantize(input, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_in, input, cfg.input)
 
-        weight_elem = tuple(s for s in cfg.weight if s.granularity.mode != GranularityMode.PER_BLOCK)
-        weight_mx = tuple(s for s in cfg.weight if s.granularity.mode == GranularityMode.PER_BLOCK)
+        # weight: storage → compute
+        if cfg.storage is not None:
+            fp_wt = weight; weight = quantize(weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_wt, weight, cfg.storage)
+        weight_post_storage = weight
+        if cfg.weight is not None:
+            fp_wt = weight; weight = quantize(weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_wt, weight, cfg.weight)
 
-        # Elemwise quantize
-        in_idx = 0
-        for s in input_elem:
-            fp_in = input
-            input = quantize(input, s)
-            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in, input, s)
-            in_idx += 1
-        input_post_elem = input
-
-        for s in input_mx:
-            fp_in = input
-            input = quantize(input, s)
-            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in, input, s)
-            in_idx += 1
-
-        wt_idx = 0
-        for s in weight_elem:
-            fp_wt = weight
-            weight = quantize(weight, s)
-            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_wt, weight, s)
-            wt_idx += 1
-        weight_post_elem = weight
-
-        # MX quantize (conv uses axis=1 for channel dim)
-        for s in weight_mx:
-            fp_wt = weight
-            weight = quantize(weight, s)
-            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_wt, weight, s)
-            wt_idx += 1
-
-        # Bias quantization
-        q_bias = None
-        if bias is not None:
-            q_bias = bias
-            b_idx = 0
-            for s in cfg.bias:
-                fp_b = q_bias
-                q_bias = quantize(q_bias, s)
-                if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
-                b_idx += 1
+        # bias: storage only
+        q_bias = bias
+        if bias is not None and cfg.storage is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
 
         # Save for backward
         if cfg.is_training:
-            ctx.save_for_backward(input_post_elem, weight_post_elem)
+            ctx.save_for_backward(input_post_storage, weight_post_storage)
         else:
             ctx.save_for_backward(input_raw, weight_raw)
 
@@ -148,13 +119,15 @@ class ConvFunction(torch.autograd.Function):
         else:
             output = F.conv3d(input, weight, q_bias, stride, padding, dilation, groups)
 
-        # Output quantization (single elemwise step — bias already included in conv)
-        out_idx = 0
-        if len(cfg.output) > 0:
-            fp_out = output
-            output = quantize(output, cfg.output[0])
-            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_out, output, cfg.output[0])
-            out_idx += 1
+        # Output: storage (bias already included in conv)
+        if cfg.storage is not None:
+            fp_out = output; output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, cfg.storage)
+
+        # Output compute
+        if cfg.output is not None:
+            fp_out = output; output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_out, output, cfg.output)
 
         return output
 
@@ -164,23 +137,26 @@ class ConvFunction(torch.autograd.Function):
         cfg: OpQuantConfig = ctx.cfg
         emit_fn = ctx.emit_fn
 
-        # Quantize grad_output
-        go_idx = 0
-        for s in cfg.grad_output:
-            fp_go = grad_output
-            grad_output = quantize(grad_output, s)
-            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_output, s)
-            go_idx += 1
+        # grad_output: storage → compute
+        if cfg.storage is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.storage)
+            if emit_fn: emit_fn("grad_output", 0, "grad_output_pre_quant", fp_go, grad_output, cfg.storage)
+        if cfg.grad_output is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.grad_output)
+            if emit_fn: emit_fn("grad_output", 1, "grad_output_pre_quant", fp_go, grad_output, cfg.grad_output)
 
-        # --- grad_weight ---
-        # input MX along axis=0, grad_output MX along axis=0
+        # grad_weight gemm
         input_gw = input
-        for s in cfg.input_gw:
-            input_gw = quantize(input_gw, s)
+        if cfg.storage is not None:
+            input_gw = quantize(input_gw, cfg.storage)
+        if cfg.input_gw is not None:
+            input_gw = quantize(input_gw, cfg.input_gw)
 
         grad_output_gw = grad_output
-        for s in cfg.grad_output_gw:
-            grad_output_gw = quantize(grad_output_gw, s)
+        if cfg.storage is not None:
+            grad_output_gw = quantize(grad_output_gw, cfg.storage)
+        if cfg.grad_output_gw is not None:
+            grad_output_gw = quantize(grad_output_gw, cfg.grad_output_gw)
 
         grad_weight = _conv_weight(
             input_gw, weight.shape, grad_output_gw,
@@ -188,22 +164,25 @@ class ConvFunction(torch.autograd.Function):
             dilation=ctx.dilation, groups=ctx.groups,
         )
 
-        gw_idx = 0
-        for s in cfg.grad_weight:
-            fp_gw = grad_weight
-            grad_weight = quantize(grad_weight, s)
-            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_weight, s)
-            gw_idx += 1
+        if cfg.storage is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.storage)
+            if emit_fn: emit_fn("grad_weight", 0, "grad_weight_post_quant", fp_gw, grad_weight, cfg.storage)
+        if cfg.grad_weight is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.grad_weight)
+            if emit_fn: emit_fn("grad_weight", 1, "grad_weight_post_quant", fp_gw, grad_weight, cfg.grad_weight)
 
-        # --- grad_input ---
-        # weight MX along axis=0, grad_output MX along axis=1
+        # grad_input gemm
         weight_gi = weight
-        for s in cfg.weight_gi:
-            weight_gi = quantize(weight_gi, s)
+        if cfg.storage is not None:
+            weight_gi = quantize(weight_gi, cfg.storage)
+        if cfg.weight_gi is not None:
+            weight_gi = quantize(weight_gi, cfg.weight_gi)
 
         grad_output_gi = grad_output
-        for s in cfg.grad_output_gi:
-            grad_output_gi = quantize(grad_output_gi, s)
+        if cfg.storage is not None:
+            grad_output_gi = quantize(grad_output_gi, cfg.storage)
+        if cfg.grad_output_gi is not None:
+            grad_output_gi = quantize(grad_output_gi, cfg.grad_output_gi)
 
         grad_input = ctx.conv_input(
             input.shape, weight_gi, grad_output_gi,
@@ -211,20 +190,22 @@ class ConvFunction(torch.autograd.Function):
             dilation=ctx.dilation, groups=ctx.groups,
         )
 
-        gi_idx = 0
-        for s in cfg.grad_input:
-            fp_gi = grad_input
-            grad_input = quantize(grad_input, s)
-            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_input, s)
-            gi_idx += 1
+        if cfg.storage is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.storage)
+            if emit_fn: emit_fn("grad_input", 0, "grad_input_post_quant", fp_gi, grad_input, cfg.storage)
+        if cfg.grad_input is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.grad_input)
+            if emit_fn: emit_fn("grad_input", 1, "grad_input_post_quant", fp_gi, grad_input, cfg.grad_input)
 
-        # --- grad_bias ---
+        # grad_bias
         grad_bias = None
         if ctx.has_bias:
             sum_axes = [0] + list(range(2, grad_output.ndim))
             grad_bias = grad_output.sum(sum_axes)
-            for s in cfg.grad_bias:
-                grad_bias = quantize(grad_bias, s)
+            if cfg.storage is not None:
+                grad_bias = quantize(grad_bias, cfg.storage)
+            if cfg.grad_bias is not None:
+                grad_bias = quantize(grad_bias, cfg.grad_bias)
 
         return (grad_input, grad_weight, grad_bias,
                 None, None, None, None, None, None, None)
@@ -232,23 +213,28 @@ class ConvFunction(torch.autograd.Function):
     @staticmethod
     def symbolic(g, input, weight, bias, stride, padding, dilation, groups,
                  cfg, name, emit_fn):
-        """ONNX symbolic: emit quantize nodes + Conv."""
         from src.onnx.helpers import _emit_quantize_node
 
-        for scheme in cfg.input:
-            input = _emit_quantize_node(g, input, scheme)
-        for scheme in cfg.weight:
-            weight = _emit_quantize_node(g, weight, scheme)
+        if cfg.storage is not None:
+            input = _emit_quantize_node(g, input, cfg.storage)
+        if cfg.input is not None:
+            input = _emit_quantize_node(g, input, cfg.input)
 
-        if bias is not None:
-            for scheme in cfg.bias:
-                bias = _emit_quantize_node(g, bias, scheme)
+        if cfg.storage is not None:
+            weight = _emit_quantize_node(g, weight, cfg.storage)
+        if cfg.weight is not None:
+            weight = _emit_quantize_node(g, weight, cfg.weight)
+
+        if bias is not None and cfg.storage is not None:
+            bias = _emit_quantize_node(g, bias, cfg.storage)
+        if bias is not None and cfg.bias is not None:
+            bias = _emit_quantize_node(g, bias, cfg.bias)
 
         weight_sizes = weight.type().sizes()
         kernel_shape = list(weight_sizes[2:]) if weight_sizes is not None else None
 
         pad_list = list(padding) if hasattr(padding, '__iter__') else [padding]
-        onnx_pads = pad_list + pad_list  # symmetric
+        onnx_pads = pad_list + pad_list
 
         conv_kwargs = dict(
             dilations_i=list(dilation) if hasattr(dilation, '__iter__') else [dilation],
@@ -264,8 +250,10 @@ class ConvFunction(torch.autograd.Function):
         else:
             output = g.op("Conv", input, weight, **conv_kwargs)
 
-        for scheme in cfg.output:
-            output = _emit_quantize_node(g, output, scheme)
+        if cfg.storage is not None:
+            output = _emit_quantize_node(g, output, cfg.storage)
+        if cfg.output is not None:
+            output = _emit_quantize_node(g, output, cfg.output)
 
         return output
 
@@ -349,21 +337,14 @@ class QuantizedConv3d(ObservableMixin, nn.Conv3d):
 class ConvTransposeFunction(torch.autograd.Function):
     """Autograd function for quantized conv_transpose with QAT backward.
 
-    Supports ConvTranspose1d, ConvTranspose2d, ConvTranspose3d
-    (detected by input ndim).
+    Supports ConvTranspose1d, ConvTranspose2d, ConvTranspose3d.
 
-    Forward flow (matches mx/transpose_convolution.py):
-      1. elemwise quantize input, weight, bias
-      2. MX quantize input along axis=1 (in_channels)
-      3. MX quantize weight along axis=0 (in_channels — differs from Conv's axis=1)
-      4. F.conv_transpose{1,2,3}d(qinput, qweight, qbias, ..., output_padding)
-      5. elemwise quantize output
-
-    Backward flow:
-      - grad_weight: conv_weight(grad_output, weight.shape, input) with
-        input MX axis=0, grad_output MX axis=0
-      - grad_input: F.conv{1,2,3}d(grad_output, weight, ...) with
-        weight MX axis=1, grad_output MX axis=1
+    Forward flow:
+      1. storage quantize input, weight, bias
+      2. compute quantize input (axis=1)
+      3. compute quantize weight (axis=0 — differs from Conv's axis=1)
+      4. F.conv_transposed(qinput, qweight, qbias, ...)
+      5. storage + compute quantize output
     """
 
     @staticmethod
@@ -383,57 +364,33 @@ class ConvTransposeFunction(torch.autograd.Function):
 
         input_raw, weight_raw = input, weight
 
-        # Split pipelines into elemwise + MX
-        input_elem = tuple(s for s in cfg.input if s.granularity.mode != GranularityMode.PER_BLOCK)
-        input_mx = tuple(s for s in cfg.input if s.granularity.mode == GranularityMode.PER_BLOCK)
+        # input: storage → compute
+        if cfg.storage is not None:
+            fp_in = input; input = quantize(input, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, cfg.storage)
+        input_post_storage = input
+        if cfg.input is not None:
+            fp_in = input; input = quantize(input, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_in, input, cfg.input)
 
-        weight_elem = tuple(s for s in cfg.weight if s.granularity.mode != GranularityMode.PER_BLOCK)
-        weight_mx = tuple(s for s in cfg.weight if s.granularity.mode == GranularityMode.PER_BLOCK)
+        # weight: storage → compute
+        if cfg.storage is not None:
+            fp_wt = weight; weight = quantize(weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_wt, weight, cfg.storage)
+        weight_post_storage = weight
+        if cfg.weight is not None:
+            fp_wt = weight; weight = quantize(weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_wt, weight, cfg.weight)
 
-        # Elemwise quantize
-        in_idx = 0
-        for s in input_elem:
-            fp_in = input
-            input = quantize(input, s)
-            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in, input, s)
-            in_idx += 1
-        input_post_elem = input
-
-        for s in input_mx:
-            fp_in = input
-            input = quantize(input, s)
-            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_in, input, s)
-            in_idx += 1
-
-        wt_idx = 0
-        for s in weight_elem:
-            fp_wt = weight
-            weight = quantize(weight, s)
-            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_wt, weight, s)
-            wt_idx += 1
-        weight_post_elem = weight
-
-        # MX quantize (conv_transpose: input axis=1, weight axis=0)
-        for s in weight_mx:
-            fp_wt = weight
-            weight = quantize(weight, s)
-            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_wt, weight, s)
-            wt_idx += 1
-
-        # Bias quantization
-        q_bias = None
-        if bias is not None:
-            q_bias = bias
-            b_idx = 0
-            for s in cfg.bias:
-                fp_b = q_bias
-                q_bias = quantize(q_bias, s)
-                if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
-                b_idx += 1
+        # bias: storage only
+        q_bias = bias
+        if bias is not None and cfg.storage is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
 
         # Save for backward
         if cfg.is_training:
-            ctx.save_for_backward(input_post_elem, weight_post_elem)
+            ctx.save_for_backward(input_post_storage, weight_post_storage)
         else:
             ctx.save_for_backward(input_raw, weight_raw)
 
@@ -450,13 +407,15 @@ class ConvTransposeFunction(torch.autograd.Function):
             output = F.conv_transpose3d(input, weight, q_bias, stride, padding,
                                         output_padding, groups, dilation)
 
-        # Output quantization
-        out_idx = 0
-        if len(cfg.output) > 0:
-            fp_out = output
-            output = quantize(output, cfg.output[0])
-            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_out, output, cfg.output[0])
-            out_idx += 1
+        # Output: storage
+        if cfg.storage is not None:
+            fp_out = output; output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, cfg.storage)
+
+        # Output compute
+        if cfg.output is not None:
+            fp_out = output; output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_out, output, cfg.output)
 
         return output
 
@@ -466,23 +425,26 @@ class ConvTransposeFunction(torch.autograd.Function):
         cfg: OpQuantConfig = ctx.cfg
         emit_fn = ctx.emit_fn
 
-        # Quantize grad_output
-        go_idx = 0
-        for s in cfg.grad_output:
-            fp_go = grad_output
-            grad_output = quantize(grad_output, s)
-            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_output, s)
-            go_idx += 1
+        # grad_output: storage → compute
+        if cfg.storage is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.storage)
+            if emit_fn: emit_fn("grad_output", 0, "grad_output_pre_quant", fp_go, grad_output, cfg.storage)
+        if cfg.grad_output is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.grad_output)
+            if emit_fn: emit_fn("grad_output", 1, "grad_output_pre_quant", fp_go, grad_output, cfg.grad_output)
 
-        # --- grad_weight ---
-        # input MX along axis=0, grad_output MX along axis=0
+        # grad_weight gemm
         input_gw = input
-        for s in cfg.input_gw:
-            input_gw = quantize(input_gw, s)
+        if cfg.storage is not None:
+            input_gw = quantize(input_gw, cfg.storage)
+        if cfg.input_gw is not None:
+            input_gw = quantize(input_gw, cfg.input_gw)
 
         grad_output_gw = grad_output
-        for s in cfg.grad_output_gw:
-            grad_output_gw = quantize(grad_output_gw, s)
+        if cfg.storage is not None:
+            grad_output_gw = quantize(grad_output_gw, cfg.storage)
+        if cfg.grad_output_gw is not None:
+            grad_output_gw = quantize(grad_output_gw, cfg.grad_output_gw)
 
         grad_weight = _conv_weight(
             grad_output_gw, weight.shape, input_gw,
@@ -490,23 +452,25 @@ class ConvTransposeFunction(torch.autograd.Function):
             dilation=ctx.dilation, groups=ctx.groups,
         )
 
-        gw_idx = 0
-        for s in cfg.grad_weight:
-            fp_gw = grad_weight
-            grad_weight = quantize(grad_weight, s)
-            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_weight, s)
-            gw_idx += 1
+        if cfg.storage is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.storage)
+            if emit_fn: emit_fn("grad_weight", 0, "grad_weight_post_quant", fp_gw, grad_weight, cfg.storage)
+        if cfg.grad_weight is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.grad_weight)
+            if emit_fn: emit_fn("grad_weight", 1, "grad_weight_post_quant", fp_gw, grad_weight, cfg.grad_weight)
 
-        # --- grad_input ---
-        # Uses F.conv2d (not conv_transpose) to compute grad_input
-        # weight MX along axis=1, grad_output MX along axis=1
+        # grad_input: uses F.conv2d (not conv_transpose)
         weight_gi = weight
-        for s in cfg.weight_gi:
-            weight_gi = quantize(weight_gi, s)
+        if cfg.storage is not None:
+            weight_gi = quantize(weight_gi, cfg.storage)
+        if cfg.weight_gi is not None:
+            weight_gi = quantize(weight_gi, cfg.weight_gi)
 
         grad_output_gi = grad_output
-        for s in cfg.grad_output_gi:
-            grad_output_gi = quantize(grad_output_gi, s)
+        if cfg.storage is not None:
+            grad_output_gi = quantize(grad_output_gi, cfg.storage)
+        if cfg.grad_output_gi is not None:
+            grad_output_gi = quantize(grad_output_gi, cfg.grad_output_gi)
 
         num_spatial_dims = input.ndim - 2
         if num_spatial_dims == 1:
@@ -522,20 +486,22 @@ class ConvTransposeFunction(torch.autograd.Function):
                                   stride=ctx.stride, padding=ctx.padding,
                                   dilation=ctx.dilation, groups=ctx.groups)
 
-        gi_idx = 0
-        for s in cfg.grad_input:
-            fp_gi = grad_input
-            grad_input = quantize(grad_input, s)
-            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_input, s)
-            gi_idx += 1
+        if cfg.storage is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.storage)
+            if emit_fn: emit_fn("grad_input", 0, "grad_input_post_quant", fp_gi, grad_input, cfg.storage)
+        if cfg.grad_input is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.grad_input)
+            if emit_fn: emit_fn("grad_input", 1, "grad_input_post_quant", fp_gi, grad_input, cfg.grad_input)
 
-        # --- grad_bias ---
+        # grad_bias
         grad_bias = None
         if ctx.has_bias:
             sum_axes = [0] + list(range(2, grad_output.ndim))
             grad_bias = grad_output.sum(sum_axes)
-            for s in cfg.grad_bias:
-                grad_bias = quantize(grad_bias, s)
+            if cfg.storage is not None:
+                grad_bias = quantize(grad_bias, cfg.storage)
+            if cfg.grad_bias is not None:
+                grad_bias = quantize(grad_bias, cfg.grad_bias)
 
         return (grad_input, grad_weight, grad_bias,
                 None, None, None, None, None, None, None, None)
@@ -543,22 +509,28 @@ class ConvTransposeFunction(torch.autograd.Function):
     @staticmethod
     def symbolic(g, input, weight, bias, stride, padding, output_padding,
                  dilation, groups, cfg, name, emit_fn):
-        """ONNX symbolic: emit quantize nodes + ConvTranspose."""
         from src.onnx.helpers import _emit_quantize_node
 
-        for scheme in cfg.input:
-            input = _emit_quantize_node(g, input, scheme)
-        for scheme in cfg.weight:
-            weight = _emit_quantize_node(g, weight, scheme)
-        if bias is not None:
-            for scheme in cfg.bias:
-                bias = _emit_quantize_node(g, bias, scheme)
+        if cfg.storage is not None:
+            input = _emit_quantize_node(g, input, cfg.storage)
+        if cfg.input is not None:
+            input = _emit_quantize_node(g, input, cfg.input)
+
+        if cfg.storage is not None:
+            weight = _emit_quantize_node(g, weight, cfg.storage)
+        if cfg.weight is not None:
+            weight = _emit_quantize_node(g, weight, cfg.weight)
+
+        if bias is not None and cfg.storage is not None:
+            bias = _emit_quantize_node(g, bias, cfg.storage)
+        if bias is not None and cfg.bias is not None:
+            bias = _emit_quantize_node(g, bias, cfg.bias)
 
         weight_sizes = weight.type().sizes()
         kernel_shape = list(weight_sizes[2:]) if weight_sizes is not None else None
 
         pad_list = list(padding) if hasattr(padding, '__iter__') else [padding]
-        onnx_pads = pad_list + pad_list  # symmetric
+        onnx_pads = pad_list + pad_list
 
         conv_kwargs = dict(
             dilations_i=list(dilation) if hasattr(dilation, '__iter__') else [dilation],
@@ -575,8 +547,10 @@ class ConvTransposeFunction(torch.autograd.Function):
         else:
             output = g.op("ConvTranspose", input, weight, **conv_kwargs)
 
-        for scheme in cfg.output:
-            output = _emit_quantize_node(g, output, scheme)
+        if cfg.storage is not None:
+            output = _emit_quantize_node(g, output, cfg.storage)
+        if cfg.output is not None:
+            output = _emit_quantize_node(g, output, cfg.output)
 
         return output
 

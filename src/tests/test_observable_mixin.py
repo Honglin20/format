@@ -251,8 +251,8 @@ def _qcfg():
     """One-scheme-per-role OpQuantConfig for emit_fn integration tests."""
     s = _s("fp8_e4m3")
     return OpQuantConfig(
-        input=(s,), weight=(s,), bias=(s,), output=(s,),
-        grad_output=(s,), grad_weight=(s,), grad_input=(s,),
+        input=s, weight=s, bias=s, output=s,
+        grad_output=s, grad_weight=s, grad_input=s,
     )
 
 

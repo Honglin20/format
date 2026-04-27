@@ -75,7 +75,7 @@ def _make_emit_fn(state, layer_name: str, op_suffix: str):
 
 def _simd_inner_scheme(cfg):
     """Extract inner_scheme for SIMD ops: first input scheme or None."""
-    return cfg.input[0] if cfg.input else None
+    return cfg.input
 
 
 # ---------------------------------------------------------------------------

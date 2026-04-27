@@ -254,7 +254,7 @@ class TestEndToEnd:
             granularity=GranularitySpec(mode=GranularityMode.PER_TENSOR),
             transform=IdentityTransform(),
         )
-        cfg = OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+        cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
         class TwoLayer(nn.Module):
             def __init__(self):
@@ -292,7 +292,7 @@ class TestEndToEnd:
             granularity=GranularitySpec(mode=GranularityMode.PER_TENSOR),
             transform=IdentityTransform(),
         )
-        cfg = OpQuantConfig(input=(scheme,), weight=(scheme,))
+        cfg = OpQuantConfig(input=scheme, weight=scheme)
 
         model = QuantizedLinear(8, 4, bias=False, cfg=cfg, name="test_layer")
         x = torch.randn(2, 8)

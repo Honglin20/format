@@ -104,6 +104,54 @@ class CalibrationSession:
             scales = self.scales()
         return self._assign_scales(scales)
 
+    def save_scales(self, filepath: str, scales: Optional[Dict[str, torch.Tensor]] = None) -> str:
+        """Save scale factors to disk.
+
+        Args:
+            filepath: Path to save the scales dict (e.g. ``"scales.pt"``).
+            scales: Dict mapping module names to scale tensors.
+                If None, calls :meth:`scales` internally.
+
+        Returns:
+            The filepath (for chaining).
+        """
+        if scales is None:
+            scales = self.scales()
+        torch.save(scales, filepath)
+        return filepath
+
+    def load_scales(
+        self,
+        filepath: str,
+        assign: bool = True,
+    ) -> Dict[str, torch.Tensor]:
+        """Load scales from disk and optionally assign to model modules.
+
+        Args:
+            filepath: Path to the saved scales file (e.g. ``"scales.pt"``).
+            assign: If True (default), assign scales as ``_output_scale``
+                buffers on corresponding model modules.
+
+        Returns:
+            Dict mapping module names to scale tensors.
+        """
+        scales = torch.load(filepath, weights_only=False)
+        if assign:
+            self._assign_scales(scales)
+        return scales
+
+    @staticmethod
+    def load_scales_from(filepath: str) -> Dict[str, torch.Tensor]:
+        """Load scales from disk (standalone, no model required).
+
+        Args:
+            filepath: Path to the saved scales file.
+
+        Returns:
+            Dict mapping module names to scale tensors.
+        """
+        return torch.load(filepath, weights_only=False)
+
     def clear_scales(self) -> List[str]:
         """Remove all ``_output_scale`` buffers from the model.
 
@@ -142,6 +190,37 @@ class CalibrationSession:
             else:
                 self._running_amax[name] = amax
         return _hook
+
+
+# ------------------------------------------------------------------
+# Standalone persistence helpers (no session/model required)
+# ------------------------------------------------------------------
+
+
+def save_scales(scales: Dict[str, torch.Tensor], filepath: str) -> str:
+    """Save a scales dict to disk.
+
+    Args:
+        scales: Dict mapping module names to scale tensors.
+        filepath: Path to save (e.g. ``"scales.pt"``).
+
+    Returns:
+        The filepath (for chaining).
+    """
+    torch.save(scales, filepath)
+    return filepath
+
+
+def load_scales(filepath: str) -> Dict[str, torch.Tensor]:
+    """Load a scales dict from disk.
+
+    Args:
+        filepath: Path to the saved scales file.
+
+    Returns:
+        Dict mapping module names to scale tensors.
+    """
+    return torch.load(filepath, weights_only=False)
 
 
 # ------------------------------------------------------------------

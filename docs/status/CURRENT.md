@@ -1,57 +1,64 @@
 # Current Task
 
-**Task ID**: P8.R1 — OpQuantConfig 两阶段重构（tuple pipeline → QuantScheme|None）
-**Plan**: docs/plans/2026-04-27-opconfig-two-level-impl.md
-**Design**: docs/plans/2026-04-27-opconfig-two-level-design.md
-**Branch**: refactor/opconfig-two-level（独立 worktree：.claude/worktrees/opconfig-refactor）
-**Tests baseline**: 1247 passed, 0 xfail
+**Task ID**: P8.X — QuantSession 统一 API（Phase 8 研究能力扩展）
+**Next**: P5 — LSQ / PACT 可学习量化参数 或 P1 — Bias Correction / CLE
+**Branch**: feature/refactor-src
+**Tests baseline**: 1265 passed, 0 xfail（+30 format registry, +8 scale persistence）
 
-## 目标
+## QuantSession 完成状态
 
-将 OpQuantConfig 从 `Tuple[QuantScheme, ...]` pipeline 重构为 `QuantScheme | None` 两阶段模型（storage + compute），消除所有算子中的 for 循环和 GranularityMode 拆分。
+- [x] CalibrationSession 重构（上下文管理器 + auto-assign，CalibrationPipeline 向后兼容）
+- [x] AnalysisSession = AnalysisContext 别名
+- [x] Comparator / compare_models / compare_sessions（e2e 对比工具）
+- [x] QuantSession 统一 API（session.py，34 tests）
+- [x] README 更新（QuantSession 推荐用法 + API 方法表）
 
-## Progress
+## QuantSession API 总结
 
-- [ ] Task 1: 重构 OpQuantConfig 核心（storage 字段 + QuantScheme|None）
-- [ ] Task 2: 更新 Linear 算子
-- [ ] Task 3: 更新 Conv / ConvTranspose 算子
-- [ ] Task 4: 更新 Norm 算子
-- [ ] Task 5: 更新 Activation 算子
-- [ ] Task 6: 更新 Softmax
-- [ ] Task 7: 更新 Pool
-- [ ] Task 8: 更新 Elemwise / Vec ops
-- [ ] Task 9: 更新 mapping / quantize_model
-- [ ] Task 10: 更新 context / QuantizeContext
-- [ ] Task 11: 更新 ONNX helpers
-- [ ] Task 12: 更新 session.py
-- [ ] Task 13: 更新兼容层（_compat.py）
-- [ ] Task 14: 更新所有测试文件
-- [ ] Task 15: 全量测试 + 修复 regression（目标：1247+ passed, 0 xfail）
-- [ ] Task 16: 更新文档（ADR-005 + CLAUDE.md）
-- [ ] Task 17: 最终 Review
+```python
+session = QuantSession(model, cfg, calibrator=..., observers=..., keep_fp32=True)
+session.use_fp32() / session.use_quant()  # 模式切换
+session(x)                                 # 推理
+session.calibrate()                        # → CalibrationSession 上下文管理器
+session.analyze()                          # → AnalysisContext 上下文管理器
+session.compare(dl, eval_fn)               # 自动 fp32 vs quant 对比
+session.comparator()                       # → Comparator 手动对比
+session.export_onnx(path, dummy_input?)    # ONNX 导出（自动记录上次推理输入）
+session.clear_scales()                     # 清除 _output_scale buffer
+session.train() / .eval() / .parameters() / .state_dict()  # 委托
+```
 
-## 关键设计决策（已确认）
+## Phase 8 所有完成项
 
-1. **storage + compute 两步都用 quantize()**：不引入新函数名。quantize() 是 polymorphic 的（FormatBase 根据 granularity 内部分派）
-2. **cfg.input 语义复用**：matmul 族作为主输入量化，非 matmul 族自动作为 inner_scheme
-3. **直接 breaking change**：不保留 tuple 向后兼容
-4. **storage 是 per_tensor elemwise**：包含 bfloat16 硬件 fast path（mx 行为对齐）
+- [x] 8A.1 Hadamard Transform（18 tests）
+- [x] 8B.1 Scale Strategy（20 tests）
+- [x] 8B.2 Calibration Pipeline（15 tests）
+- [x] 8A.2 SmoothQuant Transform（29 tests）
+- [x] 8B.3 Scale Persistence（20 tests）— save_scales/load_scales 磁盘持久化
+- [x] P3 NF4 / Lookup Table Format（51 tests）
+- [x] QuantSession 统一 API（34 tests）
 
 ## 下一步
 
-在新会话中，以 `.claude/worktrees/opconfig-refactor` 为工作目录，加载 executing-plans skill，执行 Task 1。
+P5 — LSQ / PACT 可学习量化参数，或 P1 — Bias Correction / CLE。
 
 ## 断点续传必读文件
 
 1. `CLAUDE.md`（全文）
-2. `docs/plans/2026-04-27-opconfig-two-level-design.md`（全文）
-3. `docs/plans/2026-04-27-opconfig-two-level-impl.md`（全文）
-4. `src/scheme/op_config.py`（当前实现）
-5. `src/ops/linear.py`（代表性消费方）
+2. `src/session.py`（QuantSession 实现）
+3. `src/analysis/e2e.py`（Comparator / compare_models / compare_sessions）
+4. `src/calibration/pipeline.py`（CalibrationSession 上下文管理器）
+5. `~/.claude/projects/.../memory/format-research-roadmap.md`（P4/P5 详细说明）
 
 ## 关键经验记录
 
-（从当前会话继承）
-1. **量化两步是 mx 固有设计**：mx 也用 quantize_elemwise_op + quantize_mx_op 两步，这是 MX 规范的固有要求，不是 src/ 的设计缺陷
-2. **bfloat16 fast path**：mx 在 round='even' + CUDA BF16 时用 x.to(torch.bfloat16) 硬件截断，src 当前缺失此优化
-3. **backward 需要 post-storage 中间值**：两步量化不可合并为一个调用的根本原因
+1. **Format 子类签名同步**：FormatBase 改签名后，所有子类的 `quantize()` 必须同步更新
+2. **__eq__/__hash__ 必须实现**：任何可能用作 frozen dataclass 字段的 ABC，必须在 ABC 层声明 `@abstractmethod`
+3. **KL 逐 slice 非逐 position**：`_compute_kl_divergence` 将 axis 排到首维后 reshape(n_slices, -1)
+4. **autograd Function 参数计数**：新增 tensor 参数到 `apply()` 后，`backward()` 和 `symbolic()` 返回值数量必须同步 +1
+5. **SmoothQuant 不可变**：scale 在 `__init__` 传入，`from_calibration()` 工厂方法
+6. **LookupFormat quantize() 不能少**：即使只有 `quantize_elemwise()` 不同，也必须 override `quantize()`（否则 ABC 无法实例化）
+7. **NaN 污染 amax**：per_channel 路径中 `amax = max(|x|, dim=axis)` 会把 NaN 传播到整个 channel
+8. **QuantSession 设计原则**：新层非替代 — `QuantSession` 是现有 API 之上的薄层，`calibrate()`/`analyze()` 返回底层上下文管理器，用户可自由嵌套
+9. **compare_sessions fp32 baseline**：从第一个 session 的 `fp32_model` 自动提取，用户无需额外传 fp32 session
+10. **naming convention to code mbits**：`fpN_eXmY` 中 Y 是 actual mantissa bits，FPFormat.mbits = Y + 2（sign + implicit）；auto-parser 需加 2 转换

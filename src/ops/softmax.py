@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.op_config import OpQuantConfig
 from src.analysis.mixin import ObservableMixin
+from src.quantize import quantize
 from src.ops.vec_ops import (
     vec_quantize, vec_sub, vec_mul, vec_div,
     vec_exp, vec_exp2, vec_reduce_sum,
@@ -32,22 +33,15 @@ class SoftmaxFunction(torch.autograd.Function):
         input = vec_quantize(input, inner_scheme)
         if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, inner_scheme)
 
-        # compute max
         max_data, _ = input.max(dim, keepdim=True)
-
-        # subtraction
         input = vec_sub(input, max_data, inner_scheme)
 
-        # exponentiation
         if softmax_exp2:
             output = vec_exp2(input, inner_scheme)
         else:
             output = vec_exp(input, inner_scheme)
 
-        # sum
         output_sum = vec_reduce_sum(output, dim, keepdim=True, scheme=inner_scheme)
-
-        # divide
         output = vec_div(output, output_sum, inner_scheme)
 
         ctx.save_for_backward(output)
@@ -64,16 +58,11 @@ class SoftmaxFunction(torch.autograd.Function):
         grad_output = vec_quantize(grad_output, scheme)
         if emit_fn: emit_fn("grad_output", 0, "grad_output_pre_quant", fp_go, grad_output, scheme)
 
-        # dot product
         grad_input = vec_mul(grad_output, output, scheme)
-        # sum
         grad_input = vec_reduce_sum(grad_input, ctx.dim, keepdim=True, scheme=scheme)
-        # subtraction
         grad_input = vec_sub(grad_output, grad_input, scheme)
-        # elementwise multiplication
         grad_input = vec_mul(output, grad_input, scheme)
 
-        # Adjust for exp2 constant
         if ctx.softmax_exp2:
             grad_input = vec_mul(grad_input, LN_2_BF16, scheme)
 
@@ -89,9 +78,8 @@ class QuantizedSoftmax(ObservableMixin, nn.Softmax):
         if cfg is not None and inner_scheme is not None:
             raise ValueError("Cannot specify both cfg and inner_scheme")
         if inner_scheme is not None and cfg is None:
-            fwd_pipeline = (inner_scheme,)
-            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
-            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+            bw = inner_scheme if quantize_backprop else None
+            cfg = OpQuantConfig(input=inner_scheme, grad_input=bw)
         if cfg is None:
             cfg = OpQuantConfig()
         self.cfg = cfg
@@ -99,12 +87,17 @@ class QuantizedSoftmax(ObservableMixin, nn.Softmax):
         self._analysis_name = name
 
     def forward(self, input):
-        inner_scheme = self.cfg.input[0] if self.cfg.input else None
-        quantize_backprop = bool(self.cfg.grad_input)
+        inner_scheme = self.cfg.input
+        quantize_backprop = self.cfg.grad_input is not None
         if inner_scheme is None:
             return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        return SoftmaxFunction.apply(
+        if self.cfg.storage is not None:
+            input = quantize(input, self.cfg.storage)
+        result = SoftmaxFunction.apply(
             input, self.dim, inner_scheme, self.softmax_exp2,
             quantize_backprop, self._analysis_name, emit_fn,
         )
+        if self.cfg.storage is not None:
+            result = quantize(result, self.cfg.storage)
+        return result

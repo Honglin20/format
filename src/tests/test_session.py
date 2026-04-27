@@ -32,7 +32,7 @@ def _make_small_model():
 def _make_cfg():
     fmt = FormatBase.from_str("int8")
     scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
-    return OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+    return OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
 
 def _make_dataloader(n_samples=32, batch_size=8, n_features=4, n_classes=3):

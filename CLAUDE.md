@@ -89,17 +89,18 @@ class QuantScheme:
 ### 3.2 算子级配置（OpQuantConfig，ADR-005）
 
 - 量化算子的**完整配置**用 `OpQuantConfig`（见 `docs/architecture/005-op-quant-config.md`）
-- 每个 tensor 角色是一个 `tuple[QuantScheme, ...]` pipeline（0/1/N 个 scheme）
-  - forward 角色：`input` / `weight` / `bias` / `output`
+- **两阶段模型**：量化只有两种 —— storage（存储精度，per-tensor elemwise，所有 tensor 统一）+ compute（计算量化，per-role，如 per-block MX）
+- 每个字段是 `QuantScheme | None`（`None` = 不量化）。新增 `storage` 字段，共 13 字段
+  - forward 角色：`storage` / `input` / `weight` / `bias` / `output`
   - backward 角色：`grad_output` / `grad_input` / `grad_weight` / `grad_bias`
   - backward 内部 gemm 复量化：`input_gw` / `grad_output_gw` / `weight_gi` / `grad_output_gi`
-- 非 matmul 算子只填 `input` / `output`（+ `grad_input` / `grad_output` 可选），其余字段保持 `()`
-- `cfg.is_training` 自动识别是否启用 QAT（任一 backward 字段非空）
-- 算子 forward/backward 实现是**"for scheme in cfg.<role>: x = quantize(x, scheme)"**的机械消费，不含分支逻辑
+- 非 matmul 算子只填 `input` / `output`（+ `grad_input` / `grad_output` 可选），其余字段保持 `None`
+- `cfg.is_training` 自动识别是否启用 QAT（任一 backward 字段非 None）
+- 算子 forward/backward 实现是**"storage → compute"的机械消费**：`if cfg.storage: x = quantize(x, cfg.storage); if cfg.<role>: x = quantize(x, cfg.<role>)`，至多两句，不含循环
 
-**inner_scheme 模式（Activation/Softmax/Pool）**：这三类算子的每个量化步骤都使用同一个 scheme。  
-模块类对外接口统一为 `cfg: OpQuantConfig`，内部从 `cfg.input[0]` 提取 `inner_scheme` 传入 Function。  
-支持向下兼容参数 `inner_scheme: QuantScheme = None`，自动转换为 `OpQuantConfig(input=(inner_scheme,), grad_input=(inner_scheme,))`。  
+**inner_scheme 模式（Activation/Softmax/Pool/Norm）**：这些算子的每个量化步骤使用同一个 scheme。  
+模块类对外接口统一为 `cfg: OpQuantConfig`，内部从 `cfg.input` 提取 `inner_scheme` 传入 Function。  
+支持向下兼容参数 `inner_scheme: QuantScheme = None`，自动转换为 `OpQuantConfig(input=inner_scheme, grad_input=inner_scheme)`。  
 详见 `docs/plans/2026-04-25-defect-fix-specs.md` M1 章节。
 
 ### 3.3 Observer 分析模式（ADR-002）
@@ -113,7 +114,8 @@ class QuantScheme:
 
 **`emit_fn` 回调模式**：`_emit()` 只能在持有 `self` 的 `QuantizedXxx.forward()` 中调用。  
 `XxxFunction.forward()` 末尾参数接收 `emit_fn=None`（可选回调）；`QuantizedXxx.forward()` 传入 `self._emit if self._observers else None`。  
-Function 内每个量化关键点用 `if emit_fn: emit_fn(role, idx, stage, fp32, quant, scheme)` 触发事件。  
+Function 内每个量化关键点用 `if emit_fn: emit_fn(role, stage_index, stage, fp32, quant, scheme)` 触发事件。  
+`stage_index` 固定为：0 = storage 阶段，1 = compute 阶段，2 = output 第二阶段（Linear bias-add 后专用）。  
 详见 `docs/plans/2026-04-25-defect-fix-specs.md` C1 章节。
 
 ### 3.4 ONNX Export

@@ -48,14 +48,14 @@ def _standard_cfg(fmt_name, granularity=None):
     fmt = FormatBase.from_str(fmt_name)
     gran = granularity or GranularitySpec.per_tensor()
     s = QuantScheme(format=fmt, granularity=gran)
-    return OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+    return OpQuantConfig(input=s, weight=s, output=s)
 
 
 def _mx_cfg(fmt_name="fp4_e2m1", block_size=32):
     fmt = FormatBase.from_str(fmt_name)
     gran = GranularitySpec.per_block(block_size)
     s = QuantScheme(format=fmt, granularity=gran)
-    return OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+    return OpQuantConfig(input=s, weight=s, output=s)
 
 
 # ---------------------------------------------------------------------------
