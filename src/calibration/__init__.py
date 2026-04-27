@@ -1,16 +1,17 @@
 """
-Calibration package: pluggable scale strategies for quantization.
+Calibration package: pluggable scale strategies and calibration pipeline.
 
-Provides ScaleStrategy ABC and built-in implementations:
-- MaxScaleStrategy: absmax (default, bit-exact with existing behavior)
-- PercentileScaleStrategy: N-th percentile to exclude outliers
-- MSEScaleStrategy: grid-search minimizing MSE
-- KLScaleStrategy: grid-search minimizing KL divergence
+Provides:
+- ScaleStrategy ABC + built-in implementations (Max, Percentile, MSE, KL)
+- CalibrationPipeline: iterate calibration data, collect activation
+  statistics, and compute scale factors.
 
 Usage::
 
     strategy = MaxScaleStrategy()
-    scale = strategy.compute(x, axis=1)
+    pipeline = CalibrationPipeline(model, strategy, num_batches=8)
+    scales = pipeline.calibrate(dataloader)
+
     # Use scale in _quantize_per_channel instead of hardcoded amax
 """
 
@@ -21,6 +22,7 @@ from src.calibration.strategies import (
     MSEScaleStrategy,
     KLScaleStrategy,
 )
+from src.calibration.pipeline import CalibrationPipeline
 
 __all__ = [
     "ScaleStrategy",
@@ -28,4 +30,5 @@ __all__ = [
     "PercentileScaleStrategy",
     "MSEScaleStrategy",
     "KLScaleStrategy",
+    "CalibrationPipeline",
 ]
