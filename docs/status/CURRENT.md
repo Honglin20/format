@@ -1,9 +1,9 @@
 # Current Task
 
 **Task ID**: P8.X — QuantSession 统一 API（Phase 8 研究能力扩展）
-**Next**: P4 — 参数化格式注册 或 P5 — LSQ / PACT 可学习量化参数
+**Next**: P5 — LSQ / PACT 可学习量化参数 或 P1 — Bias Correction / CLE
 **Branch**: feature/refactor-src
-**Tests baseline**: 1247 passed, 0 xfail
+**Tests baseline**: 1265 passed, 0 xfail（+30 format registry, +8 scale persistence）
 
 ## QuantSession 完成状态
 
@@ -40,7 +40,7 @@ session.train() / .eval() / .parameters() / .state_dict()  # 委托
 
 ## 下一步
 
-P4 — 参数化格式注册（`register_float_format("fp5_e3m1", ebits=3, mbits=1)`）或 P5 — LSQ / PACT 可学习量化参数。
+P5 — LSQ / PACT 可学习量化参数，或 P1 — Bias Correction / CLE。
 
 ## 断点续传必读文件
 
@@ -61,3 +61,4 @@ P4 — 参数化格式注册（`register_float_format("fp5_e3m1", ebits=3, mbits
 7. **NaN 污染 amax**：per_channel 路径中 `amax = max(|x|, dim=axis)` 会把 NaN 传播到整个 channel
 8. **QuantSession 设计原则**：新层非替代 — `QuantSession` 是现有 API 之上的薄层，`calibrate()`/`analyze()` 返回底层上下文管理器，用户可自由嵌套
 9. **compare_sessions fp32 baseline**：从第一个 session 的 `fp32_model` 自动提取，用户无需额外传 fp32 session
+10. **naming convention to code mbits**：`fpN_eXmY` 中 Y 是 actual mantissa bits，FPFormat.mbits = Y + 2（sign + implicit）；auto-parser 需加 2 转换
