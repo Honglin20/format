@@ -34,7 +34,7 @@ session.train() / .eval() / .parameters() / .state_dict()  # 委托
 - [x] 8B.1 Scale Strategy（20 tests）
 - [x] 8B.2 Calibration Pipeline（15 tests）
 - [x] 8A.2 SmoothQuant Transform（29 tests）
-- [x] 8B.3 Scale Persistence（12 tests）
+- [x] 8B.3 Scale Persistence（20 tests）— save_scales/load_scales 磁盘持久化
 - [x] P3 NF4 / Lookup Table Format（51 tests）
 - [x] QuantSession 统一 API（34 tests）
 
