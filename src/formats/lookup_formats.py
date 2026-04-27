@@ -23,6 +23,10 @@ class LookupFormat(FormatBase):
         self.name = name
         if not isinstance(levels, torch.Tensor):
             levels = torch.tensor(levels, dtype=torch.float32)
+        if levels.ndim != 1:
+            raise ValueError(
+                f"levels must be a 1D tensor, got {levels.ndim}D"
+            )
         self.levels = levels
         bit_count = levels.numel() - 1
         self.mbits = bit_count.bit_length() if bit_count > 0 else 1
@@ -69,7 +73,7 @@ class LookupFormat(FormatBase):
         return result
 
     def __eq__(self, other):
-        if not isinstance(other, LookupFormat):
+        if type(self) is not type(other):
             return False
         return (self.name == other.name
                 and self.ebits == other.ebits

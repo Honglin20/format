@@ -383,10 +383,79 @@ def test_nf4_large_random_values_are_finite(nf4):
 
 
 # ---------------------------------------------------------------------------
+# 10. levels shape validation
+# ---------------------------------------------------------------------------
+
+def test_lookup_format_rejects_2d_levels():
+    with pytest.raises(ValueError, match="1D"):
+        LookupFormat("bad", levels=torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+
+
+def test_lookup_format_rejects_scalar_levels():
+    with pytest.raises(ValueError, match="1D"):
+        LookupFormat("bad", levels=torch.tensor(1.0))
+
+
+# ---------------------------------------------------------------------------
+# 11. cross-type equality reverse direction
+# ---------------------------------------------------------------------------
+
+def test_lookup_format_not_equal_to_nf4_reverse():
+    """LookupFormat == NF4Format is False (type check in LookupFormat.__eq__)."""
+    lut = LookupFormat("nf4", levels=NF4Format.NF4_LEVELS)
+    nf4 = NF4Format()
+    assert not (lut == nf4)
+
+
+# ---------------------------------------------------------------------------
+# 12. scale= kwarg threading
+# ---------------------------------------------------------------------------
+
+def test_nf4_per_channel_with_scale_kwarg(nf4):
+    """Per-channel quantize with precomputed scale."""
+    torch.manual_seed(42)
+    x = torch.randn(4, 8)
+    scheme = QuantScheme.per_channel("nf4", axis=-1)
+    amax = torch.amax(torch.abs(x), dim=-1, keepdim=True).clamp(min=1e-12)
+    y_auto = quantize_via_scheme(x, scheme)
+    y_scaled = quantize_via_scheme(x, scheme, scale=amax)
+    assert torch.equal(y_auto, y_scaled)
+
+
+def test_nf4_per_block_with_scale_none(nf4):
+    """Per-block quantize with scale=None works."""
+    torch.manual_seed(42)
+    x = torch.randn(4, 32)
+    scheme = QuantScheme.mxfp("nf4", block_size=8)
+    y = quantize_via_scheme(x, scheme, scale=None)
+    assert y.shape == (4, 32)
+    assert torch.isfinite(y).all()
+
+
+# ---------------------------------------------------------------------------
+# 13. per_block NaN propagation
+# ---------------------------------------------------------------------------
+
+def test_nf4_inf_nan_per_block(nf4):
+    """NaN in per_block input propagates to entire block."""
+    torch.manual_seed(42)
+    x = torch.randn(2, 32)
+    x[0, 5] = float('nan')
+    scheme = QuantScheme.mxfp("nf4", block_size=8)
+    y = quantize_via_scheme(x, scheme)
+    assert y.shape == (2, 32)
+    # Block containing position 5 (block 0, positions 0-7) gets NaN from shared_exp
+    assert torch.isnan(y[0, :8]).all()
+    # Other blocks are clean
+    assert torch.isfinite(y[0, 8:]).all()
+    assert torch.isfinite(y[1, :]).all()
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
-def quantize_via_scheme(x, scheme):
+def quantize_via_scheme(x, scheme, scale=None):
     """Helper to quantize via scheme.format.quantize() for granularity tests."""
     from src.quantize.elemwise import quantize
-    return quantize(x, scheme)
+    return quantize(x, scheme, scale=scale)
