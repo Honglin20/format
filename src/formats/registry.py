@@ -84,7 +84,11 @@ def _init_default_formats():
         FORMAT_REGISTRY[name] = FPFormat(name=name, ebits=ebits, mbits=mbits,
                                          max_norm_override=max_norm_override)
 
-    # Aliases — overwrite=True because the canonical name already exists
+    # Lookup-table formats
+    from .lookup_formats import NF4Format
+    FORMAT_REGISTRY["nf4"] = NF4Format()
+
+    # Aliases
     _ALIASES["fp4"] = "fp4_e2m1"
 
     # Standard formats
