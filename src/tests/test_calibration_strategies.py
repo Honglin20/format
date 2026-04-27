@@ -126,12 +126,12 @@ def test_mse_strategy_output_shape():
 # ---------------------------------------------------------------------------
 
 def test_kl_strategy_output_shape():
-    """Correct output shape for KLScaleStrategy."""
+    """Per-slice KL returns n_slices along axis, 1 elsewhere."""
     torch.manual_seed(42)
     x = torch.randn(3, 5, 7)
     strategy = KLScaleStrategy(n_bins=128, n_steps=10)
     result = strategy.compute(x, axis=0)
-    assert result.shape == (1, 5, 7)
+    assert result.shape == (3, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -150,15 +150,138 @@ def test_strategy_with_specific_axis():
     """axis=0 vs axis=-1 produce correct shapes for every strategy."""
     torch.manual_seed(42)
     x = torch.randn(4, 8, 16)
-    strategies = [
+    # Non-KL strategies: per-position scale (axis dim=1)
+    for strategy in [
         MaxScaleStrategy(),
         PercentileScaleStrategy(q=50.0),
         MSEScaleStrategy(n_steps=5),
-        KLScaleStrategy(n_bins=32, n_steps=5),
-    ]
-    for strategy in strategies:
+    ]:
         name = type(strategy).__name__
         r0 = strategy.compute(x, axis=0)
         r1 = strategy.compute(x, axis=-1)
         assert r0.shape == (1, 8, 16), f"{name} axis=0: got {r0.shape}"
         assert r1.shape == (4, 8, 1), f"{name} axis=-1: got {r1.shape}"
+
+    # KL strategy: per-slice scale (n_slices along axis, 1 elsewhere)
+    kl = KLScaleStrategy(n_bins=32, n_steps=5)
+    r0 = kl.compute(x, axis=0)
+    r1 = kl.compute(x, axis=-1)
+    assert r0.shape == (4, 1, 1), f"KL axis=0: got {r0.shape}"
+    assert r1.shape == (1, 1, 16), f"KL axis=-1: got {r1.shape}"
+
+
+# ---------------------------------------------------------------------------
+# 6. Constructor validation (negative tests)
+# ---------------------------------------------------------------------------
+
+def test_percentile_q_out_of_range_raises():
+    """PercentileScaleStrategy rejects q outside [0, 100]."""
+    with pytest.raises(ValueError, match="q must be in"):
+        PercentileScaleStrategy(q=-1.0)
+    with pytest.raises(ValueError, match="q must be in"):
+        PercentileScaleStrategy(q=100.1)
+
+
+def test_mse_n_steps_too_small_raises():
+    """MSEScaleStrategy rejects n_steps < 2."""
+    with pytest.raises(ValueError, match="n_steps must be >= 2"):
+        MSEScaleStrategy(n_steps=1)
+
+
+def test_kl_n_bins_too_small_raises():
+    """KLScaleStrategy rejects n_bins < 2."""
+    with pytest.raises(ValueError, match="n_bins must be >= 2"):
+        KLScaleStrategy(n_bins=1)
+
+
+def test_kl_n_steps_too_small_raises():
+    """KLScaleStrategy rejects n_steps < 2."""
+    with pytest.raises(ValueError, match="n_steps must be >= 2"):
+        KLScaleStrategy(n_bins=128, n_steps=1)
+
+
+# ---------------------------------------------------------------------------
+# 7. __eq__ / __hash__ (value-based equality)
+# ---------------------------------------------------------------------------
+
+def test_max_strategy_eq_hash():
+    """All MaxScaleStrategy instances are equal and hash the same."""
+    a = MaxScaleStrategy()
+    b = MaxScaleStrategy()
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a != PercentileScaleStrategy(q=100.0)
+
+
+def test_percentile_strategy_eq_hash():
+    """PercentileScaleStrategy equality depends on q."""
+    a = PercentileScaleStrategy(q=50.0)
+    b = PercentileScaleStrategy(q=50.0)
+    c = PercentileScaleStrategy(q=99.0)
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a != c
+    assert a != MaxScaleStrategy()
+
+
+def test_mse_strategy_eq_hash():
+    """MSEScaleStrategy equality depends on n_steps."""
+    a = MSEScaleStrategy(n_steps=20)
+    b = MSEScaleStrategy(n_steps=20)
+    c = MSEScaleStrategy(n_steps=10)
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a != c
+
+
+def test_kl_strategy_eq_hash():
+    """KLScaleStrategy equality depends on n_bins and n_steps."""
+    a = KLScaleStrategy(n_bins=256, n_steps=20)
+    b = KLScaleStrategy(n_bins=256, n_steps=20)
+    c = KLScaleStrategy(n_bins=128, n_steps=20)
+    d = KLScaleStrategy(n_bins=256, n_steps=10)
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a != c
+    assert a != d
+
+
+def test_strategy_hashable_in_set():
+    """Strategies can be placed in a set (hash must work)."""
+    s = {MaxScaleStrategy(), PercentileScaleStrategy(q=50.0), MSEScaleStrategy()}
+    assert len(s) == 3
+    # Duplicates are deduplicated
+    s.add(MaxScaleStrategy())
+    assert len(s) == 3
+
+
+# ---------------------------------------------------------------------------
+# 8. KLScaleStrategy — quality (KL should be lower than bad scale)
+# ---------------------------------------------------------------------------
+
+def test_kl_strategy_reduces_divergence():
+    """KLScaleStrategy produces lower KL than a deliberately bad scale."""
+    torch.manual_seed(42)
+    x = torch.randn(4, 32) * 3
+
+    strategy = KLScaleStrategy(n_bins=64, n_steps=20)
+    scale = strategy.compute(x, axis=1)
+
+    # Compute KL for the optimal and a bad scale
+    x_abs = torch.abs(x)
+    max_vals = torch.amax(x_abs, dim=1, keepdim=True).clamp(min=1e-12)
+
+    from src.calibration.strategies import _compute_kl_divergence
+
+    def kl_for_scale(s):
+        x_q_abs = torch.abs(_simple_int8_quantize(x, s))
+        kl = _compute_kl_divergence(x_abs, x_q_abs, axis=1, n_bins=64)
+        return kl.sum().item()
+
+    kl_optimal = kl_for_scale(scale)
+    bad_scale = max_vals * 0.1
+    kl_bad = kl_for_scale(bad_scale)
+
+    assert kl_optimal < kl_bad, (
+        f"KL optimal={kl_optimal:.6f} should be < KL bad={kl_bad:.6f}"
+    )

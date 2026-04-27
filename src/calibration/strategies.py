@@ -34,8 +34,12 @@ def _simple_quantize(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
 class ScaleStrategy(ABC):
     """Abstract base for scale computation strategies.
 
-    Subclasses must implement ``compute(x, axis)``.
+    Subclasses must implement ``compute(x, axis)``, ``__eq__``, and ``__hash__``.
     Strategies are stateless — ``compute`` is a pure function of the input.
+
+    ``__eq__`` and ``__hash__`` are required because strategy instances may
+    be stored as fields of frozen dataclasses (e.g. calibration config),
+    where value-based equality is required to prevent id-based hash bugs.
     """
 
     @abstractmethod
@@ -54,6 +58,16 @@ class ScaleStrategy(ABC):
         """
         ...
 
+    @abstractmethod
+    def __eq__(self, other) -> bool:
+        """Value-based equality (required for frozen-dataclass field use)."""
+        ...
+
+    @abstractmethod
+    def __hash__(self) -> int:
+        """Hash based on strategy parameters (required for frozen-dataclass field use)."""
+        ...
+
 
 class MaxScaleStrategy(ScaleStrategy):
     """Absmax scale — current default behavior.
@@ -65,6 +79,12 @@ class MaxScaleStrategy(ScaleStrategy):
     def compute(self, x: torch.Tensor, axis: int) -> torch.Tensor:
         amax = torch.amax(torch.abs(x), dim=axis, keepdim=True)
         return amax.clamp(min=1e-12)
+
+    def __eq__(self, other):
+        return isinstance(other, MaxScaleStrategy)
+
+    def __hash__(self):
+        return hash("MaxScaleStrategy")
 
 
 class PercentileScaleStrategy(ScaleStrategy):
@@ -87,6 +107,14 @@ class PercentileScaleStrategy(ScaleStrategy):
         # torch.quantile expects q in [0, 1]
         p = torch.quantile(torch.abs(x), self.q / 100.0, dim=axis, keepdim=True)
         return p.clamp(min=1e-12)
+
+    def __eq__(self, other):
+        if not isinstance(other, PercentileScaleStrategy):
+            return NotImplemented
+        return self.q == other.q
+
+    def __hash__(self):
+        return hash(("PercentileScaleStrategy", self.q))
 
 
 class MSEScaleStrategy(ScaleStrategy):
@@ -126,6 +154,14 @@ class MSEScaleStrategy(ScaleStrategy):
 
         return best_scale
 
+    def __eq__(self, other):
+        if not isinstance(other, MSEScaleStrategy):
+            return NotImplemented
+        return self.n_steps == other.n_steps
+
+    def __hash__(self):
+        return hash(("MSEScaleStrategy", self.n_steps))
+
 
 class KLScaleStrategy(ScaleStrategy):
     """Grid-search for the scale that minimizes KL divergence.
@@ -148,12 +184,25 @@ class KLScaleStrategy(ScaleStrategy):
         self.n_steps = n_steps
 
     def compute(self, x: torch.Tensor, axis: int) -> torch.Tensor:
-        amax = torch.amax(torch.abs(x), dim=axis, keepdim=True).clamp(min=1e-12)
+        # Per-slice KL uses one scale per slice (not per-position).
+        # Reshape so the axis is first, flatten the rest, and compute
+        # per-slice amax over all values in each slice.
+        n_dims = x.dim()
+        axis_pos = axis if axis >= 0 else n_dims + axis
+        n_slices = x.shape[axis_pos]
+
+        perm = [axis_pos] + [i for i in range(n_dims) if i != axis_pos]
+        x_perm = x.permute(*perm).reshape(n_slices, -1)
+        amax_per_slice = torch.amax(torch.abs(x_perm), dim=1).clamp(min=1e-12)
+
+        # Reshape to broadcastable shape: axis dim = n_slices, others = 1
+        broadcast_shape = [1] * n_dims
+        broadcast_shape[axis_pos] = n_slices
+        amax = amax_per_slice.reshape(broadcast_shape)
 
         best_scale = amax.clone()
         best_kl = torch.full_like(amax, float("inf"))
 
-        # Pre-compute histograms of |x| per slice
         x_abs = torch.abs(x)
 
         candidates = torch.linspace(0.5, 2.0, self.n_steps, device=x.device)
@@ -163,15 +212,20 @@ class KLScaleStrategy(ScaleStrategy):
             x_q = _simple_quantize(x, scale)
             x_q_abs = torch.abs(x_q)
 
-            # Compute KL divergence per slice
-            # Strategy: bin both |x| and |x_q| into the same bins, then
-            # compute KL(orig || quantized)
             kl_per_slice = _compute_kl_divergence(x_abs, x_q_abs, axis, self.n_bins)
             mask = kl_per_slice < best_kl
             best_kl = torch.where(mask, kl_per_slice, best_kl)
             best_scale = torch.where(mask, scale, best_scale)
 
         return best_scale
+
+    def __eq__(self, other):
+        if not isinstance(other, KLScaleStrategy):
+            return NotImplemented
+        return self.n_bins == other.n_bins and self.n_steps == other.n_steps
+
+    def __hash__(self):
+        return hash(("KLScaleStrategy", self.n_bins, self.n_steps))
 
 
 def _compute_kl_divergence(
@@ -182,45 +236,41 @@ def _compute_kl_divergence(
 ) -> torch.Tensor:
     """Compute KL(P || Q) per slice along ``axis``.
 
-    Both ``p_vals`` and ``q_vals`` are positive-valued tensors
-    (absolute values). The function bins each slice into ``n_bins``
-    equal-width bins in [0, 1] (after normalizing by per-slice max)
-    and returns KL divergence per slice as a tensor with size 1
-    along ``axis``.
-    """
-    # Normalize both by per-slice max of p so bins are consistent per slice
-    max_vals = torch.amax(p_vals, dim=axis, keepdim=True).clamp(min=1e-12)
-    p_norm = p_vals / max_vals  # [0, 1] per slice
-    q_norm = q_vals / max_vals  # [0, 1] per slice, using p's max for fair comparison
+    Each slice along ``axis`` gets its own histogram (pooling all positions
+    within that slice), and KL divergence is computed per slice.  This
+    matches the standard TensorRT calibration approach: one histogram per
+    channel, not one histogram per spatial position.
 
+    Returns:
+        KL tensor with same number of dimensions as input, with size
+        ``n_slices`` along ``axis`` and 1 elsewhere.
+    """
     n_dims = p_vals.dim()
     axis_pos = axis if axis >= 0 else n_dims + axis
+    n_slices = p_vals.shape[axis_pos]
 
-    # Permute so the quantized axis is last, then flatten the rest
-    perm = list(range(n_dims))
-    perm.remove(axis_pos)
-    perm.append(axis_pos)
+    # Permute so axis is first, flatten remaining dims → (n_slices, -1)
+    perm = [axis_pos] + [i for i in range(n_dims) if i != axis_pos]
+    p_perm = p_vals.permute(*perm)
+    q_perm = q_vals.permute(*perm)
 
-    p_flat = p_norm.permute(*perm).reshape(-1, p_norm.shape[axis_pos])
-    q_flat = q_norm.permute(*perm).reshape(-1, q_norm.shape[axis_pos])
+    # Per-slice max for normalization (max over all values in each slice)
+    p_max = torch.amax(p_perm.reshape(n_slices, -1), dim=1, keepdim=True).clamp(min=1e-12)
 
-    n_slices = max_vals.numel()
+    p_flat = p_perm.reshape(n_slices, -1) / p_max  # (n_slices, M), M = product of other dims
+    q_flat = q_perm.reshape(n_slices, -1) / p_max
+
     kl_list = []
-
     for i in range(n_slices):
-        # Histogram of p (original) for this slice
         hist_p = torch.histc(p_flat[i], bins=n_bins, min=0.0, max=1.0) + 1e-12
         hist_p = hist_p / hist_p.sum()
-
-        # Histogram of q (quantized) for this slice
         hist_q = torch.histc(q_flat[i], bins=n_bins, min=0.0, max=1.0) + 1e-12
         hist_q = hist_q / hist_q.sum()
-
-        # KL(P || Q)
         kl = (hist_p * (hist_p / hist_q).log()).sum()
         kl_list.append(kl)
 
-    # Reshape back to match max_vals (amax) shape
+    # Reshape to (n_slices, 1, ..., 1) with axis dim = n_slices
+    out_shape = [1] * n_dims
+    out_shape[axis_pos] = n_slices
     kl_tensor = torch.tensor(kl_list, device=p_vals.device, dtype=p_vals.dtype)
-    kl_tensor = kl_tensor.reshape(max_vals.shape)
-    return kl_tensor
+    return kl_tensor.reshape(out_shape)
