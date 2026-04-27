@@ -56,7 +56,7 @@ def _cfg_fw(scheme_or_fmt, granularity=None):
         s = _scheme(scheme_or_fmt, granularity)
     else:
         s = _scheme(scheme_or_fmt, GranularitySpec.per_tensor())
-    return OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+    return OpQuantConfig(input=s, weight=s, output=s)
 
 
 def _cfg_io(scheme_or_fmt, granularity=None):
@@ -67,7 +67,7 @@ def _cfg_io(scheme_or_fmt, granularity=None):
         s = _scheme(scheme_or_fmt, granularity)
     else:
         s = _scheme(scheme_or_fmt, GranularitySpec.per_tensor())
-    return OpQuantConfig(input=(s,), output=(s,))
+    return OpQuantConfig(input=s, output=s)
 
 
 def _mx_scheme_from_specs(mx_config):
@@ -281,7 +281,7 @@ class TestMxEquivalence:
     - For linear/matmul: OpQuantConfig supports full pipeline (multiple schemes
       per role). Use op_config_from_mx_specs to construct matching cfg, then
       compare QuantizeContext(nn.Linear) vs mx.linear.
-    - For SIMD ops: QuantizeContext uses cfg.input[0] as inner_scheme.
+    - For SIMD ops: QuantizeContext uses cfg.input as inner_scheme.
       Prove identity with direct src/ops simd_* calls. Those have been proven
       equivalent to mx.simd_* in test_ops_equiv_elemwise.py (chain of trust).
     """
@@ -392,7 +392,7 @@ class TestMxEquivalence:
             "bfloat": 16, "a_elem_format": "int8",
             "w_elem_format": "int8", "block_size": 32,
         })
-        cfg = OpQuantConfig(input=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, output=s)
 
         a, b = torch.randn(4, 32), torch.randn(4, 32) * 0.5
         direct = simd_add(a.clone(), b.clone(), inner_scheme=s, quantize_backprop=True)
@@ -410,7 +410,7 @@ class TestMxEquivalence:
             "bfloat": 16, "a_elem_format": "int8",
             "w_elem_format": "int8", "block_size": 32,
         })
-        cfg = OpQuantConfig(input=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, output=s)
 
         a = torch.randn(4, 32)
         b = torch.randn(4, 32).abs() + 0.5
@@ -429,7 +429,7 @@ class TestMxEquivalence:
             "bfloat": 16, "a_elem_format": "int8",
             "w_elem_format": "int8", "block_size": 32,
         })
-        cfg = OpQuantConfig(input=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, output=s)
 
         x = torch.randn(4, 32)
         direct = simd_exp(x.clone(), inner_scheme=s, quantize_backprop=True)
@@ -447,7 +447,7 @@ class TestMxEquivalence:
             "bfloat": 16, "a_elem_format": "int8",
             "w_elem_format": "int8", "block_size": 32,
         })
-        cfg = OpQuantConfig(input=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, output=s)
 
         a, b = torch.randn(4, 32), torch.randn(4, 32) * 0.5
 
@@ -508,7 +508,7 @@ class TestOnnxAllFormats:
     def test_int_per_tensor_exports_qdq(self, fmt_name, tmp_path):
         """int{8,4} per_tensor -> QDQ. int2 excluded: known JIT tracer issue."""
         s = _scheme(fmt_name, GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
         x = torch.randn(2, 16)
 
@@ -522,7 +522,7 @@ class TestOnnxAllFormats:
     @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "fp8_e5m2"])
     def test_fp8_per_tensor_exports_qdq(self, fmt_name, tmp_path):
         s = _scheme(fmt_name, GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
         x = torch.randn(2, 16)
 
@@ -534,7 +534,7 @@ class TestOnnxAllFormats:
 
     def test_int8_per_channel_exports_qdq(self, tmp_path):
         s = _scheme("int8", GranularitySpec.per_channel(axis=0))
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
         x = torch.randn(2, 16)
 
@@ -551,7 +551,7 @@ class TestOnnxAllFormats:
         """PER_BLOCK -> com.microxscaling::MxQuantize. FP formats only
         (int8/int4 per_block have tracer issues with mx_quantize)."""
         s = _scheme(fmt_name, GranularitySpec.per_block(32))
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
         x = torch.randn(2, 16)
 
@@ -569,7 +569,7 @@ class TestOnnxAllFormats:
     def test_nonstandard_per_tensor_exports_custom_op(self, fmt_name, tmp_path):
         """fp6/fp4/bf16/fp16 -> MxQuantize (not in _STANDARD_NAMES)."""
         s = _scheme(fmt_name, GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
         x = torch.randn(2, 16)
 
@@ -584,7 +584,7 @@ class TestOnnxAllFormats:
     ])
     def test_nonstandard_per_channel_exports_custom_op(self, fmt_name, tmp_path):
         s = _scheme(fmt_name, GranularitySpec.per_channel(axis=0))
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
         x = torch.randn(2, 16)
 
@@ -601,7 +601,7 @@ class TestOnnxAllFormats:
         s_int8 = _scheme("int8", GranularitySpec.per_tensor())
         s_fp4 = _scheme("fp4_e2m1", GranularitySpec.per_block(32))
 
-        default_cfg = OpQuantConfig(input=(s_int8,), weight=(s_int8,), output=(s_int8,))
+        default_cfg = OpQuantConfig(input=s_int8, weight=s_int8, output=s_int8)
 
         net = LinearModel()
         x = torch.randn(2, 16)
@@ -638,7 +638,7 @@ class TestOnnxAllFormats:
 
         for fn in all_names:
             s = _scheme(fn, GranularitySpec.per_tensor())
-            cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+            cfg = OpQuantConfig(input=s, weight=s, output=s)
             with QuantizeContext(net, cfg) as ctx:
                 m = self._export_and_check(ctx, x, tmp_path, f"smoke_{fn}")
             assert m is not None, f"export failed for {fn}"
@@ -688,7 +688,7 @@ class TestAllOpsNetworkEndToEnd:
         import onnx
         net = AllOpsNetwork()
         s = _scheme("int8", GranularitySpec.per_block(32))
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         x = torch.randn(2, 16)
         path = str(tmp_path / "allops_mxint8.onnx")
 
@@ -735,7 +735,7 @@ class TestAllOpsNetworkEndToEnd:
         simd_fn = getattr(simd_mod, direct_fn_name)
 
         s = _scheme("int8", GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, output=s)
 
         a = torch.randn(*a_shape)
         b = torch.randn(*b_shape).abs() + 1.0
@@ -758,7 +758,7 @@ class TestAllOpsNetworkEndToEnd:
         simd_fn = getattr(simd_mod, direct_fn_name)
 
         s = _scheme("int8", GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, output=s)
 
         x = torch.randn(4, 8)
         if op_key == "log":
@@ -807,7 +807,7 @@ class TestQuantizeModelUnified:
         """quantize_model(model, cfg) → model(x) quantizes both paths."""
         from src.mapping.quantize_model import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
 
         # Plain output (no quantization)
@@ -826,7 +826,7 @@ class TestQuantizeModelUnified:
         """quantize_model model can run forward + backward without error."""
         from src.mapping.quantize_model import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
         quantize_model(model, cfg)
 
@@ -844,7 +844,7 @@ class TestQuantizeModelUnified:
         import onnx
         from src.mapping.quantize_model import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
         quantize_model(model, cfg)
 
@@ -862,7 +862,7 @@ class TestQuantizeModelUnified:
         from src.mapping.quantize_model import quantize_model
         from src.ops.linear import QuantizedLinear
         s = _scheme("int8", GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
 
         # Path A: quantize_model (unified)
         model_a = ModelWithInlineOps()

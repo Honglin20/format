@@ -91,8 +91,8 @@ def test_quantize_scale_kwarg_per_block_accepted():
 def make_simple_quantized_model():
     """Create a 2-layer quantized linear model for testing."""
     cfg = OpQuantConfig(
-        input=(QuantScheme.per_tensor("int8"),),
-        output=(QuantScheme.per_channel("int8", axis=-1),),
+        input=QuantScheme.per_tensor("int8"),
+        output=QuantScheme.per_channel("int8", axis=-1),
     )
     return nn.Sequential(
         QuantizedLinear(8, 16, bias=False, cfg=cfg, name="layer0"),
@@ -176,8 +176,8 @@ def test_linear_with_stored_output_scale():
     """QuantizedLinear passes _output_scale to output quantization."""
     torch.manual_seed(42)
     cfg = OpQuantConfig(
-        input=(QuantScheme.per_tensor("int8"),),
-        output=(QuantScheme.per_channel("int8", axis=-1),),
+        input=QuantScheme.per_tensor("int8"),
+        output=QuantScheme.per_channel("int8", axis=-1),
     )
     model = QuantizedLinear(8, 16, bias=False, cfg=cfg)
 
@@ -201,8 +201,8 @@ def test_linear_without_stored_scale_works_normally():
     """QuantizedLinear without _output_scale works (backward compatible)."""
     torch.manual_seed(42)
     cfg = OpQuantConfig(
-        input=(QuantScheme.per_tensor("int8"),),
-        output=(QuantScheme.per_channel("int8", axis=-1),),
+        input=QuantScheme.per_tensor("int8"),
+        output=QuantScheme.per_channel("int8", axis=-1),
     )
     model = QuantizedLinear(8, 4, bias=False, cfg=cfg)
     x = torch.randn(4, 8)
@@ -281,8 +281,8 @@ def test_e2e_linear_backward_with_stored_scale():
     """Backward pass works when QuantizedLinear has stored _output_scale."""
     torch.manual_seed(42)
     cfg = OpQuantConfig(
-        input=(QuantScheme.per_tensor("int8"),),
-        output=(QuantScheme.per_channel("int8", axis=-1),),
+        input=QuantScheme.per_tensor("int8"),
+        output=QuantScheme.per_channel("int8", axis=-1),
     )
     model = QuantizedLinear(4, 8, bias=True, cfg=cfg)
     model.register_buffer("_output_scale", torch.ones(1, 8))

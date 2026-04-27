@@ -182,7 +182,7 @@ class TestQuantizeModelAPI:
         """cfg dict maps name patterns to different OpQuantConfig."""
         model = LinearOnly()
         s = QuantScheme(format="bfloat16")
-        cfg_input = OpQuantConfig(input=(s,))
+        cfg_input = OpQuantConfig(input=s)
         quantize_model(model, cfg={"*": cfg_input})
         assert model.fc1.cfg == cfg_input
         assert model.fc2.cfg == cfg_input
@@ -192,7 +192,7 @@ class TestQuantizeModelAPI:
         from src.ops.linear import QuantizedLinear
         model = LinearOnly()
         s = QuantScheme(format="bfloat16")
-        cfg = OpQuantConfig(input=(s,))
+        cfg = OpQuantConfig(input=s)
         quantize_model(model, cfg=cfg)
         orig_fc1 = model.fc1
         # Second pass should not re-wrap
@@ -214,14 +214,14 @@ class TestQuantizeModelAPI:
     def test_forward_patched_flag_set(self):
         """quantize_model sets _quantize_forward_patched on the model."""
         model = LinearOnly()
-        quantize_model(model, cfg=OpQuantConfig(input=(QuantScheme(format="bfloat16"),)))
+        quantize_model(model, cfg=OpQuantConfig(input=QuantScheme(format="bfloat16")))
         assert getattr(model, '_quantize_forward_patched', False)
 
     def test_forward_still_runs(self):
         """quantize_model(model) produces output of expected shape."""
         model = LinearOnly()
         s = QuantScheme(format="bfloat16")
-        cfg = OpQuantConfig(input=(s,))
+        cfg = OpQuantConfig(input=s)
         quantize_model(model, cfg=cfg)
         x = torch.randn(2, 8)
         out = model(x)
@@ -231,7 +231,7 @@ class TestQuantizeModelAPI:
         """After quantize_model, model.export_onnx is callable."""
         model = LinearOnly()
         s = QuantScheme(format="bfloat16")
-        cfg = OpQuantConfig(input=(s,))
+        cfg = OpQuantConfig(input=s)
         quantize_model(model, cfg=cfg)
         assert callable(model.export_onnx)
 
@@ -240,7 +240,7 @@ class TestQuantizeModelAPI:
         import onnx
         model = LinearOnly()
         s = QuantScheme(format="bfloat16")
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         quantize_model(model, cfg=cfg)
         path = str(tmp_path / "e2e_export.onnx")
         model.export_onnx(torch.randn(2, 8), path)
@@ -251,7 +251,7 @@ class TestQuantizeModelAPI:
         """Second quantize_model call does not re-patch forward."""
         model = LinearOnly()
         s = QuantScheme(format="bfloat16")
-        cfg = OpQuantConfig(input=(s,))
+        cfg = OpQuantConfig(input=s)
         quantize_model(model, cfg=cfg)
         first_forward = model.forward
         quantize_model(model, cfg=cfg)
@@ -262,7 +262,7 @@ class TestQuantizeModelAPI:
         model = LinearOnly()
         pre_keys = set(model.state_dict().keys())
         s = QuantScheme(format="bfloat16")
-        cfg = OpQuantConfig(input=(s,))
+        cfg = OpQuantConfig(input=s)
         quantize_model(model, cfg=cfg)
         post_keys = set(model.state_dict().keys())
         assert pre_keys == post_keys
@@ -271,7 +271,7 @@ class TestQuantizeModelAPI:
         """torch.matmul outside model(x) is NOT patched (no context)."""
         model = LinearOnly()
         s = QuantScheme(format="bfloat16")
-        cfg = OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
         quantize_model(model, cfg=cfg)
         # Call model.forward to confirm it works (context enters + exits).
         model(torch.randn(2, 8))

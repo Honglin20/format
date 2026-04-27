@@ -29,7 +29,7 @@ def _make_config(fmt_name="fp8_e4m3", mode="per_tensor", block_size=None):
         raise ValueError(f"Unknown mode: {mode}")
 
     scheme = QuantScheme(format=fmt, granularity=gran, transform=IdentityTransform())
-    return OpQuantConfig(input=(scheme,), weight=(scheme,))
+    return OpQuantConfig(input=scheme, weight=scheme)
 
 
 def _build_two_layer_linear(cfg_name, config):

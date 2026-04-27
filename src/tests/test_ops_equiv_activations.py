@@ -60,7 +60,7 @@ class TestSigmoid:
 
         mx_out = mx.sigmoid(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SigmoidFunction.apply(src_x, inner, qbp)
 
@@ -75,7 +75,7 @@ class TestSigmoid:
 
         mx_out = mx.sigmoid(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SigmoidFunction.apply(src_x, inner, qbp)
 
@@ -98,7 +98,7 @@ class TestTanh:
 
         mx_out = mx.tanh(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = TanhFunction.apply(src_x, inner, qbp)
 
@@ -113,7 +113,7 @@ class TestTanh:
 
         mx_out = mx.tanh(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = TanhFunction.apply(src_x, inner, qbp)
 
@@ -136,7 +136,7 @@ class TestReLU:
 
         mx_out = mx.relu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = ReLUFunction.apply(src_x, False, inner, qbp)
 
@@ -151,7 +151,7 @@ class TestReLU:
 
         mx_out = mx.relu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = ReLUFunction.apply(src_x, False, inner, qbp)
 
@@ -174,7 +174,7 @@ class TestReLU6:
 
         mx_out = mx.relu6(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = ReLU6Function.apply(src_x, False, inner, qbp)
 
@@ -189,7 +189,7 @@ class TestReLU6:
 
         mx_out = mx.relu6(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = ReLU6Function.apply(src_x, False, inner, qbp)
 
@@ -212,7 +212,7 @@ class TestLeakyReLU:
 
         mx_out = mx.leaky_relu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = LeakyReLUFunction.apply(src_x, 0.01, False, inner, qbp)
 
@@ -227,7 +227,7 @@ class TestLeakyReLU:
 
         mx_out = mx.leaky_relu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = LeakyReLUFunction.apply(src_x, 0.01, False, inner, qbp)
 
@@ -250,7 +250,7 @@ class TestSiLU:
 
         mx_out = mx.silu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SiLUFunction.apply(src_x, False, inner, qbp)
 
@@ -265,7 +265,7 @@ class TestSiLU:
 
         mx_out = mx.silu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SiLUFunction.apply(src_x, False, inner, qbp)
 
@@ -288,7 +288,7 @@ class TestGELU:
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, False, qbp)
 
@@ -303,7 +303,7 @@ class TestGELU:
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, False, qbp)
 
@@ -320,7 +320,7 @@ class TestGELU:
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs, first_order_gelu=True)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, True, qbp)
 
@@ -335,7 +335,7 @@ class TestGELU:
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs, first_order_gelu=True)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, True, qbp)
 
@@ -360,7 +360,7 @@ class TestActivationSTE:
 
         mx_out = mx.sigmoid(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = SigmoidFunction.apply(src_x, inner, qbp)
 
@@ -378,7 +378,7 @@ class TestActivationSTE:
 
         mx_out = mx.relu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = ReLUFunction.apply(src_x, False, inner, qbp)
 
@@ -396,7 +396,7 @@ class TestActivationSTE:
 
         mx_out = mx.gelu(mx_x, mx_specs=mx_specs)
         cfg = activation_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = GELUFunction.apply(src_x, inner, False, qbp)
 

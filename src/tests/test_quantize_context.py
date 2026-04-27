@@ -23,7 +23,7 @@ def _int8_scheme():
 def _make_cfg(**roles):
     """Build OpQuantConfig; default all forward roles to int8 if not given."""
     s = _int8_scheme()
-    defaults = dict(input=(s,), weight=(s,), output=(s,))
+    defaults = dict(input=s, weight=s, output=s)
     defaults.update(roles)
     return OpQuantConfig(**defaults)
 

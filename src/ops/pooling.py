@@ -11,6 +11,7 @@ from src.scheme.quant_scheme import QuantScheme
 from src.scheme.op_config import OpQuantConfig
 from src.analysis.mixin import ObservableMixin
 from src.ops.vec_ops import vec_add, vec_reduce_mean
+from src.quantize import quantize
 
 _f_adaptive_avg_pool2d = F.adaptive_avg_pool2d
 
@@ -117,21 +118,25 @@ class QuantizedAdaptiveAvgPool2d(ObservableMixin, nn.Module):
         if cfg is not None and inner_scheme is not None:
             raise ValueError("Cannot specify both cfg and inner_scheme")
         if inner_scheme is not None and cfg is None:
-            fwd_pipeline = (inner_scheme,)
-            bw_pipeline = (inner_scheme,) if quantize_backprop else ()
-            cfg = OpQuantConfig(input=fwd_pipeline, grad_input=bw_pipeline)
+            bw = inner_scheme if quantize_backprop else None
+            cfg = OpQuantConfig(input=inner_scheme, grad_input=bw)
         if cfg is None:
             cfg = OpQuantConfig()
         self.cfg = cfg
         self._analysis_name = name
 
     def forward(self, input):
-        inner_scheme = self.cfg.input[0] if self.cfg.input else None
-        quantize_backprop = bool(self.cfg.grad_input)
+        inner_scheme = self.cfg.input
+        quantize_backprop = self.cfg.grad_input is not None
         if inner_scheme is None:
             return _f_adaptive_avg_pool2d(input, self.output_size)
         emit_fn = self._emit if self._observers else None
-        return AdaptiveAvgPool2dFunction.apply(
+        if self.cfg.storage is not None:
+            input = quantize(input, self.cfg.storage)
+        result = AdaptiveAvgPool2dFunction.apply(
             input, self.output_size, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
         )
+        if self.cfg.storage is not None:
+            result = quantize(result, self.cfg.storage)
+        return result

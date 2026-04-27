@@ -1,12 +1,12 @@
 """
 Quantized Norm operators: BatchNorm, LayerNorm, GroupNorm, RMSNorm.
 
-OpQuantConfig-driven, bit-exact equivalent to mx/{batchnorm,layernorm,groupnorm}.py.
+OpQuantConfig-driven (two-level model), bit-exact equivalent to mx/{batchnorm,layernorm,groupnorm}.py.
 
 Norm operators differ from matmul-family operators in that every intermediate
 arithmetic step is quantized (via vec_ops). The OpQuantConfig provides
-entry/exit quantization (input, weight, bias, output, grad_*), while an
-additional `inner_scheme` parameter provides the QuantScheme used for all
+entry/exit quantization (storage + input/weight/bias/output/grad_*), while
+the `inner_scheme` parameter provides the QuantScheme used for all
 intermediate vec_op computations.
 """
 import torch
@@ -203,27 +203,29 @@ class BatchNormFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         ctx.name = name
 
-        # Entry quantization on input, weight, bias
-        in_idx = 0
-        for s in cfg.input:
-            fp_x = x
-            x = quantize(x, s)
-            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_x, x, s)
-            in_idx += 1
+        # Entry quantization: storage → compute
+        if cfg.storage is not None:
+            fp_x = x; x = quantize(x, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_x, x, cfg.storage)
+        if cfg.input is not None:
+            fp_x = x; x = quantize(x, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_x, x, cfg.input)
+
         q_weight = weight
-        wt_idx = 0
-        for s in cfg.weight:
-            fp_w = q_weight
-            q_weight = quantize(q_weight, s)
-            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_w, q_weight, s)
-            wt_idx += 1
+        if cfg.storage is not None:
+            fp_w = q_weight; q_weight = quantize(q_weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_w, q_weight, cfg.storage)
+        if cfg.weight is not None:
+            fp_w = q_weight; q_weight = quantize(q_weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, q_weight, cfg.weight)
+
         q_bias = bias
-        b_idx = 0
-        for s in cfg.bias:
-            fp_b = q_bias
-            q_bias = quantize(q_bias, s)
-            if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
-            b_idx += 1
+        if cfg.storage is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if cfg.bias is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
         H = x.shape[1]
         sum_axes = [0] + list(range(2, x.ndim))
@@ -247,7 +249,7 @@ class BatchNormFunction(torch.autograd.Function):
             t3 = vec_add(t1, t2, inner_scheme)
             running_var.copy_(t3)
 
-        # Save for backward — always save intermediates; choose quantized or raw weight
+        # Save for backward
         if cfg.is_training:
             ctx.save_for_backward(x_shift, x_norm, x_std_inv, q_weight)
         else:
@@ -258,12 +260,12 @@ class BatchNormFunction(torch.autograd.Function):
         ctx.sum_axes = sum_axes
 
         # Output quantization
-        out_idx = 0
-        for s in cfg.output:
-            fp_o = output
-            output = quantize(output, s)
-            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_o, output, s)
-            out_idx += 1
+        if cfg.storage is not None:
+            fp_o = output; output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_o, output, cfg.storage)
+        if cfg.output is not None:
+            fp_o = output; output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_o, output, cfg.output)
 
         return output
 
@@ -275,12 +277,12 @@ class BatchNormFunction(torch.autograd.Function):
         emit_fn = ctx.emit_fn
 
         # Entry quantization on grad_output
-        go_idx = 0
-        for s in cfg.grad_output:
-            fp_go = grad_output
-            grad_output = quantize(grad_output, s)
-            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_output, s)
-            go_idx += 1
+        if cfg.storage is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.storage)
+            if emit_fn: emit_fn("grad_output", 0, "grad_output_pre_quant", fp_go, grad_output, cfg.storage)
+        if cfg.grad_output is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.grad_output)
+            if emit_fn: emit_fn("grad_output", 1, "grad_output_pre_quant", fp_go, grad_output, cfg.grad_output)
 
         sum_axes = ctx.sum_axes
 
@@ -298,24 +300,26 @@ class BatchNormFunction(torch.autograd.Function):
         )
 
         # Exit quantization
-        gb_idx = 0
-        for s in cfg.grad_bias:
-            fp_gb = grad_bias
-            grad_bias = quantize(grad_bias, s)
-            if emit_fn: emit_fn("grad_bias", gb_idx, "grad_bias_post_quant", fp_gb, grad_bias, s)
-            gb_idx += 1
-        gw_idx = 0
-        for s in cfg.grad_weight:
-            fp_gw = grad_weight
-            grad_weight = quantize(grad_weight, s)
-            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_weight, s)
-            gw_idx += 1
-        gi_idx = 0
-        for s in cfg.grad_input:
-            fp_gi = grad_input
-            grad_input = quantize(grad_input, s)
-            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_input, s)
-            gi_idx += 1
+        if cfg.storage is not None:
+            fp_gb = grad_bias; grad_bias = quantize(grad_bias, cfg.storage)
+            if emit_fn: emit_fn("grad_bias", 0, "grad_bias_post_quant", fp_gb, grad_bias, cfg.storage)
+        if cfg.grad_bias is not None:
+            fp_gb = grad_bias; grad_bias = quantize(grad_bias, cfg.grad_bias)
+            if emit_fn: emit_fn("grad_bias", 1, "grad_bias_post_quant", fp_gb, grad_bias, cfg.grad_bias)
+
+        if cfg.storage is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.storage)
+            if emit_fn: emit_fn("grad_weight", 0, "grad_weight_post_quant", fp_gw, grad_weight, cfg.storage)
+        if cfg.grad_weight is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.grad_weight)
+            if emit_fn: emit_fn("grad_weight", 1, "grad_weight_post_quant", fp_gw, grad_weight, cfg.grad_weight)
+
+        if cfg.storage is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.storage)
+            if emit_fn: emit_fn("grad_input", 0, "grad_input_post_quant", fp_gi, grad_input, cfg.storage)
+        if cfg.grad_input is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.grad_input)
+            if emit_fn: emit_fn("grad_input", 1, "grad_input_post_quant", fp_gi, grad_input, cfg.grad_input)
 
         return (grad_input, None, None, grad_weight, grad_bias,
                 None, None, None, None, None, None, None, None)
@@ -478,27 +482,29 @@ class LayerNormFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         ctx.name = name
 
-        # Entry quantization
-        in_idx = 0
-        for s in cfg.input:
-            fp_x = x
-            x = quantize(x, s)
-            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_x, x, s)
-            in_idx += 1
+        # Entry quantization: storage → compute
+        if cfg.storage is not None:
+            fp_x = x; x = quantize(x, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_x, x, cfg.storage)
+        if cfg.input is not None:
+            fp_x = x; x = quantize(x, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_x, x, cfg.input)
+
         q_weight = weight
-        wt_idx = 0
-        for s in cfg.weight:
-            fp_w = q_weight
-            q_weight = quantize(q_weight, s)
-            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_w, q_weight, s)
-            wt_idx += 1
+        if cfg.storage is not None:
+            fp_w = q_weight; q_weight = quantize(q_weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_w, q_weight, cfg.storage)
+        if cfg.weight is not None:
+            fp_w = q_weight; q_weight = quantize(q_weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, q_weight, cfg.weight)
+
         q_bias = bias
-        b_idx = 0
-        for s in cfg.bias:
-            fp_b = q_bias
-            q_bias = quantize(q_bias, s)
-            if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
-            b_idx += 1
+        if cfg.storage is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if cfg.bias is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
         output, _, x_norm, _, _, x_vare = _norm_forward(
             x, -1, q_weight, q_bias, eps, inner_scheme,
@@ -514,12 +520,12 @@ class LayerNormFunction(torch.autograd.Function):
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
         # Output quantization
-        out_idx = 0
-        for s in cfg.output:
-            fp_o = output
-            output = quantize(output, s)
-            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_o, output, s)
-            out_idx += 1
+        if cfg.storage is not None:
+            fp_o = output; output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_o, output, cfg.storage)
+        if cfg.output is not None:
+            fp_o = output; output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_o, output, cfg.output)
 
         return output
 
@@ -531,19 +537,12 @@ class LayerNormFunction(torch.autograd.Function):
         emit_fn = ctx.emit_fn
 
         # Entry quantization on grad_output
-        go_idx = 0
-        for s in cfg.grad_output:
-            fp_go = grad_output
-            grad_output = quantize(grad_output, s)
-            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_output, s)
-            go_idx += 1
-        x_norm, x_vare, weight = ctx.saved_tensors
-        cfg: OpQuantConfig = ctx.cfg
-        scheme = ctx.inner_scheme_bw
-
-        # Entry quantization on grad_output
-        for s in cfg.grad_output:
-            grad_output = quantize(grad_output, s)
+        if cfg.storage is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.storage)
+            if emit_fn: emit_fn("grad_output", 0, "grad_output_pre_quant", fp_go, grad_output, cfg.storage)
+        if cfg.grad_output is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.grad_output)
+            if emit_fn: emit_fn("grad_output", 1, "grad_output_pre_quant", fp_go, grad_output, cfg.grad_output)
 
         sum_axes = list(range(grad_output.ndim - 1))
 
@@ -560,24 +559,26 @@ class LayerNormFunction(torch.autograd.Function):
         )
 
         # Exit quantization
-        gb_idx = 0
-        for s in cfg.grad_bias:
-            fp_gb = grad_bias
-            grad_bias = quantize(grad_bias, s)
-            if emit_fn: emit_fn("grad_bias", gb_idx, "grad_bias_post_quant", fp_gb, grad_bias, s)
-            gb_idx += 1
-        gw_idx = 0
-        for s in cfg.grad_weight:
-            fp_gw = grad_weight
-            grad_weight = quantize(grad_weight, s)
-            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_weight, s)
-            gw_idx += 1
-        gi_idx = 0
-        for s in cfg.grad_input:
-            fp_gi = grad_input
-            grad_input = quantize(grad_input, s)
-            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_input, s)
-            gi_idx += 1
+        if cfg.storage is not None:
+            fp_gb = grad_bias; grad_bias = quantize(grad_bias, cfg.storage)
+            if emit_fn: emit_fn("grad_bias", 0, "grad_bias_post_quant", fp_gb, grad_bias, cfg.storage)
+        if cfg.grad_bias is not None:
+            fp_gb = grad_bias; grad_bias = quantize(grad_bias, cfg.grad_bias)
+            if emit_fn: emit_fn("grad_bias", 1, "grad_bias_post_quant", fp_gb, grad_bias, cfg.grad_bias)
+
+        if cfg.storage is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.storage)
+            if emit_fn: emit_fn("grad_weight", 0, "grad_weight_post_quant", fp_gw, grad_weight, cfg.storage)
+        if cfg.grad_weight is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.grad_weight)
+            if emit_fn: emit_fn("grad_weight", 1, "grad_weight_post_quant", fp_gw, grad_weight, cfg.grad_weight)
+
+        if cfg.storage is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.storage)
+            if emit_fn: emit_fn("grad_input", 0, "grad_input_post_quant", fp_gi, grad_input, cfg.storage)
+        if cfg.grad_input is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.grad_input)
+            if emit_fn: emit_fn("grad_input", 1, "grad_input_post_quant", fp_gi, grad_input, cfg.grad_input)
 
         return (grad_input, grad_weight, grad_bias, None, None, None, None, None, None)
 
@@ -620,27 +621,29 @@ class GroupNormFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         ctx.name = name
 
-        # Entry quantization
-        in_idx = 0
-        for s in cfg.input:
-            fp_x = x
-            x = quantize(x, s)
-            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_x, x, s)
-            in_idx += 1
+        # Entry quantization: storage → compute
+        if cfg.storage is not None:
+            fp_x = x; x = quantize(x, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_x, x, cfg.storage)
+        if cfg.input is not None:
+            fp_x = x; x = quantize(x, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_x, x, cfg.input)
+
         q_weight = weight
-        wt_idx = 0
-        for s in cfg.weight:
-            fp_w = q_weight
-            q_weight = quantize(q_weight, s)
-            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_w, q_weight, s)
-            wt_idx += 1
+        if cfg.storage is not None:
+            fp_w = q_weight; q_weight = quantize(q_weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_w, q_weight, cfg.storage)
+        if cfg.weight is not None:
+            fp_w = q_weight; q_weight = quantize(q_weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, q_weight, cfg.weight)
+
         q_bias = bias
-        b_idx = 0
-        for s in cfg.bias:
-            fp_b = q_bias
-            q_bias = quantize(q_bias, s)
-            if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
-            b_idx += 1
+        if cfg.storage is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if cfg.bias is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
         sum_axes = list(range(1, x.ndim))
 
@@ -659,12 +662,12 @@ class GroupNormFunction(torch.autograd.Function):
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
         # Output quantization
-        out_idx = 0
-        for s in cfg.output:
-            fp_o = output
-            output = quantize(output, s)
-            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_o, output, s)
-            out_idx += 1
+        if cfg.storage is not None:
+            fp_o = output; output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_o, output, cfg.storage)
+        if cfg.output is not None:
+            fp_o = output; output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_o, output, cfg.output)
 
         return output
 
@@ -676,19 +679,12 @@ class GroupNormFunction(torch.autograd.Function):
         emit_fn = ctx.emit_fn
 
         # Entry quantization on grad_output
-        go_idx = 0
-        for s in cfg.grad_output:
-            fp_go = grad_output
-            grad_output = quantize(grad_output, s)
-            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_output, s)
-            go_idx += 1
-        x_shift, x_norm, x_std_inv, weight = ctx.saved_tensors
-        cfg: OpQuantConfig = ctx.cfg
-        scheme = ctx.inner_scheme_bw
-
-        # Entry quantization on grad_output
-        for s in cfg.grad_output:
-            grad_output = quantize(grad_output, s)
+        if cfg.storage is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.storage)
+            if emit_fn: emit_fn("grad_output", 0, "grad_output_pre_quant", fp_go, grad_output, cfg.storage)
+        if cfg.grad_output is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.grad_output)
+            if emit_fn: emit_fn("grad_output", 1, "grad_output_pre_quant", fp_go, grad_output, cfg.grad_output)
 
         sum_axes = [0] + list(range(2, grad_output.ndim))
 
@@ -707,24 +703,26 @@ class GroupNormFunction(torch.autograd.Function):
         )
 
         # Exit quantization
-        gb_idx = 0
-        for s in cfg.grad_bias:
-            fp_gb = grad_bias
-            grad_bias = quantize(grad_bias, s)
-            if emit_fn: emit_fn("grad_bias", gb_idx, "grad_bias_post_quant", fp_gb, grad_bias, s)
-            gb_idx += 1
-        gw_idx = 0
-        for s in cfg.grad_weight:
-            fp_gw = grad_weight
-            grad_weight = quantize(grad_weight, s)
-            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_weight, s)
-            gw_idx += 1
-        gi_idx = 0
-        for s in cfg.grad_input:
-            fp_gi = grad_input
-            grad_input = quantize(grad_input, s)
-            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_input, s)
-            gi_idx += 1
+        if cfg.storage is not None:
+            fp_gb = grad_bias; grad_bias = quantize(grad_bias, cfg.storage)
+            if emit_fn: emit_fn("grad_bias", 0, "grad_bias_post_quant", fp_gb, grad_bias, cfg.storage)
+        if cfg.grad_bias is not None:
+            fp_gb = grad_bias; grad_bias = quantize(grad_bias, cfg.grad_bias)
+            if emit_fn: emit_fn("grad_bias", 1, "grad_bias_post_quant", fp_gb, grad_bias, cfg.grad_bias)
+
+        if cfg.storage is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.storage)
+            if emit_fn: emit_fn("grad_weight", 0, "grad_weight_post_quant", fp_gw, grad_weight, cfg.storage)
+        if cfg.grad_weight is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.grad_weight)
+            if emit_fn: emit_fn("grad_weight", 1, "grad_weight_post_quant", fp_gw, grad_weight, cfg.grad_weight)
+
+        if cfg.storage is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.storage)
+            if emit_fn: emit_fn("grad_input", 0, "grad_input_post_quant", fp_gi, grad_input, cfg.storage)
+        if cfg.grad_input is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.grad_input)
+            if emit_fn: emit_fn("grad_input", 1, "grad_input_post_quant", fp_gi, grad_input, cfg.grad_input)
 
         return (grad_input, None, grad_weight, grad_bias,
                 None, None, None, None, None, None)
@@ -767,13 +765,13 @@ class RMSNormFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         ctx.name = name
 
-        # Entry quantization
-        in_idx = 0
-        for s in cfg.input:
-            fp_x = x
-            x = quantize(x, s)
-            if emit_fn: emit_fn("input", in_idx, "input_pre_quant", fp_x, x, s)
-            in_idx += 1
+        # Entry quantization: storage → compute on input
+        if cfg.storage is not None:
+            fp_x = x; x = quantize(x, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_x, x, cfg.storage)
+        if cfg.input is not None:
+            fp_x = x; x = quantize(x, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_x, x, cfg.input)
 
         # RMSNorm: x_rms = sqrt(mean(x^2) + eps), output = x * (1/x_rms) * weight + bias
         x2 = vec_mul(x, x, inner_scheme)
@@ -784,19 +782,20 @@ class RMSNormFunction(torch.autograd.Function):
         x_norm = vec_mul(x, x_rms_inv, inner_scheme)
 
         q_weight = weight
-        wt_idx = 0
-        for s in cfg.weight:
-            fp_w = q_weight
-            q_weight = quantize(q_weight, s)
-            if emit_fn: emit_fn("weight", wt_idx, "weight_pre_quant", fp_w, q_weight, s)
-            wt_idx += 1
+        if cfg.storage is not None:
+            fp_w = q_weight; q_weight = quantize(q_weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_w, q_weight, cfg.storage)
+        if cfg.weight is not None:
+            fp_w = q_weight; q_weight = quantize(q_weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, q_weight, cfg.weight)
+
         q_bias = bias
-        b_idx = 0
-        for s in cfg.bias:
-            fp_b = q_bias
-            q_bias = quantize(q_bias, s)
-            if emit_fn: emit_fn("bias", b_idx, "weight_pre_quant", fp_b, q_bias, s)
-            b_idx += 1
+        if cfg.storage is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if cfg.bias is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
         x_scale = vec_mul(q_weight, x_norm, inner_scheme)
         output = vec_add(x_scale, q_bias, inner_scheme)
@@ -811,12 +810,12 @@ class RMSNormFunction(torch.autograd.Function):
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
         # Output quantization
-        out_idx = 0
-        for s in cfg.output:
-            fp_o = output
-            output = quantize(output, s)
-            if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_o, output, s)
-            out_idx += 1
+        if cfg.storage is not None:
+            fp_o = output; output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_o, output, cfg.storage)
+        if cfg.output is not None:
+            fp_o = output; output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_o, output, cfg.output)
 
         return output
 
@@ -828,19 +827,12 @@ class RMSNormFunction(torch.autograd.Function):
         emit_fn = ctx.emit_fn
 
         # Entry quantization on grad_output
-        go_idx = 0
-        for s in cfg.grad_output:
-            fp_go = grad_output
-            grad_output = quantize(grad_output, s)
-            if emit_fn: emit_fn("grad_output", go_idx, "grad_output_pre_quant", fp_go, grad_output, s)
-            go_idx += 1
-        x_norm, x_rms_inv, weight = ctx.saved_tensors
-        cfg: OpQuantConfig = ctx.cfg
-        scheme = ctx.inner_scheme_bw
-
-        # Entry quantization on grad_output
-        for s in cfg.grad_output:
-            grad_output = quantize(grad_output, s)
+        if cfg.storage is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.storage)
+            if emit_fn: emit_fn("grad_output", 0, "grad_output_pre_quant", fp_go, grad_output, cfg.storage)
+        if cfg.grad_output is not None:
+            fp_go = grad_output; grad_output = quantize(grad_output, cfg.grad_output)
+            if emit_fn: emit_fn("grad_output", 1, "grad_output_pre_quant", fp_go, grad_output, cfg.grad_output)
 
         sum_axes = list(range(len(grad_output.shape) - 1))
 
@@ -857,29 +849,29 @@ class RMSNormFunction(torch.autograd.Function):
         dx_norm2 = vec_mul(dx1, x_norm, scheme)
         dx_norm2 = vec_reduce_mean(dx_norm2, -1, keepdim=True, scheme=scheme)
         dx_norm3 = vec_mul(x_norm, dx_norm2, scheme)
-        # mx/layernorm.py RMSNorm backward: vec_sub(dx1, dx_norm3) has no
-        # mx_specs — the final subtraction is NOT quantized
         grad_input = dx1 - dx_norm3
 
         # Exit quantization
-        gb_idx = 0
-        for s in cfg.grad_bias:
-            fp_gb = grad_bias
-            grad_bias = quantize(grad_bias, s)
-            if emit_fn: emit_fn("grad_bias", gb_idx, "grad_bias_post_quant", fp_gb, grad_bias, s)
-            gb_idx += 1
-        gw_idx = 0
-        for s in cfg.grad_weight:
-            fp_gw = grad_weight
-            grad_weight = quantize(grad_weight, s)
-            if emit_fn: emit_fn("grad_weight", gw_idx, "grad_weight_post_quant", fp_gw, grad_weight, s)
-            gw_idx += 1
-        gi_idx = 0
-        for s in cfg.grad_input:
-            fp_gi = grad_input
-            grad_input = quantize(grad_input, s)
-            if emit_fn: emit_fn("grad_input", gi_idx, "grad_input_post_quant", fp_gi, grad_input, s)
-            gi_idx += 1
+        if cfg.storage is not None:
+            fp_gb = grad_bias; grad_bias = quantize(grad_bias, cfg.storage)
+            if emit_fn: emit_fn("grad_bias", 0, "grad_bias_post_quant", fp_gb, grad_bias, cfg.storage)
+        if cfg.grad_bias is not None:
+            fp_gb = grad_bias; grad_bias = quantize(grad_bias, cfg.grad_bias)
+            if emit_fn: emit_fn("grad_bias", 1, "grad_bias_post_quant", fp_gb, grad_bias, cfg.grad_bias)
+
+        if cfg.storage is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.storage)
+            if emit_fn: emit_fn("grad_weight", 0, "grad_weight_post_quant", fp_gw, grad_weight, cfg.storage)
+        if cfg.grad_weight is not None:
+            fp_gw = grad_weight; grad_weight = quantize(grad_weight, cfg.grad_weight)
+            if emit_fn: emit_fn("grad_weight", 1, "grad_weight_post_quant", fp_gw, grad_weight, cfg.grad_weight)
+
+        if cfg.storage is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.storage)
+            if emit_fn: emit_fn("grad_input", 0, "grad_input_post_quant", fp_gi, grad_input, cfg.storage)
+        if cfg.grad_input is not None:
+            fp_gi = grad_input; grad_input = quantize(grad_input, cfg.grad_input)
+            if emit_fn: emit_fn("grad_input", 1, "grad_input_post_quant", fp_gi, grad_input, cfg.grad_input)
 
         return (grad_input, grad_weight, grad_bias, None, None, None, None, None, None)
 
@@ -899,6 +891,8 @@ class QuantizedRMSNorm(ObservableMixin, nn.LayerNorm):
         self._analysis_name = name
 
     def forward(self, x):
+        if self.cfg == OpQuantConfig() and self.inner_scheme is None:
+            return super().forward(x)
         emit_fn = self._emit if self._observers else None
         return RMSNormFunction.apply(
             x, self.weight, self.bias, self.eps,

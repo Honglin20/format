@@ -49,7 +49,7 @@ class TestAdaptiveAvgPool2d:
 
         mx_out = mx.adaptive_avg_pool2d(mx_x, output_size, mx_specs=mx_specs)
         cfg = pool_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = AdaptiveAvgPool2dFunction.apply(src_x, output_size, inner, qbp)
 
@@ -66,7 +66,7 @@ class TestAdaptiveAvgPool2d:
 
         mx_out = mx.adaptive_avg_pool2d(mx_x, output_size, mx_specs=mx_specs)
         cfg = pool_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = AdaptiveAvgPool2dFunction.apply(src_x, output_size, inner, qbp)
 
@@ -85,7 +85,7 @@ class TestAdaptiveAvgPool2d:
 
         mx_out = mx.adaptive_avg_pool2d(mx_x, output_size, mx_specs=mx_specs)
         cfg = pool_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = AdaptiveAvgPool2dFunction.apply(src_x, output_size, inner, qbp)
 
@@ -104,7 +104,7 @@ class TestAdaptiveAvgPool2dSTE:
 
         mx_out = mx.adaptive_avg_pool2d(mx_x, output_size, mx_specs=mx_specs)
         cfg = pool_config_from_mx_specs(mx_specs)
-        inner = cfg.input[0] if cfg.input else None
+        inner = cfg.input
         qbp = bool(cfg.grad_input)
         src_out = AdaptiveAvgPool2dFunction.apply(src_x, output_size, inner, qbp)
 
