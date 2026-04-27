@@ -63,6 +63,29 @@ class CalibrationPipeline:
         # Internal state: running absolute max per layer
         self._running_amax: Dict[str, torch.Tensor] = {}
 
+    def assign_scales(self, scales: Dict[str, torch.Tensor]) -> list:
+        """Assign pre-computed scale tensors to model modules as buffers.
+
+        For each ``(name, scale)`` in *scales*, looks up the module by
+        name via ``model.named_modules()`` and registers the scale as a
+        persistent buffer named ``_output_scale``.  Registered buffers
+        survive ``state_dict()`` / ``load_state_dict()`` round-trips.
+
+        Args:
+            scales: Dictionary mapping module names to scale tensors,
+                as returned by :meth:`calibrate`.
+
+        Returns:
+            List of module names that were successfully assigned.
+        """
+        assigned = []
+        module_map = dict(self.model.named_modules())
+        for name, scale in scales.items():
+            if name in module_map:
+                module_map[name].register_buffer("_output_scale", scale)
+                assigned.append(name)
+        return assigned
+
     def calibrate(self, dataloader) -> Dict[str, torch.Tensor]:
         """Run calibration and return per-layer scale factors.
 

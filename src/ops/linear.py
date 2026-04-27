@@ -40,7 +40,8 @@ class LinearFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, w, b, cfg: OpQuantConfig, name=None, emit_fn=None):
+    def forward(ctx, x, w, b, cfg: OpQuantConfig, name=None, emit_fn=None,
+                output_scale=None):
         ctx.emit_fn = emit_fn
         # Save raw tensors for STE backward (when is_training=False)
         x_raw, w_raw = x, w
@@ -112,7 +113,7 @@ class LinearFunction(torch.autograd.Function):
         out_idx = 0
         if len(out_schemes) > 0:
             fp_y = y
-            y = quantize(y, out_schemes[0])
+            y = quantize(y, out_schemes[0], scale=output_scale)
             if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_y, y, out_schemes[0])
             out_idx += 1
 
@@ -121,7 +122,7 @@ class LinearFunction(torch.autograd.Function):
             y = y + q_bias
             if len(out_schemes) > 1:
                 fp_y = y
-                y = quantize(y, out_schemes[1])
+                y = quantize(y, out_schemes[1], scale=output_scale)
                 if emit_fn: emit_fn("output", out_idx, "output_post_quant", fp_y, y, out_schemes[1])
                 out_idx += 1
 
@@ -188,10 +189,10 @@ class LinearFunction(torch.autograd.Function):
             for s in cfg.grad_bias:
                 grad_b = quantize(grad_b, s)
 
-        return grad_x, grad_w, grad_b, None, None, None
+        return grad_x, grad_w, grad_b, None, None, None, None
 
     @staticmethod
-    def symbolic(g, x, w, b, cfg, name, emit_fn):
+    def symbolic(g, x, w, b, cfg, name, emit_fn, output_scale=None):
         """ONNX symbolic: emit quantize nodes + MatMul + optional Add."""
         from src.onnx.helpers import _emit_quantize_node
 
@@ -244,6 +245,9 @@ class QuantizedLinear(ObservableMixin, nn.Linear):
             return F.linear(x, self.weight, self.bias)
 
         emit_fn = self._emit if self._observers else None
+        output_scale = self.get_buffer("_output_scale") \
+            if hasattr(self, "_output_scale") else None
         return LinearFunction.apply(
             x, self.weight, self.bias, self.cfg, self._analysis_name, emit_fn,
+            output_scale,
         )

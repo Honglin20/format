@@ -159,7 +159,7 @@ def _quantize_fp(A, exp_bits=None, mantissa_bits=None,
 # QuantScheme-driven unified entry point
 # ---------------------------------------------------------------------------
 
-def quantize(x, scheme=None, allow_denorm=True):
+def quantize(x, scheme=None, allow_denorm=True, scale=None):
     """Quantize tensor x using a QuantScheme (format + granularity + transform).
 
     This is the primary entry point for tensor-level quantization.
@@ -169,6 +169,9 @@ def quantize(x, scheme=None, allow_denorm=True):
         scheme: QuantScheme specifying format, granularity, transform, and round_mode.
             If None, input is returned unchanged (no quantization path).
         allow_denorm: If False, flush subnormal values to zero (float formats only).
+        scale: Optional pre-computed scale tensor.  If provided, the format
+            uses this scale instead of computing one from ``x``.  Only
+            meaningful for PER_CHANNEL and PER_BLOCK granularity.
 
     Returns:
         Quantized tensor with same shape as x.
@@ -177,6 +180,6 @@ def quantize(x, scheme=None, allow_denorm=True):
         return x
     x_t = scheme.transform.forward(x)
     x_q = scheme.format.quantize(x_t, scheme.granularity, scheme.round_mode,
-                                  allow_denorm=allow_denorm)
+                                  allow_denorm=allow_denorm, scale=scale)
     return scheme.transform.inverse(x_q)
 

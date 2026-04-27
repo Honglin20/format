@@ -42,5 +42,7 @@ class IntFormat(FormatBase):
         xq = g.op("QuantizeLinear", x, scale, zp)
         return g.op("DequantizeLinear", xq, scale, zp)
 
-    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True):
-        return super().quantize(x, granularity, round_mode, allow_denorm)
+    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
+                 scale=None):
+        return super().quantize(x, granularity, round_mode, allow_denorm,
+                                scale=scale)
