@@ -1,50 +1,53 @@
 # Current Task
 
-**Task ID**: P8.X — Phase 8 研究能力扩展（P1 Transform + P2 Calibration + P3 NF4 已完成）
+**Task ID**: P8.X — QuantSession 统一 API（Phase 8 研究能力扩展）
 **Next**: P4 — 参数化格式注册 或 P5 — LSQ / PACT 可学习量化参数
 **Branch**: feature/refactor-src
-**Tests baseline**: 1207 passed, 0 xfail
+**Tests baseline**: 1247 passed, 0 xfail
 
-## Phase 8 完成状态
+## QuantSession 完成状态
+
+- [x] CalibrationSession 重构（上下文管理器 + auto-assign，CalibrationPipeline 向后兼容）
+- [x] AnalysisSession = AnalysisContext 别名
+- [x] Comparator / compare_models / compare_sessions（e2e 对比工具）
+- [x] QuantSession 统一 API（session.py，34 tests）
+- [x] README 更新（QuantSession 推荐用法 + API 方法表）
+
+## QuantSession API 总结
+
+```python
+session = QuantSession(model, cfg, calibrator=..., observers=..., keep_fp32=True)
+session.use_fp32() / session.use_quant()  # 模式切换
+session(x)                                 # 推理
+session.calibrate()                        # → CalibrationSession 上下文管理器
+session.analyze()                          # → AnalysisContext 上下文管理器
+session.compare(dl, eval_fn)               # 自动 fp32 vs quant 对比
+session.comparator()                       # → Comparator 手动对比
+session.export_onnx(path, dummy_input?)    # ONNX 导出（自动记录上次推理输入）
+session.clear_scales()                     # 清除 _output_scale buffer
+session.train() / .eval() / .parameters() / .state_dict()  # 委托
+```
+
+## Phase 8 所有完成项
 
 - [x] 8A.1 Hadamard Transform（18 tests）
 - [x] 8B.1 Scale Strategy（20 tests）
 - [x] 8B.2 Calibration Pipeline（15 tests）
 - [x] 8A.2 SmoothQuant Transform（29 tests）
 - [x] 8B.3 Scale Persistence（12 tests）
-- [x] **P3 NF4 / Lookup Table Format（45 tests）**
+- [x] P3 NF4 / Lookup Table Format（51 tests）
+- [x] QuantSession 统一 API（34 tests）
 
-## P3 实现总结
+## 下一步
 
-采用 `LookupFormat(FormatBase)` 子类继承设计，不修改 `FormatBase`：
-- `LookupFormat` — 通用 LUT 量化，`quantize_elemwise()` 最近邻搜索
-- `NF4Format(LookupFormat)` — QLoRA 16 级非对称正态分布优化 levels
-- PER_TENSOR / PER_CHANNEL / PER_BLOCK 三种粒度均直接可用（不改 dispatch 代码）
-- Round mode 仅支持 "nearest"，其他 raise ValueError
-- NaN 保留，Inf 饱和到边界 level
-
-## 优先级调整
-
-CLE（Cross-Layer Equalization）和 Bias Correction 降为最低优先级，暂不实施。
-
-## 下一步：P4 — 参数化格式注册
-
-当前添加新 fp 格式（如 `fp5_e3m1`）需要写 Python 类。目标：一行注册。
-
-```python
-register_float_format("fp5_e3m1", ebits=3, mbits=1)
-# 或 from_str 自动解析命名约定
-FormatBase.from_str("fp5_e3m1")  # 自动解析 e3m1
-```
-
-或 P5 — LSQ / PACT 可学习量化参数（scale 作为 nn.Parameter）。
+P4 — 参数化格式注册（`register_float_format("fp5_e3m1", ebits=3, mbits=1)`）或 P5 — LSQ / PACT 可学习量化参数。
 
 ## 断点续传必读文件
 
 1. `CLAUDE.md`（全文）
-2. `docs/architecture/001-three-axis-quant-scheme.md`（FormatBase 接口规范）
-3. `src/formats/lookup_formats.py`（LookupFormat / NF4Format 新实现）
-4. `src/formats/registry.py`（_init_default_formats 注册方式）
+2. `src/session.py`（QuantSession 实现）
+3. `src/analysis/e2e.py`（Comparator / compare_models / compare_sessions）
+4. `src/calibration/pipeline.py`（CalibrationSession 上下文管理器）
 5. `~/.claude/projects/.../memory/format-research-roadmap.md`（P4/P5 详细说明）
 
 ## 关键经验记录
@@ -54,5 +57,7 @@ FormatBase.from_str("fp5_e3m1")  # 自动解析 e3m1
 3. **KL 逐 slice 非逐 position**：`_compute_kl_divergence` 将 axis 排到首维后 reshape(n_slices, -1)
 4. **autograd Function 参数计数**：新增 tensor 参数到 `apply()` 后，`backward()` 和 `symbolic()` 返回值数量必须同步 +1
 5. **SmoothQuant 不可变**：scale 在 `__init__` 传入，`from_calibration()` 工厂方法
-6. **LookupFormat quantize() 不能少**：即使只有 `quantize_elemwise()` 不同，也必须 override `quantize()`（否则 ABC 无法实例化）。默认 dispatch 通过 `super().quantize()` 即可
+6. **LookupFormat quantize() 不能少**：即使只有 `quantize_elemwise()` 不同，也必须 override `quantize()`（否则 ABC 无法实例化）
 7. **NaN 污染 amax**：per_channel 路径中 `amax = max(|x|, dim=axis)` 会把 NaN 传播到整个 channel
+8. **QuantSession 设计原则**：新层非替代 — `QuantSession` 是现有 API 之上的薄层，`calibrate()`/`analyze()` 返回底层上下文管理器，用户可自由嵌套
+9. **compare_sessions fp32 baseline**：从第一个 session 的 `fp32_model` 自动提取，用户无需额外传 fp32 session

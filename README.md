@@ -188,77 +188,76 @@ output = qmodel(x)
 
 ### 3. 校准（Calibration）
 
-```python
-from torch.utils.data import DataLoader, TensorDataset
-from src.calibration.strategies import MaxScaleStrategy, PercentileScaleStrategy
-from src.calibration.pipeline import CalibrationPipeline
-
-# 选择 scale 策略
-strategy = MaxScaleStrategy()          # absmax（默认）
-# strategy = PercentileScaleStrategy(q=99.0)  # 排除 outlier
-# strategy = MSEScaleStrategy()               # 最小化 MSE
-# strategy = KLScaleStrategy(n_bins=256)      # TensorRT 风格 KL
-
-# 校准数据
-calib_data = torch.randn(100, 768)
-dl = DataLoader(TensorDataset(calib_data), batch_size=8)
-
-# 收集激活统计 → 计算 scale
-pipeline = CalibrationPipeline(qmodel, strategy, num_batches=10)
-scales = pipeline.calibrate(dl)
-
-# 持久化 scale 到模型 buffer
-pipeline.assign_scales(scales)
-
-# 后续推理自动使用预计算 scale（不再重新计算 amax）
-output = qmodel(x)
-```
-
-### 4. 将量化模型嵌入用户评价框架
+推荐使用 `QuantSession.calibrate()` 上下文管理器（scales 在退出时自动写入）：
 
 ```python
-import torch
-from src.mapping.quantize_model import quantize_model
-
-def evaluate_quantized_model(model, eval_dataloader, cfg):
-    """将量化模型嵌入你的评价 pipeline。"""
-    qmodel = quantize_model(model, cfg=cfg)
-
-    total, correct = 0, 0
-    with torch.no_grad():
-        for batch in eval_dataloader:
-            inputs, labels = batch
-            outputs = qmodel(inputs)
-            _, predicted = outputs.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
-
-    return correct / total
-
-# 对比不同配置
-for cfg_name, cfg in [("int8", int8_cfg), ("nf4", nf4_cfg), ("fp4_mx", fp4_mx_cfg)]:
-    acc = evaluate_quantized_model(model, eval_loader, cfg)
-    print(f"{cfg_name}: accuracy={acc:.4f}")
+with session.calibrate():
+    for batch in calib_loader:
+        session(batch)
+# scales 已自动写入 model buffer
 ```
+
+或直接使用底层 `CalibrationSession`：
+
+```python
+from src.calibration.pipeline import CalibrationSession
+from src.calibration.strategies import MaxScaleStrategy
+
+with CalibrationSession(qmodel, MaxScaleStrategy()) as calib:
+    for batch in calib_loader:
+        qmodel(batch)
+# scales 在 __exit__ 时自动写入
+```
+
+> `CalibrationPipeline`（旧 DataLoader 驱动接口）保留为 `CalibrationSession` 的向后兼容子类。
+
+### 4. 端到端精度对比
+
+推荐使用 `QuantSession.compare()` 或 `Comparator`：
+
+```python
+# 自动模式：fp32 vs quant
+result = session.compare(eval_loader, my_eval_fn)
+
+# 手动模式（更灵活）
+cmp = session.comparator()
+with cmp:
+    for inputs, labels in eval_loader:
+        session.use_fp32()
+        fp32_out = session(inputs)
+        session.use_quant()
+        q_out = session(inputs)
+        cmp.record(fp32_out, q_out, labels)
+result = cmp.evaluate(my_eval_fn, directions={"acc": "higher"})
+
+# 对比多个 session
+from src.analysis.e2e import compare_sessions
+results = compare_sessions({"int8": s1, "fp4": s2}, eval_loader)
+```
+
+用户自定义 eval_fn：`(logits, labels) -> dict[str, float]`。框架只负责执行并返回 `{"fp32": {...}, "quant": {...}, "delta": {...}}`。
 
 ### 5. 层级误差分析
 
+推荐使用 `QuantSession.analyze()`：
+
+```python
+with session.analyze() as ctx:
+    for batch in data:
+        session(batch)
+report = ctx.report()
+```
+
+或直接使用底层 `AnalysisContext`：
+
 ```python
 from src.analysis.context import AnalysisContext
-from src.analysis.observers import QSNRObserver, MSEObserver, HistogramObserver
+from src.analysis.observers import QSNRObserver, MSEObserver
 
-# 挂载 observer 采集每层误差
-observers = [QSNRObserver(), MSEObserver(), HistogramObserver()]
-
-with AnalysisContext(qmodel, observers=observers) as ctx:
-    for batch in calibration_data:
+with AnalysisContext(qmodel, [QSNRObserver(), MSEObserver()]) as ctx:
+    for batch in data:
         qmodel(batch)
-
-# 生成报告：每层 / 每个量化步骤的 QSNR / MSE / 直方图
 report = ctx.report()
-for layer_name, metrics in report.items():
-    print(f"{layer_name}: QSNR={metrics.get('qsnr_db', 'N/A'):.1f} dB, "
-          f"MSE={metrics.get('mse', 'N/A'):.6f}")
 ```
 
 **可用的 Observer**：
@@ -274,23 +273,28 @@ for layer_name, metrics in report.items():
 
 ### 6. ONNX 导出
 
+推荐使用 `QuantSession.export_onnx()`：
+
 ```python
-# 量化后的模型直接导出
-qmodel.export_onnx(torch.randn(1, 768), "quantized_model.onnx")
+session(x)                    # 推理时自动记录输入
+session.export_onnx("m.onnx")  # 使用记录的输入作为 dummy_input
 
-# 或在 QuantizeContext 内导出
-from src.context.quantize_context import QuantizeContext
+# 或显式传入
+session.export_onnx("m.onnx", dummy_input=torch.randn(1, 768))
+```
 
-with QuantizeContext(model, cfg) as ctx:
-    output = model(x)
-    ctx.export_onnx(x, "model.onnx")
+或使用量化模型的便捷方法：
+
+```python
+qmodel.export_onnx(torch.randn(1, 768), "model.onnx")
 ```
 
 导出规则：
 
 | 量化方案 | ONNX 节点 |
 |---|---|
-| int8/int4/fp8 + per_tensor/per_channel | `QuantizeLinear` / `DequantizeLinear`（标准 QDQ） |
+| int8/int4 + per_tensor/per_channel | `QuantizeLinear` / `DequantizeLinear`（标准 QDQ） |
+| fp8 + per_tensor/per_channel | QDQ（已知限制：JIT tracer 不支持 FP8 sign-magnitude 路径） |
 | 任意格式 + per_block（MX block） | `com.microxscaling::MxQuantize`（自定义 domain） |
 | NF4 / fp6 / bf16（非标准格式） | `com.microxscaling::MxQuantize`（自定义 domain） |
 
@@ -358,7 +362,7 @@ scheme = QuantScheme(format=custom, granularity=GranularitySpec.per_tensor())
 | MSE | `MSEScaleStrategy(n_bins=256)` | 最小化 MSE 的 scale |
 | KL | `KLScaleStrategy(n_bins=256)` | TensorRT 风格，最小化 KL divergence |
 
-策略通过 `CalibrationPipeline` 运行，`assign_scales()` 将预计算 scale 注册为 `nn.Module` buffer。
+策略通过 `CalibrationSession` 运行（退出时自动 assign），或通过 `session.calibrate()`。
 
 ---
 
@@ -395,6 +399,23 @@ mx/                  # 原始 microsoft/microxcaling（只读）
 
 ---
 
+## 示例
+
+`examples/` 目录下有 6 个可执行示例，覆盖全部功能：
+
+```bash
+PYTHONPATH=. python examples/01_quickstart.py    # 四种配置方式 + fp32/int8/nf4 对比
+PYTHONPATH=. python examples/02_session_workflow.py  # QuantSession 完整工作流
+PYTHONPATH=. python examples/03_calibration_analysis.py  # 四种策略对比 + 四种 Observer
+PYTHONPATH=. python examples/04_e2e_comparison.py  # Comparator / compare_models / compare_sessions
+PYTHONPATH=. python examples/05_onnx_export.py   # ONNX 导出（int8/channel/block + auto-input）
+PYTHONPATH=. python examples/06_transforms.py    # Hadamard + SmoothQuant 变换
+```
+
+所有示例独立可运行，输出可验证结果。
+
+---
+
 ## 与 mx/ 的等价性
 
 `src/` 中所有算子与 `mx/` **bit-exact 等价**（`torch.equal`）。可通过适配器从旧 `MxSpecs` dict 构造 `OpQuantConfig`：
@@ -410,7 +431,7 @@ cfg = op_config_from_mx_specs(mx_specs)
 
 ```bash
 pytest src/tests/ -q
-# 1213 passed, 0 xfail
+# 1247 passed, 0 xfail
 ```
 
 所有等价性测试严格使用 `torch.equal`（bit-exact），不允许 atol/rtol 宽松匹配。
