@@ -401,9 +401,14 @@ mx/                  # 原始 microsoft/microxcaling（只读）
 
 ## 示例
 
-`examples/` 目录下有 6 个可执行示例，覆盖全部功能：
+`examples/` 目录下有一个**全功能汇总示例**和 6 个专项示例：
 
 ```bash
+# 全功能汇总（推荐首先运行）— 涵盖所有 11 种格式、3 种粒度、2 种 Transform、
+# 4 种校准策略、4 种 Observer、QAT、自定义格式注册、多 session 对比等
+PYTHONPATH=. python examples/00_comprehensive.py
+
+# 专项示例
 PYTHONPATH=. python examples/01_quickstart.py    # 四种配置方式 + fp32/int8/nf4 对比
 PYTHONPATH=. python examples/02_session_workflow.py  # QuantSession 完整工作流
 PYTHONPATH=. python examples/03_calibration_analysis.py  # 四种策略对比 + 四种 Observer
