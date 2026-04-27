@@ -1,18 +1,22 @@
 """
-Calibration package: pluggable scale strategies and calibration pipeline.
+Calibration package: pluggable scale strategies and calibration session.
 
 Provides:
 - ScaleStrategy ABC + built-in implementations (Max, Percentile, MSE, KL)
-- CalibrationPipeline: iterate calibration data, collect activation
-  statistics, and compute scale factors.
+- CalibrationSession: context manager for activation-scale calibration
+- CalibrationPipeline: legacy DataLoader-driven pipeline (backward compat)
 
 Usage::
 
-    strategy = MaxScaleStrategy()
+    # New (recommended) — context manager
+    with CalibrationSession(model, MaxScaleStrategy()) as calib:
+        for batch in calib_data:
+            model(batch)
+    # Scales auto-assigned on exit
+
+    # Legacy — DataLoader-driven
     pipeline = CalibrationPipeline(model, strategy, num_batches=8)
     scales = pipeline.calibrate(dataloader)
-
-    # Use scale in _quantize_per_channel instead of hardcoded amax
 """
 
 from src.calibration.strategies import (
@@ -22,7 +26,7 @@ from src.calibration.strategies import (
     MSEScaleStrategy,
     KLScaleStrategy,
 )
-from src.calibration.pipeline import CalibrationPipeline
+from src.calibration.pipeline import CalibrationPipeline, CalibrationSession
 
 __all__ = [
     "ScaleStrategy",
@@ -31,4 +35,5 @@ __all__ = [
     "MSEScaleStrategy",
     "KLScaleStrategy",
     "CalibrationPipeline",
+    "CalibrationSession",
 ]

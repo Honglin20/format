@@ -1,27 +1,20 @@
 """
-CalibrationPipeline: iterate calibration data, collect activation statistics,
-and compute scale factors using a pluggable ScaleStrategy.
+CalibrationSession: context manager for calibration data collection.
 
-Design (v1 -- running-amax based):
+Replaces the old DataLoader-driven calibrate() pattern with a context
+manager that the user controls.  The old CalibrationPipeline is kept
+as a thin compatibility wrapper.
 
-  1. Register forward hooks on all model modules that have a ``cfg``
-     attribute (i.e. ``QuantizedXxx`` layers).
-  2. Walk the DataLoader up to ``num_batches``, running each batch through
-     the model under ``torch.no_grad()``.
-  3. For each forward call, capture the output activation and update a
-     running absolute-maximum (``running_amax``) per layer.  The running
-     max is taken element-wise across batches.
-  4. Remove all hooks.
-  5. Apply ``strategy.compute(running_amax, axis)`` to obtain the final
-     per-layer scale tensor.
+Design:
 
-  The returned dictionary maps module names (as seen by ``named_modules()``)
-  to scale tensors.
+  1. __enter__ registers forward hooks on all Quantized* modules.
+  2. User runs forward passes manually inside ``with`` block.
+  3. __exit__ removes hooks, computes scales via strategy, and (by
+     default) auto-assigns them as ``_output_scale`` buffers.
 
-  Future versions may add histogram-based collection for MSE/KL strategies
-  on full activation tensors.
+  Scales can also be inspected mid-collection via :meth:`scales`.
 """
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -29,55 +22,107 @@ import torch.nn as nn
 from src.calibration.strategies import ScaleStrategy
 
 
-class CalibrationPipeline:
-    """Calibration data collector and scale-factor computer.
+class CalibrationSession:
+    """Context manager for activation-scale calibration.
 
     Args:
-        model: PyTorch model to calibrate (any ``nn.Module``).
-        strategy: ``ScaleStrategy`` instance used to compute final scales
-            from collected statistics.
-        num_batches: Maximum number of DataLoader batches to process.
-            Default 64.
-        axis: Dimension along which per-slice statistics are tracked and
-            scales are computed.  Supports NumPy-style negative indexing.
-            Default -1 (last dimension).
+        model: PyTorch model (typically the quantized model from QuantSession).
+        strategy: ``ScaleStrategy`` instance used to compute final scales.
+        axis: Dimension along which per-slice statistics are tracked.
+        assign: If True (default), scales are auto-assigned as module
+            buffers on context exit.  Set False to only collect without
+            modifying the model.
 
     Example::
 
-        pipeline = CalibrationPipeline(model, MaxScaleStrategy(), num_batches=8)
-        scales = pipeline.calibrate(dataloader)
-        # scales = {"layer_name": scale_tensor, ...}
+        with CalibrationSession(model, MaxScaleStrategy()) as calib:
+            for batch in calib_data:
+                model(batch)
+        # Scales are auto-assigned on exit — model is now calibrated.
     """
 
     def __init__(
         self,
         model: nn.Module,
         strategy: ScaleStrategy,
-        num_batches: int = 64,
         axis: int = -1,
+        assign: bool = True,
     ):
         self.model = model
         self.strategy = strategy
-        self.num_batches = num_batches
         self.axis = axis
-        # Internal state: running absolute max per layer
+        self._assign = assign
         self._running_amax: Dict[str, torch.Tensor] = {}
+        self._hooks: list = []
 
-    def assign_scales(self, scales: Dict[str, torch.Tensor]) -> list:
-        """Assign pre-computed scale tensors to model modules as buffers.
+    # ------------------------------------------------------------------
+    # Context manager protocol
+    # ------------------------------------------------------------------
 
-        For each ``(name, scale)`` in *scales*, looks up the module by
-        name via ``model.named_modules()`` and registers the scale as a
-        persistent buffer named ``_output_scale``.  Registered buffers
-        survive ``state_dict()`` / ``load_state_dict()`` round-trips.
+    def __enter__(self) -> "CalibrationSession":
+        self._running_amax.clear()
+        for name, module in self.model.named_modules():
+            if hasattr(module, "cfg"):
+                hook = module.register_forward_hook(self._make_hook(name))
+                self._hooks.append(hook)
+        return self
+
+    def __exit__(self, *args):
+        for hook in self._hooks:
+            hook.remove()
+        self._hooks.clear()
+        if self._assign and self._running_amax:
+            s = self.scales()
+            self._assign_scales(s)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def scales(self) -> Dict[str, torch.Tensor]:
+        """Compute and return scale factors from collected statistics.
+
+        Can be called inside or after the ``with`` block.  Each call
+        re-computes from the current running-amax state.
+        """
+        scales: Dict[str, torch.Tensor] = {}
+        for name, amax in self._running_amax.items():
+            scales[name] = self.strategy.compute(amax, self.axis)
+        return scales
+
+    def assign_scales(self, scales: Optional[Dict[str, torch.Tensor]] = None) -> List[str]:
+        """Register scales as ``_output_scale`` buffers on model modules.
 
         Args:
-            scales: Dictionary mapping module names to scale tensors,
-                as returned by :meth:`calibrate`.
+            scales: Dict mapping module names to scale tensors.
+                If None, calls :meth:`scales` internally.
 
         Returns:
             List of module names that were successfully assigned.
         """
+        if scales is None:
+            scales = self.scales()
+        return self._assign_scales(scales)
+
+    def clear_scales(self) -> List[str]:
+        """Remove all ``_output_scale`` buffers from the model.
+
+        Returns:
+            List of module names from which buffers were removed.
+        """
+        removed = []
+        module_map = dict(self.model.named_modules())
+        for name, module in module_map.items():
+            if hasattr(module, "_output_scale"):
+                del module._output_scale
+                removed.append(name)
+        return removed
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _assign_scales(self, scales: Dict[str, torch.Tensor]) -> List[str]:
         assigned = []
         module_map = dict(self.model.named_modules())
         for name, scale in scales.items():
@@ -86,72 +131,7 @@ class CalibrationPipeline:
                 assigned.append(name)
         return assigned
 
-    def calibrate(self, dataloader) -> Dict[str, torch.Tensor]:
-        """Run calibration and return per-layer scale factors.
-
-        Iterates through ``dataloader``, running forward passes under
-        ``torch.no_grad()``.  Collects activation statistics from every
-        module that has a ``cfg`` attribute (i.e. quantized layers).
-
-        Args:
-            dataloader: A PyTorch ``DataLoader`` yielding batches.
-                Each batch may be:
-                - A ``(input,)`` or ``(input, target, ...)`` tuple
-                - A plain ``torch.Tensor``
-
-        Returns:
-            Dictionary mapping module names (``str``) to scale tensors
-            (``torch.Tensor``).  Modules without a ``cfg`` attribute are
-            skipped and do not appear in the output.
-        """
-        # Reset internal state from any previous calibration call
-        self._running_amax.clear()
-
-        # 1. Register forward hooks on quantized layers
-        hooks = []
-        for name, module in self.model.named_modules():
-            if hasattr(module, "cfg"):
-                hook = module.register_forward_hook(self._make_hook(name))
-                hooks.append(hook)
-
-        if not hooks:
-            return {}
-
-        try:
-            # 2. Iterate through calibration data
-            with torch.no_grad():
-                for i, batch in enumerate(dataloader):
-                    if i >= self.num_batches:
-                        break
-
-                    # Unpack the batch: handle both tensor and tuple/list inputs
-                    if isinstance(batch, (list, tuple)):
-                        # (input,) or (input, target, ...)
-                        inputs = batch[0]
-                    else:
-                        inputs = batch
-
-                    # Run forward pass (hooks capture activations)
-                    self.model(inputs)
-        finally:
-            # 3. Always clean up hooks, even if forward pass raises
-            for hook in hooks:
-                hook.remove()
-
-        # 4. If no data was processed, no hooks fired → empty result
-        if not self._running_amax:
-            return {}
-
-        # 5. Compute final scales from collected statistics
-        scales: Dict[str, torch.Tensor] = {}
-        for name, amax in self._running_amax.items():
-            scales[name] = self.strategy.compute(amax, self.axis)
-
-        return scales
-
     def _make_hook(self, name: str):
-        """Create a forward hook that tracks running amax for *name*."""
-
         def _hook(module, _input, output):
             x = output.detach()
             amax = torch.amax(torch.abs(x), dim=self.axis, keepdim=True)
@@ -161,5 +141,36 @@ class CalibrationPipeline:
                 )
             else:
                 self._running_amax[name] = amax
-
         return _hook
+
+
+# ------------------------------------------------------------------
+# Backward-compatible wrapper
+# ------------------------------------------------------------------
+
+class CalibrationPipeline(CalibrationSession):
+    """Legacy DataLoader-driven pipeline — kept for backward compatibility.
+
+    Prefer :class:`CalibrationSession` for new code.
+    """
+
+    def __init__(self, model, strategy, num_batches=64, axis=-1):
+        super().__init__(model, strategy, axis=axis, assign=False)
+        self.num_batches = num_batches
+
+    def calibrate(self, dataloader) -> Dict[str, torch.Tensor]:
+        """Run calibration over *dataloader* and return per-layer scales.
+
+        Legacy wrapper — opens a context-manager session internally.
+        """
+        with self:
+            with torch.no_grad():
+                for i, batch in enumerate(dataloader):
+                    if i >= self.num_batches:
+                        break
+                    if isinstance(batch, (list, tuple)):
+                        inputs = batch[0]
+                    else:
+                        inputs = batch
+                    self.model(inputs)
+        return self.scales()

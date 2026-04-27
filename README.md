@@ -32,6 +32,71 @@ pip install -r requirements.txt
 
 以下是一个完整工作流：**定义配置 → 量化模型 → 校准 → 推理 → 误差分析 → 导出**。
 
+> **推荐**：对于大多数使用场景，推荐使用 `QuantSession` 统一 API（见下方），它将以下 6 个步骤封装为单一对象。独立 API 仍可用于需要更细粒度控制的场景。
+
+### QuantSession：统一 API（推荐）
+
+`QuantSession` 将量化、校准、误差分析、端到端精度对比、ONNX 导出封装为单一对象：
+
+```python
+from src.session import QuantSession
+from src.analysis.observers import QSNRObserver, MSEObserver
+from src.calibration.strategies import PercentileScaleStrategy
+
+# 初始化 — 自动量化模型，保留 fp32 副本用于对比
+session = QuantSession(
+    model, cfg,
+    calibrator=PercentileScaleStrategy(q=99.0),
+    observers=[QSNRObserver(), MSEObserver()],
+)
+session.eval()
+
+# 校准（scales 自动写入模型 buffer）
+with session.calibrate():
+    for batch in calib_loader:
+        session(batch)
+
+# 层级误差分析
+with session.analyze() as ctx:
+    for batch in eval_loader:
+        session(batch)
+report = ctx.report()
+
+# 端到端精度对比（自动执行 fp32 baseline）
+result = session.compare(eval_loader, my_eval_fn)
+print(f"fp32: {result['fp32']}, quant: {result['quant']}, delta: {result['delta']}")
+
+# 或手动控制循环（更灵活）
+cmp = session.comparator()
+with cmp:
+    for inputs, labels in eval_loader:
+        session.use_fp32()
+        fp32_out = session(inputs)
+        session.use_quant()
+        q_out = session(inputs)
+        cmp.record(fp32_out, q_out, labels)
+result = cmp.evaluate(my_eval_fn, directions={"acc": "higher"})
+
+# ONNX 导出（自动使用上次推理的输入作为 dummy_input）
+session.export_onnx("model.onnx")
+
+# 对比多个量化配置
+from src.analysis.e2e import compare_sessions
+results = compare_sessions({"int8": s1, "fp4": s2, "nf4": s3}, eval_loader)
+```
+
+| 方法 | 返回 | 说明 |
+|---|---|---|
+| `session(x)` | Tensor | 推理（默认使用量化模型，`use_fp32()` 切换） |
+| `session.calibrate()` | `CalibrationSession` | 上下文管理器，退出时自动写入 scales |
+| `session.analyze()` | `AnalysisContext` | 上下文管理器，退出后 `ctx.report()` 获取层级报告 |
+| `session.compare(dl, fn)` | dict | 自动模式：fp32 vs quant + delta |
+| `session.comparator()` | `Comparator` | 手动模式：用户控制循环 + 自定义指标 |
+| `session.export_onnx(path)` | — | 导出 ONNX（自动使用上次推理输入） |
+| `session.clear_scales()` | list | 清除所有 `_output_scale` buffer |
+
+---
+
 ### 1. 定义量化配置（OpQuantConfig）
 
 ```python
@@ -318,12 +383,13 @@ src/
 ├── scheme/          # QuantScheme、GranularitySpec、OpQuantConfig
 ├── quantize/        # 核心量化函数（elemwise / mx_quantize）
 ├── ops/             # 量化算子（Linear / Conv / Norm / Activation 等）
-├── analysis/        # 误差分析框架（AnalysisContext / Observer / iter_slices）
+├── analysis/        # 误差分析框架（AnalysisContext / Observer / e2e comparison）
 ├── mapping/         # quantize_model 模型级量化入口
-├── calibration/     # Calibration 管线（ScaleStrategy / CalibrationPipeline）
+├── calibration/     # Calibration 管线（ScaleStrategy / CalibrationSession）
 ├── transform/       # Hadamard / SmoothQuant 变换
 ├── onnx/            # ONNX 导出
-└── context/         # QuantizeContext（inline op 截获）
+├── context/         # QuantizeContext（inline op 截获）
+└── session.py       # QuantSession 统一 API
 mx/                  # 原始 microsoft/microxcaling（只读）
 ```
 
