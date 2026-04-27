@@ -12,7 +12,7 @@ from src.quantize.elemwise import quantize
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.op_config import OpQuantConfig
 from src.calibration.strategies import MaxScaleStrategy, PercentileScaleStrategy
-from src.calibration.pipeline import CalibrationPipeline
+from src.calibration.pipeline import CalibrationPipeline, CalibrationSession
 from src.ops.linear import QuantizedLinear
 
 
@@ -295,3 +295,210 @@ def test_e2e_linear_backward_with_stored_scale():
     assert x.grad is not None
     assert model.weight.grad is not None
     assert model.bias.grad is not None
+
+
+# ---------------------------------------------------------------------------
+# 6. Scale persistence — save / load to disk
+# ---------------------------------------------------------------------------
+
+import tempfile
+import os
+
+
+def _make_scales_dict():
+    """Helper: produce a deterministic scales dict for persistence tests."""
+    torch.manual_seed(42)
+    return {
+        "layer0": torch.randn(4, 1).abs() + 0.1,
+        "layer1": torch.randn(8, 1).abs() + 0.1,
+    }
+
+
+def test_save_load_standalone_roundtrip():
+    """Standalone save_scales/load_scales roundtrip preserves all values."""
+    from src.calibration import save_scales, load_scales
+    original = _make_scales_dict()
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp = f.name
+
+    try:
+        save_scales(original, tmp)
+        loaded = load_scales(tmp)
+        assert set(loaded.keys()) == set(original.keys())
+        for name in original:
+            assert torch.equal(loaded[name], original[name]), \
+                f"mismatch for {name}"
+    finally:
+        os.unlink(tmp)
+
+
+def test_save_scales_returns_filepath():
+    """save_scales returns the filepath for chaining."""
+    from src.calibration import save_scales
+    scales = _make_scales_dict()
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp = f.name
+    try:
+        result = save_scales(scales, tmp)
+        assert result == tmp
+    finally:
+        os.unlink(tmp)
+
+
+def test_session_save_scales():
+    """CalibrationSession.save_scales() writes scales to disk."""
+    model = make_simple_quantized_model()
+    strategy = MaxScaleStrategy()
+
+    x = torch.randn(10, 8)
+    dl = DataLoader(TensorDataset(x), batch_size=2)
+    pipeline = CalibrationPipeline(model, strategy, num_batches=4)
+    scales = pipeline.calibrate(dl)
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp = f.name
+
+    try:
+        with CalibrationSession(model, strategy, assign=False) as calib:
+            # Manually set running_amax to mimic collection
+            calib._running_amax = scales
+            calib.save_scales(tmp)
+
+        # Load with standalone function
+        from src.calibration import load_scales
+        loaded = load_scales(tmp)
+        assert set(loaded.keys()) == set(scales.keys())
+        for name in scales:
+            assert torch.equal(loaded[name], scales[name]), \
+                f"mismatch for {name}"
+    finally:
+        os.unlink(tmp)
+
+
+def test_session_load_scales_assign_true():
+    """CalibrationSession.load_scales(assign=True) registers buffers on modules."""
+    model = make_simple_quantized_model()
+    strategy = MaxScaleStrategy()
+    scales = _make_scales_dict()
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp = f.name
+
+    try:
+        torch.save(scales, tmp)
+
+        with CalibrationSession(model, strategy, assign=False) as calib:
+            result = calib.load_scales(tmp, assign=True)
+
+        assert result is not None
+        # Verify buffers were assigned to matching modules
+        module_map = dict(model.named_modules())
+        for name in scales:
+            if name in module_map:
+                assert hasattr(module_map[name], "_output_scale"), \
+                    f"{name} missing _output_scale buffer"
+                assert torch.equal(module_map[name]._output_scale, scales[name])
+    finally:
+        os.unlink(tmp)
+
+
+def test_session_load_scales_assign_false():
+    """CalibrationSession.load_scales(assign=False) returns dict but no buffers."""
+    model = make_simple_quantized_model()
+    strategy = MaxScaleStrategy()
+    scales = _make_scales_dict()
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp = f.name
+
+    try:
+        torch.save(scales, tmp)
+
+        with CalibrationSession(model, strategy, assign=False) as calib:
+            result = calib.load_scales(tmp, assign=False)
+
+        assert set(result.keys()) == set(scales.keys())
+        for name in scales:
+            assert torch.equal(result[name], scales[name])
+        # No buffers should be registered
+        module_map = dict(model.named_modules())
+        for name in scales:
+            if name in module_map:
+                assert not hasattr(module_map[name], "_output_scale"), \
+                    f"{name} should not have _output_scale"
+    finally:
+        os.unlink(tmp)
+
+
+def test_load_scales_from_static_method():
+    """CalibrationSession.load_scales_from() loads without model."""
+    scales = _make_scales_dict()
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp = f.name
+
+    try:
+        torch.save(scales, tmp)
+        loaded = CalibrationSession.load_scales_from(tmp)
+        assert set(loaded.keys()) == set(scales.keys())
+        for name in scales:
+            assert torch.equal(loaded[name], scales[name])
+    finally:
+        os.unlink(tmp)
+
+
+def test_save_load_empty_scales():
+    """Saving and loading an empty scales dict works."""
+    from src.calibration import save_scales, load_scales
+
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp = f.name
+
+    try:
+        save_scales({}, tmp)
+        loaded = load_scales(tmp)
+        assert loaded == {}
+    finally:
+        os.unlink(tmp)
+
+
+def test_e2e_calibrate_save_reload():
+    """Full roundtrip: calibrate → save → load into fresh model → outputs match."""
+    torch.manual_seed(42)
+    model1 = make_simple_quantized_model()
+    strategy = MaxScaleStrategy()
+
+    # Calibrate model1
+    calib_x = torch.randn(20, 8)
+    dl = DataLoader(TensorDataset(calib_x), batch_size=4)
+    pipeline = CalibrationPipeline(model1, strategy, num_batches=5)
+    scales = pipeline.calibrate(dl)
+    pipeline.assign_scales(scales)
+
+    # Save scales to disk
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        tmp = f.name
+
+    try:
+        torch.save(scales, tmp)
+
+        # Create fresh model2 with same weights, then load scales
+        model2 = make_simple_quantized_model()
+        # Assign dummy scales first so state_dict keys exist; then overwrite with real weights
+        dummy = {n: torch.zeros_like(s) for n, s in scales.items()}
+        CalibrationPipeline(model2, strategy).assign_scales(dummy)
+        model2.load_state_dict(model1.state_dict())
+        with CalibrationSession(model2, strategy, assign=False) as calib:
+            calib.load_scales(tmp, assign=True)
+
+        # Both models should produce identical output
+        test_x = torch.randn(4, 8)
+        with torch.no_grad():
+            y1 = model1(test_x)
+            y2 = model2(test_x)
+
+        assert torch.equal(y1, y2), \
+            "models with same weights and calibrated scales should produce identical output"
+    finally:
+        os.unlink(tmp)
