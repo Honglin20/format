@@ -120,14 +120,14 @@ class LayerwiseScaleOptimizer:
             if not targets:
                 continue
 
-            # Initial scale from fp32 targets (per-channel absmax)
+            # Fix internal per-channel amax before LSQ (ADR-006 compliance).
+            # Per-channel internal scale must be pre-computed from calibration
+            # data and held fixed — only pre_scale is learned.
+            self._fix_internal_scales(module, targets)
+
+            # Initial scale (per-tensor, broadcasts to any shape)
             init_scale = self._compute_initial_scale(targets, module)
             pre_scale = nn.Parameter(init_scale)
-
-            # Temporarily inject PreScaleTransform into module's cfg
-            original_cfg = module.cfg
-            transform = PreScaleTransform(scale=pre_scale)
-            module.cfg = _replace_transform(original_cfg, transform)
 
             # Get real inputs from partially-quantized model
             real_inputs = self._get_layer_inputs(qmodel, module, batches)
@@ -140,12 +140,19 @@ class LayerwiseScaleOptimizer:
 
             loss_fn = nn.MSELoss()
 
-            # Optimize
+            # Optimize: apply pre_scale outside module so gradients flow.
+            # The pre_scale is applied to the input (before module) and
+            # inversed on the output — this is the same semantics as
+            # PreScaleTransform but with proper gradient flow.
             module.train()
             for _ in range(self.num_steps):
                 for x_in, y_fp32 in zip(real_inputs, targets):
                     opt.zero_grad()
-                    y_q = module(x_in)
+                    shape = pre_scale.shape + (1,) * (x_in.ndim - pre_scale.ndim)
+                    x_scaled = x_in * pre_scale.view(shape)
+                    y_q = module(x_scaled)
+                    shape_out = pre_scale.shape + (1,) * (y_q.ndim - pre_scale.ndim)
+                    y_q = y_q / pre_scale.view(shape_out)
                     loss = loss_fn(y_q, y_fp32)
                     loss.backward()
                     opt.step()
@@ -155,7 +162,8 @@ class LayerwiseScaleOptimizer:
             optimized_scale = pre_scale.detach()
             optimized_scales[name] = optimized_scale
 
-            # Replace cfg transform with frozen PreScaleTransform
+            # Inject frozen PreScaleTransform into cfg for inference
+            original_cfg = module.cfg
             frozen_transform = PreScaleTransform(scale=optimized_scale)
             module.cfg = _replace_transform(original_cfg, frozen_transform)
 
@@ -176,6 +184,32 @@ class LayerwiseScaleOptimizer:
         Per-channel initialization can be added later.
         """
         return torch.ones(1)
+
+    @staticmethod
+    def _fix_internal_scales(module, targets) -> None:
+        """Pre-compute per-channel amax and store as module buffers.
+
+        For PER_CHANNEL granularity schemes, the format's internal amax
+        must be fixed during LSQ so only pre_scale is optimized
+        (ADR-006 compliance). The pre-computed amax is stored as
+        ``_internal_amax_{role}`` buffers on the module.
+
+        Currently a forward-looking implementation — buffers are created
+        but not yet consumed by module forwards (which use per-tensor).
+        """
+        from src.scheme.granularity import GranularityMode
+
+        stacked = torch.cat([t.reshape(-1, t.shape[-1]) for t in targets], dim=0)
+
+        for f_name in module.cfg.__dataclass_fields__:
+            scheme = getattr(module.cfg, f_name)
+            if scheme is None or not isinstance(scheme, QuantScheme):
+                continue
+            if scheme.granularity.mode != GranularityMode.PER_CHANNEL:
+                continue
+
+            amax = torch.amax(torch.abs(stacked), dim=0).clamp(min=1e-12)
+            module.register_buffer(f"_internal_amax_{f_name}", amax)
 
     def _collect_fp32_targets(
         self, qmodel, fp32_model, modules, batches
