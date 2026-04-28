@@ -15,6 +15,7 @@ Custom model: Edit the four user-customization functions below
 (``build_model``, ``make_calib_data``, ``make_eval_loader``, ``eval_fn``)
 to run the study on your own architecture.
 """
+import argparse
 import copy
 import os
 import json
@@ -41,7 +42,7 @@ from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.transform.hadamard import HadamardTransform
-from src.transform.smooth_quant import SmoothQuantTransform
+from src.transform.smooth_quant import SmoothQuantTransform, SmoothQuantWeightTransform
 from src.transform.pre_scale import PreScaleTransform
 from src.analysis.observers import (
     QSNRObserver, MSEObserver, HistogramObserver, DistributionObserver,
@@ -142,6 +143,41 @@ PER_B32 = GranularitySpec.per_block(size=32, axis=-1)
 
 
 # ---------------------------------------------------------------------------
+# Unified color palette
+# ---------------------------------------------------------------------------
+
+# Format-family colours — colourblind-friendly (Wong 2011), distinguishable
+# under deuteranopia, protanopia, and tritanopia.
+FORMAT_COLORS = {
+    "MXINT-8":  "#0072B2",   # blue
+    "MXFP-8":   "#D55E00",   # vermillion
+    "INT8-PC":  "#009E73",   # bluish green
+    "MXINT-4":  "#56B4E9",   # sky blue (same family as MXINT-8)
+    "MXFP-4":   "#E69F00",   # orange (same family as MXFP-8)
+    "INT4-PC":  "#F0E442",   # yellow
+    "NF4-PC":   "#CC79A7",   # reddish purple
+}
+
+# Transform variant colours — colourblind-friendly
+TRANSFORM_COLORS = {
+    "None":        "#0072B2",   # blue
+    "SmoothQuant": "#D55E00",   # vermillion
+    "Hadamard":    "#009E73",   # bluish green
+}
+
+# Histogram channel colours — colourblind-friendly
+HIST_COLORS = {
+    "fp32_hist":  "#0072B2",   # blue
+    "quant_hist": "#D55E00",   # vermillion
+    "err_hist":   "#999999",   # grey
+}
+
+# Fallback cycle — colourblind-friendly Wong (2011) palette
+FALLBACK_CYCLE = ["#0072B2", "#D55E00", "#009E73", "#F0E442", "#CC79A7",
+                  "#56B4E9", "#E69F00", "#999999", "#000000", "#E5C494"]
+
+
+# ---------------------------------------------------------------------------
 # Config builder helpers
 # ---------------------------------------------------------------------------
 
@@ -212,40 +248,48 @@ def _make_sq_op_cfg(
     sq_transform: TransformBase,
     weight_only: bool,
 ) -> OpQuantConfig:
-    """Create OpQuantConfig with SmoothQuant transform only on ``input``.
+    """Create OpQuantConfig with correct SmoothQuant per-role transforms.
 
-    SmoothQuant is an activation-side transform: ``forward(x) = x / s``,
-    ``inverse(x_q) = x_q * s``.  Applying it to weights would produce
-    ``W / s`` instead of the required ``W * s``, and applying it to the
-    output is semantically meaningless.  This helper limits the transform
-    to the input role only.
+    SmoothQuant (Xiao et al., 2023) applies per-channel scaling to both
+    activations and weights to maintain mathematical equivalence::
+
+        (X / s) @ (W * s) = X @ W
+
+    - **input** role: ``SmoothQuantTransform`` — ``forward(x) = x / s``
+    - **weight** role: ``SmoothQuantWeightTransform`` — ``forward(W) = W * s``
+    - **output** role: ``IdentityTransform`` (no transform; the matmul output
+      is already compensated by the inverse transforms during dequant)
 
     Args:
         fmt_name: Format name string.
         granularity: ``GranularitySpec``.
-        sq_transform: The per-layer ``SmoothQuantTransform``.
+        sq_transform: The per-layer ``SmoothQuantTransform`` (activation-side,
+            carries the shared scale ``s``).
         weight_only: If True, only ``input`` + ``weight`` are quantized
-            (used for per-channel formats like NF4).
+            (used for per-channel formats like NF4, INT4-PC).
 
     Returns:
-        ``OpQuantConfig`` with ``sq_transform`` on ``input`` and
-        ``IdentityTransform`` on all other roles.
+        ``OpQuantConfig`` with activation-side SmoothQuant on ``input``,
+        weight-side compensation on ``weight``, and ``IdentityTransform``
+        on ``output``.
     """
     fmt = FormatBase.from_str(fmt_name)
+    # Weight compensation: W * s (same scale, inverse operation)
+    w_transform = SmoothQuantWeightTransform(sq_transform.scale)
     input_scheme = QuantScheme(
         format=fmt, granularity=granularity, transform=sq_transform,
     )
+    weight_scheme = QuantScheme(
+        format=fmt, granularity=granularity, transform=w_transform,
+    )
     no_tx = IdentityTransform()
     if weight_only:
-        weight_scheme = QuantScheme(
-            format=fmt, granularity=granularity, transform=no_tx,
-        )
         return OpQuantConfig(input=input_scheme, weight=weight_scheme)
     else:
-        scheme = QuantScheme(
+        output_scheme = QuantScheme(
             format=fmt, granularity=granularity, transform=no_tx,
         )
-        return OpQuantConfig(input=input_scheme, weight=scheme, output=scheme)
+        return OpQuantConfig(input=input_scheme, weight=weight_scheme, output=output_scheme)
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +327,10 @@ def run_experiment(
         ``session``, ``qsnr_per_layer``, ``mse_per_layer``.
     """
     if observers is None:
-        observers = [QSNRObserver(), MSEObserver()]
+        observers = [
+            QSNRObserver(), MSEObserver(),
+            HistogramObserver(), DistributionObserver(),
+        ]
 
     if not calib_data:
         raise ValueError("calib_data must contain at least one batch")
@@ -370,6 +417,8 @@ def run_part_a_8bit(
     fp32_model: nn.Module,
     calib_data: List[torch.Tensor],
     eval_loader: DataLoader,
+    *,
+    eval_fn: Optional[Callable] = None,
 ) -> dict:
     """Part A: Compare MXINT-8, MXFP-8, INT8-PC (all 8-bit, PoT scaling).
 
@@ -377,6 +426,7 @@ def run_part_a_8bit(
         fp32_model: Reference FP32 model.
         calib_data: List of calibration batches.
         eval_loader: Evaluation DataLoader.
+        eval_fn: Optional custom evaluation function.
 
     Returns:
         Dict mapping experiment name to result dict, including an
@@ -391,7 +441,9 @@ def run_part_a_8bit(
     results = {}
     for name, cfg in configs.items():
         print(f"  Running {name}...")
-        results[name] = run_experiment(cfg, fp32_model, calib_data, eval_loader)
+        results[name] = run_experiment(
+            cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+        )
     results["FP32 (baseline)"] = {
         "accuracy": results[list(configs.keys())[0]]["fp32_accuracy"],
     }
@@ -402,6 +454,8 @@ def run_part_b_4bit(
     fp32_model: nn.Module,
     calib_data: List[torch.Tensor],
     eval_loader: DataLoader,
+    *,
+    eval_fn: Optional[Callable] = None,
 ) -> dict:
     """Part B: Compare MXINT-4, MXFP-4, INT4-PC, NF4-PC (all 4-bit).
 
@@ -409,6 +463,7 @@ def run_part_b_4bit(
         fp32_model: Reference FP32 model.
         calib_data: List of calibration batches.
         eval_loader: Evaluation DataLoader.
+        eval_fn: Optional custom evaluation function.
 
     Returns:
         Dict mapping experiment name to result dict, including an
@@ -424,7 +479,9 @@ def run_part_b_4bit(
     results = {}
     for name, cfg in configs.items():
         print(f"  Running {name}...")
-        results[name] = run_experiment(cfg, fp32_model, calib_data, eval_loader)
+        results[name] = run_experiment(
+            cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+        )
     results["FP32 (baseline)"] = {
         "accuracy": results[list(configs.keys())[0]]["fp32_accuracy"],
     }
@@ -435,6 +492,8 @@ def run_part_c_pot_scaling(
     fp32_model: nn.Module,
     calib_data: List[torch.Tensor],
     eval_loader: DataLoader,
+    *,
+    eval_fn: Optional[Callable] = None,
 ) -> dict:
     """Part C: INT per-channel with FP32 scaling vs PoT scaling (8-bit & 4-bit).
 
@@ -446,6 +505,7 @@ def run_part_c_pot_scaling(
         fp32_model: Reference FP32 model.
         calib_data: List of calibration batches.
         eval_loader: Evaluation DataLoader.
+        eval_fn: Optional custom evaluation function.
 
     Returns:
         Dict mapping experiment name to result dict.
@@ -463,7 +523,7 @@ def run_part_c_pot_scaling(
         cfg = make_op_cfg(fmt, PER_C0)
         results[name] = run_experiment(
             cfg, fp32_model, calib_data, eval_loader,
-            lsq_steps=100, lsq_pot=pot,
+            lsq_steps=100, lsq_pot=pot, eval_fn=eval_fn,
         )
     results["FP32 (baseline)"] = {
         "accuracy": results[list(configs.keys())[0]]["fp32_accuracy"],
@@ -521,7 +581,8 @@ def _make_smoothquant_transforms(
                 per_layer[name] = SmoothQuantTransform.from_calibration(
                     X_act=activations[name], W=weights[name], alpha=0.5,
                 )
-            except Exception:
+            except (ValueError, RuntimeError) as e:
+                print(f"  Warning: SmoothQuant for {name}: {e}")
                 per_layer[name] = IdentityTransform()
 
     return per_layer
@@ -553,12 +614,8 @@ def _build_per_layer_optimal_cfg(
     Returns:
         Dict mapping layer name to ``OpQuantConfig``.
     """
-    # Determine best transform per layer by QSNR
-    layer_best_tx: dict = {}
-    for tx_name in ["None", "SmoothQuant", "Hadamard"]:
-        for layer, qsnr in variant_results[tx_name]["qsnr_per_layer"].items():
-            if qsnr > layer_best_tx.get(layer, ("", -float("inf")))[1]:
-                layer_best_tx[layer] = (tx_name, qsnr)
+    variant_qsnr = {k: v["qsnr_per_layer"] for k, v in variant_results.items()}
+    layer_best_tx = _compute_best_transform_per_layer(variant_qsnr)
 
     tx_map = {
         "None": None,
@@ -566,7 +623,7 @@ def _build_per_layer_optimal_cfg(
     }
 
     per_layer_cfg = {}
-    for layer, (tx_name, _) in layer_best_tx.items():
+    for layer, tx_name in layer_best_tx.items():
         if tx_name == "SmoothQuant":
             sq_tx = sq_transforms.get(layer, IdentityTransform())
             per_layer_cfg[layer] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
@@ -580,6 +637,8 @@ def run_part_d_transforms(
     fp32_model: nn.Module,
     calib_data: List[torch.Tensor],
     eval_loader: DataLoader,
+    *,
+    eval_fn: Optional[Callable] = None,
 ) -> dict:
     """Part D: Evaluate SmoothQuant and Hadamard transforms at 4-bit,
     with per-layer optimal transform selection by QSNR.
@@ -593,6 +652,7 @@ def run_part_d_transforms(
         fp32_model: Reference FP32 model.
         calib_data: List of calibration batches.
         eval_loader: Evaluation DataLoader.
+        eval_fn: Optional custom evaluation function.
 
     Returns:
         Nested dict mapping format name to dict of variant name to result dict.
@@ -616,15 +676,23 @@ def run_part_d_transforms(
         # Phase 1: Run each transform variant
         variant_results = {}
         sq_transforms = _make_smoothquant_transforms(fp32_model, calib_data)
-        # For the single-transform SmoothQuant variant, build per-layer configs
-        # so each layer gets its own correctly-shaped SmoothQuantTransform.
-        # SmoothQuant is applied ONLY to the input (activation) role:
-        #   activation: x / s → quantize → x_q * s  ✓
-        # Weight compensation (W * s before quantize) is not done via transform
-        # because TransformBase.forward is x/s, not x*s.
+        # For the SmoothQuant variant, build per-layer configs so each layer
+        # gets its own correctly-shaped companion transform pair:
+        #   activation: x / s → quantize → x_q * s  (SmoothQuantTransform)
+        #   weight:     W * s → quantize → W_q / s  (SmoothQuantWeightTransform)
+        # This preserves mathematical equivalence: (X/s) @ (W*s) = X@W
         sq_per_layer_cfg = {}
         for lname, sq_tx in sq_transforms.items():
             sq_per_layer_cfg[lname] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
+
+        # Fallback: non-Linear/Conv modules (e.g. LayerNorm, GELU) that
+        # aren't in sq_transforms still need a quantization config — without
+        # this, quantize_model gives them _EMPTY_CFG (no quantization at
+        # all), which would inflate the SmoothQuant variant's QSNR.
+        fallback_cfg = builder(fmt_str, gran, transform=None)
+        for mname, _module in fp32_model.named_modules():
+            if mname and mname not in sq_per_layer_cfg:
+                sq_per_layer_cfg[mname] = fallback_cfg
 
         # Single-transform variants: build a single OpQuantConfig
         single_tx = {
@@ -636,13 +704,13 @@ def run_part_d_transforms(
             print(f"    Running {label}...")
             cfg = builder(fmt_str, gran, transform=tx)
             variant_results[tx_name] = run_experiment(
-                cfg, fp32_model, calib_data, eval_loader,
+                cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
             )
 
         # SmoothQuant: each layer has its own correctly-shaped transform
         print(f"    Running {fmt_name}-SmoothQuant...")
         variant_results["SmoothQuant"] = run_experiment(
-            sq_per_layer_cfg, fp32_model, calib_data, eval_loader,
+            sq_per_layer_cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
 
         # Phase 2: Per-layer optimal
@@ -651,7 +719,7 @@ def run_part_d_transforms(
         )
         print(f"    Running {fmt_name}-PerLayerOpt...")
         opt_result = run_experiment(
-            per_layer_optimal_cfg, fp32_model, calib_data, eval_loader,
+            per_layer_optimal_cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
         variant_results["PerLayerOpt"] = opt_result
 
@@ -669,10 +737,16 @@ def _accuracy_table(results: dict, title: str, output_dir: str, filename: str) -
     rows = []
     for name, data in results.items():
         acc = data.get("accuracy", {})
-        if isinstance(acc, dict):
+        if isinstance(acc, dict) and len(acc) == 1:
+            # Single-metric: extract the raw value for clean CSV
+            acc_val = list(acc.values())[0]
+            acc_str = f"{acc_val:.4f}"
+        elif isinstance(acc, dict):
             acc_str = ", ".join(f"{k}: {v:.4f}" for k, v in acc.items())
+        elif isinstance(acc, (int, float)):
+            acc_str = f"{acc:.4f}"
         else:
-            acc_str = f"{acc:.4f}" if isinstance(acc, (int, float)) else str(acc)
+            acc_str = str(acc)
         qsnr_dict = data.get("qsnr_per_layer", {})
         mse_dict = data.get("mse_per_layer", {})
         avg_qsnr = sum(qsnr_dict.values()) / max(len(qsnr_dict), 1)
@@ -818,16 +892,10 @@ def generate_table_5(part_d: dict, output_dir: str) -> str:
             if tx_name in fmt_data and "qsnr_per_layer" in fmt_data[tx_name]:
                 variant_qsnr[tx_name] = fmt_data[tx_name]["qsnr_per_layer"]
 
-        all_layers: set = set()
-        for qsnr_dict in variant_qsnr.values():
-            all_layers.update(qsnr_dict.keys())
+        layer_best_tx = _compute_best_transform_per_layer(variant_qsnr)
 
         tx_counts: Dict[str, int] = defaultdict(int)
-        for layer in all_layers:
-            best_tx = max(
-                variant_qsnr.keys(),
-                key=lambda tx, l=layer: variant_qsnr[tx].get(l, -float("inf")),
-            )
+        for best_tx in layer_best_tx.values():
             tx_counts[best_tx] += 1
 
         distribution[fmt_name] = dict(tx_counts)
@@ -915,14 +983,42 @@ def _save_figure(fig, output_dir: str, name: str):
     plt.close(fig)
 
 
+def _compute_best_transform_per_layer(
+    variant_qsnr: Dict[str, Dict[str, float]],
+) -> Dict[str, str]:
+    """Return ``{layer_name: best_transform_name}`` by QSNR.
+
+    For each layer, picks the transform variant (one of the dict keys in
+    ``variant_qsnr``) that maximizes per-layer QSNR.  Ties go to the
+    first transform encountered in dict insertion order.
+    """
+    all_layers: set = set()
+    for qsnr_dict in variant_qsnr.values():
+        all_layers.update(qsnr_dict.keys())
+    result: Dict[str, str] = {}
+    tx_names = list(variant_qsnr.keys())
+    for layer in all_layers:
+        result[layer] = max(
+            tx_names,
+            key=lambda tx: variant_qsnr[tx].get(layer, -float("inf")),
+        )
+    return result
+
+
 def _get_acc_val(data) -> float:
-    """Extract scalar accuracy value from a result dict entry."""
-    acc = data.get("accuracy", {}) if isinstance(data, dict) else {}
+    """Extract scalar accuracy value from a result dict entry.
+
+    Returns ``float("nan")`` when the entry is missing or empty, so that
+    tables and heatmaps can visually distinguish missing data from zero.
+    """
+    if not isinstance(data, dict) or not data:
+        return float("nan")
+    acc = data.get("accuracy", {})
     if isinstance(acc, dict):
-        return float(acc.get("accuracy", 0.0))
+        return float(acc.get("accuracy", float("nan")))
     if isinstance(acc, (int, float)):
         return float(acc)
-    return 0.0
+    return float("nan")
 
 
 def plot_fig1_qsnr_8bit(part_a: dict, output_dir: str):
@@ -933,7 +1029,9 @@ def plot_fig1_qsnr_8bit(part_a: dict, output_dir: str):
             continue
         layers = sorted(data["qsnr_per_layer"].keys())
         values = [data["qsnr_per_layer"][l] for l in layers]
-        ax.plot(range(len(layers)), values, marker="o", label=name, linewidth=2)
+        color = FORMAT_COLORS.get(name, FALLBACK_CYCLE[0])
+        ax.plot(range(len(layers)), values, marker="o", label=name, linewidth=2,
+                color=color)
     ax.set_xlabel("Layer Index")
     ax.set_ylabel("QSNR (dB)")
     ax.set_title("Fig 1: Per-Layer QSNR — 8-bit Formats")
@@ -950,7 +1048,9 @@ def plot_fig2_qsnr_4bit(part_b: dict, output_dir: str):
             continue
         layers = sorted(data["qsnr_per_layer"].keys())
         values = [data["qsnr_per_layer"][l] for l in layers]
-        ax.plot(range(len(layers)), values, marker="o", label=name, linewidth=2)
+        color = FORMAT_COLORS.get(name, FALLBACK_CYCLE[0])
+        ax.plot(range(len(layers)), values, marker="o", label=name, linewidth=2,
+                color=color)
     ax.set_xlabel("Layer Index")
     ax.set_ylabel("QSNR (dB)")
     ax.set_title("Fig 2: Per-Layer QSNR — 4-bit Formats")
@@ -964,15 +1064,14 @@ def plot_fig3_mse_box_8bit(part_a: dict, output_dir: str):
     fig, ax = plt.subplots(figsize=(10, 6))
     data_to_plot, labels = [], []
     colors = []
-    palette = ["#3498db", "#e74c3c", "#2ecc71"]
-    for i, (name, data) in enumerate(part_a.items()):
+    for name, data in part_a.items():
         if "baseline" in name.lower() or "mse_per_layer" not in data:
             continue
         mse_vals = list(data["mse_per_layer"].values())
         if mse_vals:
             data_to_plot.append(mse_vals)
             labels.append(name)
-            colors.append(palette[i % len(palette)])
+            colors.append(FORMAT_COLORS.get(name, FALLBACK_CYCLE[0]))
     if data_to_plot:
         bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
         for patch, c in zip(bp["boxes"], colors):
@@ -989,15 +1088,14 @@ def plot_fig4_mse_box_4bit(part_b: dict, output_dir: str):
     """Fig 4: 4-bit per-layer MSE boxplot."""
     fig, ax = plt.subplots(figsize=(10, 6))
     data_to_plot, labels, colors = [], [], []
-    palette = ["#3498db", "#e74c3c", "#2ecc71", "#f39c12"]
-    for i, (name, data) in enumerate(part_b.items()):
+    for name, data in part_b.items():
         if "baseline" in name.lower() or "mse_per_layer" not in data:
             continue
         mse_vals = list(data["mse_per_layer"].values())
         if mse_vals:
             data_to_plot.append(mse_vals)
             labels.append(name)
-            colors.append(palette[i % len(palette)])
+            colors.append(FORMAT_COLORS.get(name, FALLBACK_CYCLE[0]))
     if data_to_plot:
         bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
         for patch, c in zip(bp["boxes"], colors):
@@ -1050,12 +1148,14 @@ def plot_fig5_pot_delta(part_c: dict, output_dir: str):
 
 
 def plot_fig6_histogram_overlay(all_results: dict, output_dir: str):
-    """Fig 6: Histogram overlay for key layers.
+    """Fig 6: Three-channel histogram overlay (fp32 / quant / error).
 
-    Extracts histograms from analysis reports and displays them for the
-    most sensitive layers (highest MSE).
+    Extracts histogram data from ``HistogramObserver`` (keys: ``fp32_hist``,
+    ``quant_hist``, ``err_hist`` — torch.histc counts) and renders the most
+    sensitive layers as overlaid semi-transparent bar charts.
     """
-    layer_histograms: Dict[str, dict] = {}
+    # Collect histogram data: {layer: {"fp32_hist": ..., "quant_hist": ..., "err_hist": ...}}
+    layer_hists: Dict[str, dict] = {}
     for part_name, part_data in all_results.items():
         if not part_name.startswith("part_") or not isinstance(part_data, dict):
             continue
@@ -1066,46 +1166,67 @@ def plot_fig6_histogram_overlay(all_results: dict, output_dir: str):
             if not hasattr(report, "_raw"):
                 continue
             for layer, roles in report._raw.items():
-                if layer in layer_histograms:
+                if layer in layer_hists:
                     continue
                 for role, stages in roles.items():
                     for stage, slices in stages.items():
                         for metrics in slices.values():
-                            if "hist_bins" in metrics and "hist_counts" in metrics:
-                                layer_histograms[layer] = metrics
+                            if "fp32_hist" in metrics and "quant_hist" in metrics:
+                                layer_hists[layer] = {
+                                    k: metrics[k].cpu() if hasattr(metrics.get(k, None), "cpu")
+                                    else metrics.get(k) for k in
+                                    ("fp32_hist", "quant_hist", "err_hist")
+                                }
                                 break
-                    if layer in layer_histograms:
+                    if layer in layer_hists:
                         break
 
-    if not layer_histograms:
+    if not layer_hists:
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.text(0.5, 0.5, "Histogram data not available\n"
-                "(No HistogramObserver in reports)",
+                "(Add HistogramObserver to observers in run_experiment)",
                 ha="center", va="center", fontsize=12, transform=ax.transAxes)
         ax.set_title("Fig 6: Activation Histograms (No Data)")
         _save_figure(fig, output_dir, "fig6_histogram")
         return
 
-    # Pick top 5 layers by MSE
-    top_layers = sorted(layer_histograms.items(),
-                        key=lambda x: x[1].get("mse", 0), reverse=True)[:5]
+    # Pick top 3–5 layers with the richest histogram data
+    top_layers = sorted(layer_hists.items(),
+                        key=lambda x: x[1].get("fp32_hist",
+                         torch.tensor(0)).sum().item(), reverse=True)[:5]
+    if not top_layers:
+        return
 
     n = len(top_layers)
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
+
     for ax, (layer, hist_data) in zip(axes[0], top_layers):
-        bins = hist_data.get("hist_bins", [])
-        counts = hist_data.get("hist_counts", [])
-        if len(bins) > 1 and len(counts) > 0:
-            width = max(bins[1] - bins[0], 1e-6)
-            ax.bar(bins[:-1], counts, width=width, alpha=0.7, color="#3498db",
-                   edgecolor="white", linewidth=0.5)
+        n_bins = 128
+        for channel, color, label in [
+            ("fp32_hist", "#3498db", "fp32"),
+            ("quant_hist", "#e74c3c", "quant"),
+            ("err_hist", "#95a5a6", "error"),
+        ]:
+            counts = hist_data.get(channel)
+            if counts is None or not isinstance(counts, (torch.Tensor, np.ndarray)):
+                continue
+            if isinstance(counts, torch.Tensor):
+                counts = counts.float().numpy()
+            # torch.histc returns counts for equal-width bins; use index as
+            # approximate x-axis (the relative shape matters more than absolute
+            # values for visual comparison across channels)
+            bin_centers = np.arange(len(counts))
+            ax.fill_between(bin_centers, counts, alpha=0.35, color=color,
+                            label=label, step="mid")
+            ax.plot(bin_centers, counts, color=color, linewidth=0.8)
         ax.set_title(layer, fontsize=9)
-        ax.set_xlabel("Value")
+        ax.set_xlabel("Bin")
         ax.set_ylabel("Count")
+        ax.legend(fontsize=7, loc="upper right")
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle("Fig 6: Activation Histograms — Most Sensitive Layers",
-                 fontsize=13)
+    fig.suptitle("Fig 6: Activation Histograms (fp32 / quant / error) — "
+                 "Most Sensitive Layers", fontsize=13)
     fig.tight_layout()
     _save_figure(fig, output_dir, "fig6_histogram")
 
@@ -1125,8 +1246,14 @@ def plot_fig7_transform_heatmap(part_d: dict, output_dir: str):
 
     arr = np.array(matrix)
     fig, ax = plt.subplots(figsize=(10, 6))
-    vmin, vmax = arr[~np.isnan(arr)].min(), arr[~np.isnan(arr)].max()
-    im = ax.imshow(arr, cmap="RdYlGn", aspect="auto", vmin=vmin, vmax=vmax)
+    valid = arr[~np.isnan(arr)]
+    if len(valid) > 0:
+        vmin, vmax = valid.min(), valid.max()
+    else:
+        vmin, vmax = 0.0, 1.0
+    cmap = plt.cm.RdYlGn.copy()
+    cmap.set_bad(color="#d3d3d3")  # gray for missing variants
+    im = ax.imshow(arr, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
 
     ax.set_xticks(range(len(tx_variants)))
     ax.set_xticklabels(tx_variants, rotation=45, ha="right")
@@ -1157,8 +1284,7 @@ def plot_fig8_transform_pie(part_d: dict, output_dir: str):
     if n_fmts == 1:
         axes = [axes]
 
-    pie_colors = {"None": "#3498db", "SmoothQuant": "#2ecc71",
-                  "Hadamard": "#e74c3c"}
+    pie_colors = TRANSFORM_COLORS
 
     for ax, (fmt_name, fmt_data) in zip(axes, sorted(part_d.items())):
         if "PerLayerOpt" not in fmt_data:
@@ -1171,16 +1297,10 @@ def plot_fig8_transform_pie(part_d: dict, output_dir: str):
             if tx_name in fmt_data and "qsnr_per_layer" in fmt_data[tx_name]:
                 variant_qsnr[tx_name] = fmt_data[tx_name]["qsnr_per_layer"]
 
-        all_layers: set = set()
-        for qsnr_dict in variant_qsnr.values():
-            all_layers.update(qsnr_dict.keys())
+        layer_best_tx = _compute_best_transform_per_layer(variant_qsnr)
 
         tx_counts: Dict[str, int] = defaultdict(int)
-        for layer in all_layers:
-            best_tx = max(
-                variant_qsnr.keys(),
-                key=lambda tx, l=layer: variant_qsnr[tx].get(l, -float("inf")),
-            )
+        for best_tx in layer_best_tx.values():
             tx_counts[best_tx] += 1
 
         labels = list(tx_counts.keys())
@@ -1200,40 +1320,60 @@ def plot_fig8_transform_pie(part_d: dict, output_dir: str):
 
 
 def plot_fig9_transform_delta(part_d: dict, output_dir: str):
-    """Fig 9: Transform delta QSNR vs baseline bar chart."""
-    fig, ax = plt.subplots(figsize=(12, 6))
-    x_pos = 0
-    tick_positions, tick_labels = [], []
-    colors_tx = {"SmoothQuant": "#2ecc71", "Hadamard": "#e74c3c"}
+    """Fig 9: Transform delta QSNR vs baseline, one subplot per format.
 
-    for fmt_name in sorted(part_d.keys()):
+    Each format gets its own subplot so that formats with different layer
+    counts (e.g. ToyMLP vs transformer) do not produce overlapping bars.
+    """
+    fmt_names = sorted(part_d.keys())
+    n_fmts = len(fmt_names)
+    fig, axes = plt.subplots(n_fmts, 1, figsize=(14, 4 * n_fmts), sharex=False)
+    if n_fmts == 1:
+        axes = [axes]
+    colors_tx = TRANSFORM_COLORS
+
+    for ax, fmt_name in zip(axes, fmt_names):
         fmt_data = part_d[fmt_name]
         if "None" not in fmt_data:
+            ax.text(0.5, 0.5, "No baseline data", ha="center", va="center",
+                    transform=ax.transAxes)
             continue
         baseline_qsnr = fmt_data["None"].get("qsnr_per_layer", {})
 
+        x_pos = 0
+        tick_positions, tick_labels = [], []
         for tx_name in ("SmoothQuant", "Hadamard"):
             if tx_name not in fmt_data or "qsnr_per_layer" not in fmt_data[tx_name]:
                 continue
             tx_qsnr = fmt_data[tx_name]["qsnr_per_layer"]
-            all_layers = sorted(set(list(baseline_qsnr.keys()) + list(tx_qsnr.keys())))
+            all_layers = sorted(set(baseline_qsnr.keys()) | set(tx_qsnr.keys()))
             deltas = [tx_qsnr.get(l, 0) - baseline_qsnr.get(l, 0) for l in all_layers]
 
             bar_positions = list(range(x_pos, x_pos + len(all_layers)))
             color = colors_tx.get(tx_name, "#95a5a6")
             ax.bar(bar_positions, deltas, color=color, alpha=0.6,
-                   label=f"{fmt_name}-{tx_name}")
+                   label=tx_name)
+            tick_positions.append((bar_positions[0] + bar_positions[-1]) / 2
+                                  if bar_positions else x_pos)
+            tick_labels.append(tx_name)
             x_pos += len(all_layers) + 2
-            tick_positions.append((bar_positions[0] + bar_positions[-1]) / 2)
-            tick_labels.append(f"{fmt_name}\n{tx_name}")
+            if len(all_layers) <= 20:
+                for i, layer in enumerate(all_layers):
+                    ax.text(bar_positions[i], deltas[i],
+                            layer.split(".")[-1] if "." in layer else layer,
+                            ha="center", va="bottom" if deltas[i] >= 0 else "top",
+                            fontsize=4, rotation=90)
 
-    ax.axhline(y=0, color="black", linewidth=0.5)
-    if tick_positions:
-        ax.set_xticks(tick_positions)
-        ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=7)
-    ax.set_ylabel("QSNR Delta (dB) vs No Transform")
-    ax.set_title("Fig 9: Transform Impact on Per-Layer QSNR")
-    ax.grid(True, alpha=0.3)
+        ax.axhline(y=0, color="black", linewidth=0.5)
+        if tick_positions:
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels(tick_labels, fontsize=9)
+        ax.set_ylabel("QSNR Delta (dB)")
+        ax.set_title(f"{fmt_name}", fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+    fig.suptitle("Fig 9: Transform Impact on Per-Layer QSNR", fontsize=13)
     fig.tight_layout()
     _save_figure(fig, output_dir, "fig9_transform_delta")
 
@@ -1316,7 +1456,8 @@ def plot_fig10_error_vs_distribution(all_results: dict, output_dir: str):
 
     # Panel 4: Sparsity histogram
     ax = axes[1, 1]
-    ax.hist(sparse_vals, bins=20, alpha=0.7, color="#3498db", edgecolor="white")
+    ax.hist(sparse_vals, bins=20, alpha=0.7, color=FALLBACK_CYCLE[0],
+            edgecolor="white")
     ax.set_xlabel("Sparse Ratio")
     ax.set_ylabel("Count")
     ax.set_title("Sparsity Across Layers")
@@ -1328,7 +1469,14 @@ def plot_fig10_error_vs_distribution(all_results: dict, output_dir: str):
 
 
 def plot_fig11_layer_type_qsnr(all_results: dict, output_dir: str):
-    """Fig 11: Layer-type grouped QSNR comparison using LayerSensitivity."""
+    """Fig 11: Layer-type grouped QSNR comparison using LayerSensitivity.
+
+    Note:
+        This figure degrades for models with sparse layer-type diversity
+        (e.g. ToyMLP / MLP-only architectures) because the ``by_layer_type``
+        grouping collapses to a single category (``"Linear"``), producing
+        boxplots with only one box per panel.
+    """
     ltype_qsnr: Dict[str, list] = defaultdict(list)
     ltype_mse: Dict[str, list] = defaultdict(list)
 
@@ -1354,7 +1502,7 @@ def plot_fig11_layer_type_qsnr(all_results: dict, output_dir: str):
         return
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    colors_cycle = ["#3498db", "#e74c3c", "#2ecc71", "#f39c12", "#9b59b6"]
+    colors_cycle = FALLBACK_CYCLE
     labels = list(ltype_qsnr.keys())
 
     # QSNR boxplot
@@ -1392,15 +1540,12 @@ def run_format_study(
     eval_fn: Callable[[nn.Module, DataLoader], Dict[str, float]],
     *,
     output_dir: Optional[str] = None,
+    skip_parts: Optional[Dict[str, bool]] = None,
 ) -> Dict[str, dict]:
     """Main entry point: run all 27 experiments and produce tables/figures.
 
     Executes Parts A/B/C/D of the study, saving results to a timestamped
     directory under ``output_dir`` (default: ``results/``).
-
-    .. note::
-        Stub — returns empty ``dict``.  Full implementation will be
-        added in subsequent tasks.
 
     Args:
         build_model: Callable that returns a fresh FP32 model.
@@ -1408,10 +1553,15 @@ def run_format_study(
         make_eval_loader: Callable for evaluation DataLoader.
         eval_fn: Evaluation function (model, dataloader) -> metric dict.
         output_dir: Output directory.  ``None`` uses ``"results"``.
+        skip_parts: Dict mapping part name (``"A"``, ``"B"``, ``"C"``,
+            ``"D"``) to ``True`` to skip that part.  ``None`` runs all.
 
     Returns:
         Dict mapping experiment name to result dict.
     """
+    if skip_parts is None:
+        skip_parts = {}
+
     if output_dir is None:
         output_dir = f"results/format_study_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(f"{output_dir}/figures", exist_ok=True)
@@ -1429,55 +1579,83 @@ def run_format_study(
 
     all_results: Dict[str, dict] = {}
 
-    # Part A: 8-bit format comparison
-    print("\n" + "=" * 60)
-    print("PART A: 8-bit Format Comparison")
-    print("=" * 60)
-    all_results["part_a"] = run_part_a_8bit(fp32_model, calib_data, eval_loader)
-    print(generate_table_1(all_results["part_a"], output_dir))
+    if not skip_parts.get("A"):
+        print("\n" + "=" * 60)
+        print("PART A: 8-bit Format Comparison")
+        print("=" * 60)
+        all_results["part_a"] = run_part_a_8bit(
+            fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+        )
+        print(generate_table_1(all_results["part_a"], output_dir))
+    else:
+        print("\n### PART A: SKIPPED ###")
 
-    # Part B: 4-bit format comparison
-    print("\n" + "=" * 60)
-    print("PART B: 4-bit Format Comparison")
-    print("=" * 60)
-    all_results["part_b"] = run_part_b_4bit(fp32_model, calib_data, eval_loader)
-    print(generate_table_2(all_results["part_b"], output_dir))
+    if not skip_parts.get("B"):
+        print("\n" + "=" * 60)
+        print("PART B: 4-bit Format Comparison")
+        print("=" * 60)
+        all_results["part_b"] = run_part_b_4bit(
+            fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+        )
+        print(generate_table_2(all_results["part_b"], output_dir))
+    else:
+        print("\n### PART B: SKIPPED ###")
 
-    # Part C: FP32 vs PoT scaling
-    print("\n" + "=" * 60)
-    print("PART C: FP32 vs PoT Scaling")
-    print("=" * 60)
-    all_results["part_c"] = run_part_c_pot_scaling(fp32_model, calib_data, eval_loader)
-    print(generate_table_3(all_results["part_c"], output_dir))
+    if not skip_parts.get("C"):
+        print("\n" + "=" * 60)
+        print("PART C: FP32 vs PoT Scaling")
+        print("=" * 60)
+        all_results["part_c"] = run_part_c_pot_scaling(
+            fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+        )
+        print(generate_table_3(all_results["part_c"], output_dir))
+    else:
+        print("\n### PART C: SKIPPED ###")
 
-    # Part D: Transform study
-    print("\n" + "=" * 60)
-    print("PART D: Transform Study")
-    print("=" * 60)
-    all_results["part_d"] = run_part_d_transforms(fp32_model, calib_data, eval_loader)
-    print(generate_table_4(all_results["part_d"], output_dir))
-    print(generate_table_5(all_results["part_d"], output_dir))
+    if not skip_parts.get("D"):
+        print("\n" + "=" * 60)
+        print("PART D: Transform Study")
+        print("=" * 60)
+        all_results["part_d"] = run_part_d_transforms(
+            fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+        )
+        print(generate_table_4(all_results["part_d"], output_dir))
+        print(generate_table_5(all_results["part_d"], output_dir))
+    else:
+        print("\n### PART D: SKIPPED ###")
 
     # Table 6: Layer sensitivity
     print(generate_table_6(all_results, output_dir))
 
+    # Block size sensitivity sweep
+    print("\n" + "=" * 60)
+    print("BLOCK SIZE SWEEP")
+    print("=" * 60)
+    all_results["block_sweep"] = run_block_size_sweep(
+        fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+    )
+
     # Figures
     print("\n### Generating Figures ###")
     plot_tasks = [
-        (plot_fig1_qsnr_8bit, all_results["part_a"], "fig1_qsnr_8bit"),
-        (plot_fig2_qsnr_4bit, all_results["part_b"], "fig2_qsnr_4bit"),
-        (plot_fig3_mse_box_8bit, all_results["part_a"], "fig3_mse_8bit"),
-        (plot_fig4_mse_box_4bit, all_results["part_b"], "fig4_mse_4bit"),
-        (plot_fig5_pot_delta, all_results["part_c"], "fig5_pot_delta"),
-        (plot_fig6_histogram_overlay, all_results, "fig6_histogram"),
-        (plot_fig7_transform_heatmap, all_results["part_d"], "fig7_transform_heatmap"),
-        (plot_fig8_transform_pie, all_results["part_d"], "fig8_transform_pie"),
-        (plot_fig9_transform_delta, all_results["part_d"], "fig9_transform_delta"),
-        (plot_fig10_error_vs_distribution, all_results, "fig10_error_vs_dist"),
-        (plot_fig11_layer_type_qsnr, all_results, "fig11_layer_type_qsnr"),
+        (plot_fig1_qsnr_8bit, "part_a", "fig1_qsnr_8bit"),
+        (plot_fig2_qsnr_4bit, "part_b", "fig2_qsnr_4bit"),
+        (plot_fig3_mse_box_8bit, "part_a", "fig3_mse_8bit"),
+        (plot_fig4_mse_box_4bit, "part_b", "fig4_mse_4bit"),
+        (plot_fig5_pot_delta, "part_c", "fig5_pot_delta"),
+        (plot_fig6_histogram_overlay, None, "fig6_histogram"),
+        (plot_fig7_transform_heatmap, "part_d", "fig7_transform_heatmap"),
+        (plot_fig8_transform_pie, "part_d", "fig8_transform_pie"),
+        (plot_fig9_transform_delta, "part_d", "fig9_transform_delta"),
+        (plot_fig10_error_vs_distribution, None, "fig10_error_vs_dist"),
+        (plot_fig11_layer_type_qsnr, None, "fig11_layer_type_qsnr"),
     ]
-    for fn, data, name in plot_tasks:
+    for fn, part_key, name in plot_tasks:
+        if part_key is not None and part_key not in all_results:
+            print(f"  {name}: SKIPPED (part not run)")
+            continue
         try:
+            data = all_results if part_key is None else all_results[part_key]
             fn(data, output_dir)
             print(f"  {name}: OK")
         except Exception as e:
@@ -1520,6 +1698,8 @@ def run_block_size_sweep(
     calib_data: List[torch.Tensor],
     eval_loader: DataLoader,
     fmt_name: str = "int8",
+    *,
+    eval_fn: Optional[Callable] = None,
 ) -> dict:
     """Sweep block sizes for MX format sensitivity analysis.
 
@@ -1528,6 +1708,7 @@ def run_block_size_sweep(
         calib_data: List of calibration batches.
         eval_loader: Evaluation DataLoader.
         fmt_name: Format name (default ``"int8"``).
+        eval_fn: Optional custom evaluation function.
 
     Returns:
         Dict mapping ``"{fmt_name}-blk{size}"`` to experiment result dict.
@@ -1539,16 +1720,167 @@ def run_block_size_sweep(
         cfg = make_op_cfg(fmt_name, gran)
         print(f"  Block size {bs}...")
         try:
-            results[label] = run_experiment(cfg, fp32_model, calib_data, eval_loader)
+            results[label] = run_experiment(
+                cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+            )
         except Exception as e:
             print(f"    FAILED: {e}")
     return results
 
 
 # ---------------------------------------------------------------------------
+# Results reload / redraw
+# ---------------------------------------------------------------------------
+
+
+def plot_from_results(results_path: str, output_dir: Optional[str] = None):
+    """Reload saved results JSON and regenerate all tables and figures.
+
+    Useful for tweaking figure aesthetics without re-running experiments.
+
+    Args:
+        results_path: Path to a ``results.json`` file saved by
+            :func:`run_format_study`.
+        output_dir: Where to write tables and figures.  Defaults to the
+            directory containing ``results_path``.
+    """
+    if output_dir is None:
+        output_dir = os.path.dirname(results_path)
+
+    with open(results_path, "r") as f:
+        all_results = json.load(f)
+
+    os.makedirs(f"{output_dir}/figures", exist_ok=True)
+    os.makedirs(f"{output_dir}/tables", exist_ok=True)
+
+    print(f"Regenerating tables and figures from {results_path}")
+    print(f"Output: {output_dir}")
+
+    # Tables
+    skipped_parts = set()
+    if "part_a" in all_results:
+        print(generate_table_1(all_results["part_a"], output_dir))
+    else:
+        skipped_parts.add("a")
+    if "part_b" in all_results:
+        print(generate_table_2(all_results["part_b"], output_dir))
+    else:
+        skipped_parts.add("b")
+    if "part_c" in all_results:
+        print(generate_table_3(all_results["part_c"], output_dir))
+    else:
+        skipped_parts.add("c")
+    if "part_d" in all_results:
+        print(generate_table_4(all_results["part_d"], output_dir))
+        print(generate_table_5(all_results["part_d"], output_dir))
+    else:
+        skipped_parts.add("d")
+    print(generate_table_6(all_results, output_dir))
+
+    # Figures
+    print("\n### Generating Figures ###")
+    plot_tasks = [
+        (plot_fig1_qsnr_8bit, "part_a", "fig1_qsnr_8bit"),
+        (plot_fig2_qsnr_4bit, "part_b", "fig2_qsnr_4bit"),
+        (plot_fig3_mse_box_8bit, "part_a", "fig3_mse_8bit"),
+        (plot_fig4_mse_box_4bit, "part_b", "fig4_mse_4bit"),
+        (plot_fig5_pot_delta, "part_c", "fig5_pot_delta"),
+        (plot_fig6_histogram_overlay, None, "fig6_histogram"),
+        (plot_fig7_transform_heatmap, "part_d", "fig7_transform_heatmap"),
+        (plot_fig8_transform_pie, "part_d", "fig8_transform_pie"),
+        (plot_fig9_transform_delta, "part_d", "fig9_transform_delta"),
+        (plot_fig10_error_vs_distribution, None, "fig10_error_vs_dist"),
+        (plot_fig11_layer_type_qsnr, None, "fig11_layer_type_qsnr"),
+    ]
+    for fn, part_key, name in plot_tasks:
+        if part_key is not None and part_key not in all_results:
+            print(f"  {name}: SKIPPED (part not in results)")
+            continue
+        try:
+            data = all_results if part_key is None else all_results[part_key]
+            fn(data, output_dir)
+            print(f"  {name}: OK")
+        except Exception as e:
+            print(f"  {name}: FAILED — {e}")
+
+    print(f"\nRegeneration complete. Output in {output_dir}/")
+
 
 if __name__ == "__main__":
-    results = run_format_study(
-        build_model, make_calib_data, make_eval_loader, eval_fn,
+    parser = argparse.ArgumentParser(
+        description="Quantization Format Precision Study",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  PYTHONPATH=. python examples/experiment_format_study.py
+  PYTHONPATH=. python examples/experiment_format_study.py -o results/my_study --seed 1234
+  PYTHONPATH=. python examples/experiment_format_study.py --skip-part-b --skip-part-c
+        """,
     )
-    print("Study complete. Results:", results)
+    parser.add_argument(
+        "-o", "--output-dir", default=None,
+        help="Output directory (default: results/ with timestamped subdir)",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for reproducibility (default: 42)",
+    )
+    parser.add_argument(
+        "--calib-samples", type=int, default=256,
+        help="Number of calibration samples (default: 256)",
+    )
+    parser.add_argument(
+        "--eval-samples", type=int, default=512,
+        help="Number of evaluation samples (default: 512)",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=16,
+        help="Batch size for calibration and evaluation (default: 16)",
+    )
+    parser.add_argument(
+        "--skip-part-a", action="store_true",
+        help="Skip Part A: Basic quantization",
+    )
+    parser.add_argument(
+        "--skip-part-b", action="store_true",
+        help="Skip Part B: Scaling comparison (FP32 vs PoT)",
+    )
+    parser.add_argument(
+        "--skip-part-c", action="store_true",
+        help="Skip Part C: Quantize-Quantize comparison",
+    )
+    parser.add_argument(
+        "--skip-part-d", action="store_true",
+        help="Skip Part D: Transform evaluation",
+    )
+    parser.add_argument(
+        "--plot-from", default=None, metavar="RESULTS_JSON",
+        help="Skip experiments; regenerate tables/figures from a saved results.json",
+    )
+    args = parser.parse_args()
+
+    if args.plot_from:
+        plot_from_results(args.plot_from, args.output_dir)
+    else:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+
+        skip_parts = {}
+        if args.skip_part_a:
+            skip_parts["A"] = True
+        if args.skip_part_b:
+            skip_parts["B"] = True
+        if args.skip_part_c:
+            skip_parts["C"] = True
+        if args.skip_part_d:
+            skip_parts["D"] = True
+
+        results = run_format_study(
+            build_model,
+            lambda: make_calib_data(args.calib_samples, args.batch_size),
+            lambda: make_eval_loader(args.eval_samples, args.batch_size),
+            eval_fn,
+            output_dir=args.output_dir,
+            skip_parts=skip_parts or None,
+        )
+        print("Study complete. Results:", list(results.keys()))

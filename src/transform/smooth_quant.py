@@ -187,3 +187,78 @@ class SmoothQuantTransform(TransformBase):
     def __hash__(self) -> int:
         """Hash based on the scale tensor values."""
         return hash(tuple(self._scale.flatten().tolist()))
+
+
+class SmoothQuantWeightTransform(TransformBase):
+    """Weight-side SmoothQuant compensation: ``forward(W) = W * scale``.
+
+    Companion to :class:`SmoothQuantTransform`.  While the activation side
+    divides by the per-channel scale (``x / s``), the weight side multiplies
+    by the same scale (``W * s``) to maintain mathematical equivalence:
+
+        (X / s) @ (W * s) = X @ W
+
+    The scale is the same tensor used in the activation-side transform,
+    obtained via ``sq_transform.scale``.
+
+    The weight's input-channel dimension is always **dim 1** (``[OC, IC]``
+    for Linear, ``[OC, IC, H, W]`` for Conv).  The scale broadcasts as
+    ``[1, IC, 1, ...]``.
+    """
+
+    invertible = True
+
+    def __init__(self, scale: Tensor):
+        """Create SmoothQuantWeightTransform with a pre-computed per-channel scale.
+
+        Args:
+            scale: 1D tensor of per-channel smoothing factors (same scale
+                   as used in ``SmoothQuantTransform``).  Cloned internally.
+        """
+        object.__setattr__(self, "_scale", scale.detach().clone())
+
+    @property
+    def scale(self) -> Tensor:
+        """The per-channel compensation factor (read-only)."""
+        return self._scale
+
+    def _broadcast_scale(self, W: Tensor) -> Tensor:
+        """Reshape scale to broadcast against weight tensor.
+
+        Weight shape is ``[OC, IC]`` (Linear) or ``[OC, IC, H, W]`` (Conv).
+        Scale is ``[IC]``, so the view is ``[1, IC] + [1] * (ndim-2)``.
+        """
+        shape = [1, -1] + [1] * (W.ndim - 2)
+        return self._scale.view(*shape)
+
+    def forward(self, W: Tensor) -> Tensor:
+        """Apply weight compensation: ``W * scale``.
+
+        Args:
+            W: Weight tensor. Input-channel dimension must be dim 1.
+
+        Returns:
+            Compensated weight (same shape as ``W``).
+        """
+        return W * self._broadcast_scale(W)
+
+    def inverse(self, W_q: Tensor) -> Tensor:
+        """Reverse compensation: ``W_q / scale``.
+
+        Args:
+            W_q: Quantized weight tensor (same shape as original ``W``).
+
+        Returns:
+            De-compensated weight (same shape as ``W_q``).
+        """
+        return W_q / self._broadcast_scale(W_q)
+
+    def __eq__(self, other) -> bool:
+        """Two transforms are equal iff they have the same scale tensor."""
+        if not isinstance(other, SmoothQuantWeightTransform):
+            return False
+        return torch.equal(self._scale, other._scale)
+
+    def __hash__(self) -> int:
+        """Hash based on the scale tensor values."""
+        return hash(tuple(self._scale.flatten().tolist()))
