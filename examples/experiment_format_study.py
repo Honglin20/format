@@ -236,11 +236,12 @@ def run_experiment(
     if observers is None:
         observers = [QSNRObserver(), MSEObserver()]
 
-    model_copy = copy.deepcopy(fp32_model)
+    if not calib_data:
+        raise ValueError("calib_data must contain at least one batch")
+
     session = QuantSession(
-        model_copy, cfg,
+        fp32_model, cfg,
         calibrator=MSEScaleStrategy(),
-        observers=observers,
         keep_fp32=True,
     )
 
