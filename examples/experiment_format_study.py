@@ -888,7 +888,7 @@ def plot_fig3_mse_box_8bit(part_a: dict, output_dir: str):
             labels.append(name)
             colors.append(palette[i % len(palette)])
     if data_to_plot:
-        bp = ax.boxplot(data_to_plot, labels=labels, patch_artist=True)
+        bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
         for patch, c in zip(bp["boxes"], colors):
             patch.set_facecolor(c)
             patch.set_alpha(0.6)
@@ -913,7 +913,7 @@ def plot_fig4_mse_box_4bit(part_b: dict, output_dir: str):
             labels.append(name)
             colors.append(palette[i % len(palette)])
     if data_to_plot:
-        bp = ax.boxplot(data_to_plot, labels=labels, patch_artist=True)
+        bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
         for patch, c in zip(bp["boxes"], colors):
             patch.set_facecolor(c)
             patch.set_alpha(0.6)
@@ -1274,7 +1274,7 @@ def plot_fig11_layer_type_qsnr(all_results: dict, output_dir: str):
     # QSNR boxplot
     ax = axes[0]
     qsnr_data = [ltype_qsnr[lt] for lt in labels]
-    bp = ax.boxplot(qsnr_data, labels=labels, patch_artist=True)
+    bp = ax.boxplot(qsnr_data, tick_labels=labels, patch_artist=True)
     for i, patch in enumerate(bp["boxes"]):
         patch.set_facecolor(colors_cycle[i % len(colors_cycle)])
         patch.set_alpha(0.6)
@@ -1285,7 +1285,7 @@ def plot_fig11_layer_type_qsnr(all_results: dict, output_dir: str):
     # MSE boxplot (log scale)
     ax = axes[1]
     mse_data = [ltype_mse[lt] for lt in labels]
-    bp2 = ax.boxplot(mse_data, labels=labels, patch_artist=True)
+    bp2 = ax.boxplot(mse_data, tick_labels=labels, patch_artist=True)
     for i, patch in enumerate(bp2["boxes"]):
         patch.set_facecolor(colors_cycle[i % len(colors_cycle)])
         patch.set_alpha(0.6)
