@@ -100,23 +100,32 @@ class SmoothQuantTransform(TransformBase):
     to create from activation statistics and a weight tensor; this avoids
     the "uncalibrated" illegal state that a mutable design would allow.
 
-    The activation's channel dimension is always the **last** dim (-1).
+    The activation's channel dimension is configurable via ``channel_axis``
+    (default ``-1``, the last dim). For ``nn.Linear`` activations with shape
+    ``(N, C)`` or ``(B, S, C)`` this is ``-1``. For ``nn.Conv2d`` activations
+    with shape ``(N, C, H, W)`` use ``channel_axis=1``.
     """
 
     invertible = True
 
-    def __init__(self, scale: Tensor):
+    def __init__(self, scale: Tensor, channel_axis: int = -1):
         """Create SmoothQuantTransform with a pre-computed per-channel scale.
 
         Args:
             scale: 1D tensor of per-channel smoothing factors. Must be
                    strictly positive (values <= 0 will produce NaNs in
                    forward/inverse).
+            channel_axis: The dimension along which channels are arranged in
+                          the input tensor. Default ``-1`` (last dim), which
+                          is correct for ``nn.Linear`` activations
+                          ``(..., C)``. Use ``1`` for ``nn.Conv2d``
+                          activations ``(N, C, H, W)``.
 
         The scale is cloned internally to prevent external mutation.
         Effectively immutable: no public setter is provided.
         """
         object.__setattr__(self, "_scale", scale.detach().clone())
+        object.__setattr__(self, "_channel_axis", channel_axis)
 
     # Convenience read-only access — no setter
     @property
@@ -124,21 +133,36 @@ class SmoothQuantTransform(TransformBase):
         """The per-channel smoothing factor (read-only)."""
         return self._scale
 
+    @property
+    def channel_axis(self) -> int:
+        """The channel axis for broadcasting (read-only)."""
+        return self._channel_axis
+
     def _broadcast_scale(self, x: Tensor) -> Tensor:
         """Reshape ``self._scale`` to broadcast against ``x``.
 
-        ``x`` has channel dim at the last position: ``[..., C]``.
-        ``scale`` is ``[C]``, so the view is ``[1, ..., 1, C]``.
+        ``x`` has channel dim at ``self._channel_axis``.
+        ``scale`` is ``[C]``, so the view is ``[1, ..., C, ..., 1]`` with
+        ``C`` placed at the channel axis position.
+
+        Raises:
+            ValueError: If ``self._channel_axis`` is out of bounds for ``x``.
         """
-        shape = [1] * (x.ndim - 1) + [-1]
+        if not (-x.ndim <= self._channel_axis < x.ndim):
+            raise ValueError(
+                f"channel_axis={self._channel_axis} is out of bounds for "
+                f"tensor with {x.ndim} dimensions"
+            )
+        shape = [1] * x.ndim
+        shape[self._channel_axis] = -1
         return self._scale.view(*shape)
 
     def forward(self, x: Tensor) -> Tensor:
         """Apply SmoothQuant: ``x / scale``.
 
         Args:
-            x: Input activation tensor. The channel dimension must be the
-               last dim: ``[..., C]``.
+            x: Input activation tensor. The channel dimension is
+               ``self.channel_axis``.
 
         Returns:
             Smoothed activation (same shape as ``x``).
@@ -150,7 +174,7 @@ class SmoothQuantTransform(TransformBase):
 
         Args:
             x_q: Quantized (or post-quantization) tensor with channel dim
-                 as the last dim.
+                 at ``self.channel_axis``.
 
         Returns:
             Scale-restored tensor (same shape as ``x_q``).
@@ -179,86 +203,14 @@ class SmoothQuantTransform(TransformBase):
         return SmoothQuantTransform(scale)
 
     def __eq__(self, other) -> bool:
-        """Two transforms are equal iff they have the same scale tensor."""
+        """Two transforms are equal iff they have the same scale and channel_axis."""
         if not isinstance(other, SmoothQuantTransform):
             return False
-        return torch.equal(self._scale, other._scale)
+        return (
+            self._channel_axis == other._channel_axis
+            and torch.equal(self._scale, other._scale)
+        )
 
     def __hash__(self) -> int:
-        """Hash based on the scale tensor values."""
-        return hash(tuple(self._scale.flatten().tolist()))
-
-
-class SmoothQuantWeightTransform(TransformBase):
-    """Weight-side SmoothQuant compensation: ``forward(W) = W * scale``.
-
-    Companion to :class:`SmoothQuantTransform`.  While the activation side
-    divides by the per-channel scale (``x / s``), the weight side multiplies
-    by the same scale (``W * s``) to maintain mathematical equivalence:
-
-        (X / s) @ (W * s) = X @ W
-
-    The scale is the same tensor used in the activation-side transform,
-    obtained via ``sq_transform.scale``.
-
-    The weight's input-channel dimension is always **dim 1** (``[OC, IC]``
-    for Linear, ``[OC, IC, H, W]`` for Conv).  The scale broadcasts as
-    ``[1, IC, 1, ...]``.
-    """
-
-    invertible = True
-
-    def __init__(self, scale: Tensor):
-        """Create SmoothQuantWeightTransform with a pre-computed per-channel scale.
-
-        Args:
-            scale: 1D tensor of per-channel smoothing factors (same scale
-                   as used in ``SmoothQuantTransform``).  Cloned internally.
-        """
-        object.__setattr__(self, "_scale", scale.detach().clone())
-
-    @property
-    def scale(self) -> Tensor:
-        """The per-channel compensation factor (read-only)."""
-        return self._scale
-
-    def _broadcast_scale(self, W: Tensor) -> Tensor:
-        """Reshape scale to broadcast against weight tensor.
-
-        Weight shape is ``[OC, IC]`` (Linear) or ``[OC, IC, H, W]`` (Conv).
-        Scale is ``[IC]``, so the view is ``[1, IC] + [1] * (ndim-2)``.
-        """
-        shape = [1, -1] + [1] * (W.ndim - 2)
-        return self._scale.view(*shape)
-
-    def forward(self, W: Tensor) -> Tensor:
-        """Apply weight compensation: ``W * scale``.
-
-        Args:
-            W: Weight tensor. Input-channel dimension must be dim 1.
-
-        Returns:
-            Compensated weight (same shape as ``W``).
-        """
-        return W * self._broadcast_scale(W)
-
-    def inverse(self, W_q: Tensor) -> Tensor:
-        """Reverse compensation: ``W_q / scale``.
-
-        Args:
-            W_q: Quantized weight tensor (same shape as original ``W``).
-
-        Returns:
-            De-compensated weight (same shape as ``W_q``).
-        """
-        return W_q / self._broadcast_scale(W_q)
-
-    def __eq__(self, other) -> bool:
-        """Two transforms are equal iff they have the same scale tensor."""
-        if not isinstance(other, SmoothQuantWeightTransform):
-            return False
-        return torch.equal(self._scale, other._scale)
-
-    def __hash__(self) -> int:
-        """Hash based on the scale tensor values."""
-        return hash(tuple(self._scale.flatten().tolist()))
+        """Hash based on the scale tensor values and channel_axis."""
+        return hash((self._channel_axis, tuple(self._scale.flatten().tolist())))
