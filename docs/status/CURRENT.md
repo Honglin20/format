@@ -1,9 +1,9 @@
 # Current Task
 
-**Task ID**: P8 — Format Precision Study (Task 1/11)
+**Task ID**: P8 — Format Precision Study (Review Fix Pass)
 **Plan**: docs/plans/2026-04-28-format-study-plan.md
 **Design**: docs/plans/2026-04-28-format-study-design.md
-**Branch**: feature/refactor-src
+**Branch**: worktrees/format-study
 **Tests baseline**: 1305 passed, 0 xfail
 
 ## Progress
@@ -14,33 +14,30 @@
 - [x] **Task 4: Part B — 4-bit format comparison** ✅
 - [x] **Task 5: Part C — FP32 vs PoT scaling comparison** ✅
 - [x] **Task 6: Part D — Transform analysis (SmoothQuant + Hadamard)** ✅
-- [ ] Task 7: Block size sensitivity sweep
-- [ ] Task 8: Table generation (6 tables)
-- [ ] Task 9: Figure generation (11 figures)
-- [ ] Task 10: Cleanup, defaults, and documentation
+- [x] **Task 7: Block size sensitivity sweep** ✅
+- [x] **Task 8: Table generation (6 tables)** ✅
+- [x] **Task 9: Figure generation (11 figures)** ✅
+- [x] **Task 10: Cleanup, defaults, and documentation** ✅
+- [x] **Review fix pass — 18 issues (C1-C3, I1-I5, M1-M7, S1-S4)** ✅ (commit 92f870c)
 
 ## 下一步（具体动作）
 
-Implement Task 7: block size sensitivity sweep over {16, 32, 64, 128} for 8-bit and 4-bit MX formats.
+Experiment script is fully functional. User should verify end-to-end by running:
+`PYTHONPATH=. python examples/experiment_format_study.py`
 
 ## 断点续传必读文件
 
-1. `examples/experiment_format_study.py`（全文，包含 run_part_a/b/c/d）
-2. `docs/plans/2026-04-28-format-study-plan.md`（全文）
-3. `docs/plans/2026-04-28-format-study-design.md`（实验矩阵）
+1. `examples/experiment_format_study.py`（全文，含所有 review 修复）
+2. `src/transform/smooth_quant.py`（SmoothQuantWeightTransform companion class）
+3. `src/transform/__init__.py`（SmoothQuantWeightTransform export）
+4. `docs/plans/2026-04-28-format-study-plan.md`（全文）
 
 ## 关键经验记录
 
-1. **Format 子类签名同步**：FormatBase 改签名后，所有子类的 `quantize()` 必须同步更新
-2. **__eq__/__hash__ 必须实现**：任何可能用作 frozen dataclass 字段的 ABC，必须在 ABC 层声明 `@abstractmethod`
-3. **KL 逐 slice 非逐 position**：`_compute_kl_divergence` 将 axis 排到首维后 reshape(n_slices, -1)
-4. **autograd Function 参数计数**：新增 tensor 参数到 `apply()` 后，`backward()` 和 `symbolic()` 返回值数量必须同步 +1
-5. **SmoothQuant 不可变**：scale 在 `__init__` 传入，`from_calibration()` 工厂方法
-6. **LookupFormat quantize() 不能少**：即使只有 `quantize_elemwise()` 不同，也必须 override `quantize()`（否则 ABC 无法实例化）
-7. **NaN 污染 amax**：per_channel 路径中 `amax = max(|x|, dim=axis)` 会把 NaN 传播到整个 channel
-8. **QuantSession 设计原则**：新层非替代 — `QuantSession` 是现有 API 之上的薄层
-9. **compare_sessions fp32 baseline**：从第一个 session 的 `fp32_model` 自动提取
-10. **PreScaleTransform 引用模式**：持有 scale tensor 引用（非拷贝），register_buffer 后再创建 Transform 以保证 load_state_dict 一致性
-11. **LSQ 梯度流**：pre_scale 在 custom autograd Function 内部无梯度，必须在 module 外部手动应用：`module(x * pre_scale) / pre_scale`
-12. **PoT 投影梯度下降**：每步 optimizer.step() 后 `pre_scale.data = 2**round(log2(scale))`，微小模型 per-tensor 效果有限，per-channel 更有价值
-13. **_quantize_per_block 不转发 scale**：CalibrationSession 分配 _output_scale (amax) 给所有模块，但 _quantize_mx 的 scale 参数期望 shared exponent 而非 amax；per_block 必须忽略外部 scale 以避免形状不匹配
+1. **SmoothQuant weight compensation 必须匹配原文**：activation 用 x/s（dim=-1），weight 用 W*s（dim=1），两个 Transform 独立。`_make_sq_op_cfg` 中 weight 角色必须用 SmoothQuantWeightTransform
+2. **eval_fn 静默丢失**：所有 Part runner 和 `run_experiment` 必须逐层转发 `eval_fn` 参数，缺少即静默退回默认 accuracy
+3. **Per-layer config fallback**：`sq_per_layer_cfg` 只包含 Linear/Conv 的条目，其他模块（LayerNorm）会 fallback 到 `_EMPTY_CFG`（不量化），造成 QSNR 人为膨胀
+4. **HistogramObserver key 名**：返回 `fp32_hist`/`quant_hist`/`err_hist`（torch.histc counts），不是 `hist_bins`/`hist_counts`
+5. **Format family 颜色一致性**：MXINT-8/MXINT-4 共享蓝色系，MXFP-8/MXFP-4 共享暖色系；Wong 2011 色盲友好调色板
+6. **Fig 9 子图分离**：格式间 layer 数量差异大时（ToyMLP vs transformer），单 chart 堆叠 bars 会重叠；按格式拆分子图解决
+7. **CLI argparse**：支持 `--skip-part-{a,b,c,d}`、`--plot-from results.json`（redraw 免重跑）
