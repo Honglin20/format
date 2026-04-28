@@ -700,7 +700,7 @@ class TestPreScaleIntegration:
                 session(batch)
 
         # Step 2: Initialize pre-scales
-        count = session.initialize_pre_scales(calib_data, init="absmax")
+        count = session.initialize_pre_scales(calib_data, init="ones")
         assert count > 0
 
         # Step 3: LSQ optimize
@@ -742,7 +742,7 @@ class TestPreScaleIntegration:
                 session(batch)
 
         # Initialize with pot=True
-        count = session.initialize_pre_scales(calib_data, init="absmax", pot=True)
+        count = session.initialize_pre_scales(calib_data, init="ones", pot=True)
         assert count > 0
 
         # LSQ optimize with pot=True

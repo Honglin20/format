@@ -28,8 +28,10 @@ class PreScaleTransform(TransformBase):
     def __init__(self, scale: Tensor, pot: bool = False):
         if not isinstance(scale, torch.Tensor):
             raise TypeError(f"scale must be a torch.Tensor, got {type(scale).__name__}")
-        object.__setattr__(self, "scale", scale)
-        object.__setattr__(self, "pot", pot)
+        if not isinstance(pot, bool):
+            raise TypeError(f"pot must be a bool, got {type(pot).__name__}")
+        self.scale = scale
+        self.pot = pot
 
     def _effective_scale(self, x: Tensor) -> Tensor:
         """Return the scale tensor broadcastable to *x*, optionally PoT-projected."""

@@ -260,19 +260,19 @@ class QuantSession:
     def initialize_pre_scales(
         self,
         calib_data: List[torch.Tensor],
-        init: str = "absmax",
+        init: str = "ones",
         pot: bool = False,
     ) -> int:
         """Initialize ``_pre_scale`` buffers on all quantized modules.
 
-        Creates per-tensor pre-scale tensors initialized from calibration
-        data, registers them as buffers, and updates each module's cfg
-        to route quantization through ``PreScaleTransform``.
+        Creates per-tensor pre-scale tensors, registers them as buffers,
+        and updates each module's cfg to route quantization through
+        ``PreScaleTransform``.
 
         Args:
             calib_data: List of input tensors from calibration.
-            init: Initialization method — ``"absmax"`` (per-tensor absmax
-                  of fp32 outputs) or ``"ones"`` (all ones).
+            init: Initialization method — ``"ones"`` (identity, recommended
+                  for LSQ optimization).
             pot: If True, create a power-of-two PreScaleTransform
                  (hardware-friendly bit-shift scaling).
 
@@ -292,9 +292,7 @@ class QuantSession:
                 continue
 
             # Compute initial pre-scale
-            if init == "absmax":
-                init_scale = self._compute_pre_scale(name, module, calib_data, out_channels)
-            elif init == "ones":
+            if init == "ones":
                 init_scale = torch.ones(1)
             else:
                 raise ValueError(f"Unknown init method: {init!r}")
@@ -344,16 +342,6 @@ class QuantSession:
         if hasattr(module, "num_features"):
             return module.num_features
         return None
-
-    @staticmethod
-    def _compute_pre_scale(name, module, calib_data, out_channels):
-        """Compute per-tensor absmax pre-scale from fp32 outputs via hooks.
-
-        Runs the fp32 model (if available) and collects this module's
-        output to compute absmax. Falls back to ones if fp32 is unavailable.
-        """
-        # For absmax, we'd need the fp32 model. Return ones as default.
-        return torch.ones(1)
 
     # ------------------------------------------------------------------
     # Delegation

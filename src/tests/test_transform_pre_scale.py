@@ -191,3 +191,8 @@ class TestPreScaleTransform:
         from src.transform.pre_scale import PreScaleTransform
         t = PreScaleTransform(scale=torch.ones(3), pot=True)
         assert "pot=True" in repr(t)
+
+    def test_pot_rejects_non_bool(self):
+        from src.transform.pre_scale import PreScaleTransform
+        with pytest.raises(TypeError, match="pot must be a bool"):
+            PreScaleTransform(scale=torch.ones(1), pot="yes")

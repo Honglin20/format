@@ -171,13 +171,14 @@ class LayerwiseScaleOptimizer:
             optimized_scale = pre_scale.detach()
             optimized_scales[name] = optimized_scale
 
-            # Inject frozen PreScaleTransform into cfg for inference
-            original_cfg = module.cfg
-            frozen_transform = PreScaleTransform(scale=optimized_scale, pot=self.pot)
-            module.cfg = _replace_transform(original_cfg, frozen_transform)
-
-            # Persist as module buffer for inference
+            # Persist as module buffer first, then create transform
+            # referencing the buffer so load_state_dict keeps them in sync
             module.register_buffer("_pre_scale", optimized_scale)
+            original_cfg = module.cfg
+            frozen_transform = PreScaleTransform(
+                scale=module._pre_scale, pot=self.pot,
+            )
+            module.cfg = _replace_transform(original_cfg, frozen_transform)
 
         return optimized_scales
 
@@ -205,10 +206,9 @@ class LayerwiseScaleOptimizer:
 
         Currently a forward-looking implementation — buffers are created
         but not yet consumed by module forwards (which use per-tensor).
+        Uses the scheme's channel_axis for correct dimension alignment.
         """
         from src.scheme.granularity import GranularityMode
-
-        stacked = torch.cat([t.reshape(-1, t.shape[-1]) for t in targets], dim=0)
 
         for f_name in module.cfg.__dataclass_fields__:
             scheme = getattr(module.cfg, f_name)
@@ -217,6 +217,13 @@ class LayerwiseScaleOptimizer:
             if scheme.granularity.mode != GranularityMode.PER_CHANNEL:
                 continue
 
+            # Use the scheme's declared channel axis (not always last dim)
+            channel_axis = scheme.granularity.channel_axis
+            stacked = torch.cat(
+                [t.transpose(channel_axis, -1).reshape(-1, t.shape[channel_axis])
+                 for t in targets],
+                dim=0,
+            )
             amax = torch.amax(torch.abs(stacked), dim=0).clamp(min=1e-12)
             module.register_buffer(f"_internal_amax_{f_name}", amax)
 
