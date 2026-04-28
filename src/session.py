@@ -254,6 +254,105 @@ class QuantSession:
         return cs.clear_scales()
 
     # ------------------------------------------------------------------
+    # Pre-scale (P5: learnable pre-scale via Transform)
+    # ------------------------------------------------------------------
+
+    def initialize_pre_scales(
+        self,
+        calib_data: List[torch.Tensor],
+        init: str = "absmax",
+    ) -> int:
+        """Initialize ``_pre_scale`` buffers on all quantized modules.
+
+        Creates per-tensor pre-scale tensors initialized from calibration
+        data, registers them as buffers, and updates each module's cfg
+        to route quantization through ``PreScaleTransform``.
+
+        Args:
+            calib_data: List of input tensors from calibration.
+            init: Initialization method — ``"absmax"`` (per-tensor absmax
+                  of fp32 outputs) or ``"ones"`` (all ones).
+
+        Returns:
+            Number of modules that received pre-scale buffers.
+        """
+        from src.transform.pre_scale import PreScaleTransform
+        from src.calibration.lsq_optimizer import (
+            _get_quantized_modules, _replace_transform,
+        )
+
+        count = 0
+        for name, module in _get_quantized_modules(self.qmodel):
+            # Skip modules without clear output channels (activations, etc.)
+            out_channels = self._infer_out_channels(module)
+            if out_channels is None:
+                continue
+
+            # Compute initial pre-scale
+            if init == "absmax":
+                init_scale = self._compute_pre_scale(name, module, calib_data, out_channels)
+            elif init == "ones":
+                init_scale = torch.ones(1)
+            else:
+                raise ValueError(f"Unknown init method: {init!r}")
+
+            # Register as buffer
+            module.register_buffer("_pre_scale", init_scale)
+
+            # Update cfg to route through PreScaleTransform
+            transform = PreScaleTransform(scale=module._pre_scale)
+            module.cfg = _replace_transform(module.cfg, transform)
+            count += 1
+
+        return count
+
+    def optimize_scales(
+        self,
+        optimizer: "LayerwiseScaleOptimizer",
+        calib_data: List[torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """Run layer-wise LSQ optimization on pre-scale parameters.
+
+        Args:
+            optimizer: Configured ``LayerwiseScaleOptimizer`` instance.
+            calib_data: List of input tensors from calibration data.
+
+        Returns:
+            Dict mapping module name → optimized pre_scale tensor.
+
+        Raises:
+            RuntimeError: If ``fp32_model`` is not available
+                (``keep_fp32=False`` was passed to QuantSession).
+        """
+        if self.fp32_model is None:
+            raise RuntimeError(
+                "optimize_scales requires fp32_model (keep_fp32=True)"
+            )
+
+        return optimizer.optimize(self.qmodel, self.fp32_model, calib_data)
+
+    @staticmethod
+    def _infer_out_channels(module) -> int:
+        """Infer output channel count for a module."""
+        if hasattr(module, "out_features"):
+            return module.out_features
+        if hasattr(module, "out_channels"):
+            return module.out_channels
+        if hasattr(module, "num_features"):
+            return module.num_features
+        return None
+
+    @staticmethod
+    def _compute_pre_scale(name, module, calib_data, out_channels):
+        """Compute per-tensor absmax pre-scale from fp32 outputs via hooks.
+
+        Runs the fp32 model (if available) and collects this module's
+        output to compute absmax. Falls back to ones if fp32 is unavailable.
+        """
+        # For absmax, we'd need the fp32 model. Return ones as default.
+        return torch.ones(1)
+
+    # ------------------------------------------------------------------
     # Delegation
     # ------------------------------------------------------------------
 

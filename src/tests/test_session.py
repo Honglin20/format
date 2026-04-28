@@ -583,3 +583,100 @@ def test_compare_models_basic():
     assert "fp32" in result
     assert "quant" in result
     assert "delta" in result
+
+
+# ---------------------------------------------------------------------------
+# Pre-Scale Integration (P5)
+# ---------------------------------------------------------------------------
+
+class TestPreScaleIntegration:
+    """Tests for QuantSession.initialize_pre_scales() and optimize_scales()."""
+
+    def test_initialize_pre_scales_adds_buffers(self):
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+
+        # Before: no _pre_scale buffers
+        for _, mod in session.qmodel.named_modules():
+            assert not hasattr(mod, "_pre_scale")
+
+        # Initialize
+        calib_data = [torch.randn(8, 4) for _ in range(4)]
+        count = session.initialize_pre_scales(calib_data, init="ones")
+
+        assert count > 0
+
+        # After: _pre_scale buffers on quantized modules
+        found = 0
+        for _, mod in session.qmodel.named_modules():
+            if hasattr(mod, "_pre_scale"):
+                found += 1
+                assert isinstance(mod._pre_scale, torch.Tensor)
+        assert found == count
+
+    def test_optimize_scales_runs(self):
+        from src.session import QuantSession
+        from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+
+        calib_data = [torch.randn(8, 4) for _ in range(4)]
+        session.initialize_pre_scales(calib_data, init="ones")
+
+        opt = LayerwiseScaleOptimizer(num_steps=10, num_batches=2, lr=0.01)
+        scales = session.optimize_scales(opt, calib_data)
+
+        assert isinstance(scales, dict)
+        assert len(scales) > 0
+
+    def test_initialize_pre_scales_preserves_existing_cfg(self):
+        """After initialization, module.cfg should still be OpQuantConfig."""
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+
+        calib_data = [torch.randn(8, 4) for _ in range(4)]
+        session.initialize_pre_scales(calib_data, init="ones")
+
+        for _, mod in session.qmodel.named_modules():
+            if hasattr(mod, "cfg") and not getattr(mod, "_is_passthrough", False):
+                assert isinstance(mod.cfg, OpQuantConfig)
+
+    def test_optimize_scales_requires_fp32(self):
+        from src.session import QuantSession
+        from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg, keep_fp32=False)
+
+        calib_data = [torch.randn(8, 4) for _ in range(4)]
+        opt = LayerwiseScaleOptimizer(num_steps=5, num_batches=2)
+
+        with pytest.raises(RuntimeError, match="keep_fp32=True"):
+            session.optimize_scales(opt, calib_data)
+
+    def test_initialize_pre_scales_invalid_init(self):
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+
+        with pytest.raises(ValueError, match="Unknown init method"):
+            session.initialize_pre_scales([torch.randn(8, 4)], init="invalid")
+
+    def test_forward_after_pre_scale_init(self):
+        """Forward pass works after initialize_pre_scales."""
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+
+        session.initialize_pre_scales([torch.randn(8, 4) for _ in range(4)], init="ones")
+        session.eval()
+        out = session(torch.randn(4, 4))
+        assert out.shape == (4, 3)
+        assert not torch.isnan(out).any()
