@@ -680,3 +680,46 @@ class TestPreScaleIntegration:
         out = session(torch.randn(4, 4))
         assert out.shape == (4, 3)
         assert not torch.isnan(out).any()
+
+    def test_e2e_pre_scale_pipeline(self):
+        """Full pipeline: calibrate -> initialize -> optimize -> compare."""
+        from src.session import QuantSession
+        from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+
+        torch.manual_seed(42)
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg, keep_fp32=True)
+
+        # Create calibration data
+        calib_data = [torch.randn(8, 4) for _ in range(6)]
+
+        # Step 1: Calibrate
+        with session.calibrate():
+            for batch in calib_data:
+                session(batch)
+
+        # Step 2: Initialize pre-scales
+        count = session.initialize_pre_scales(calib_data, init="absmax")
+        assert count > 0
+
+        # Step 3: LSQ optimize
+        opt = LayerwiseScaleOptimizer(num_steps=20, num_batches=3, lr=0.01)
+        scales = session.optimize_scales(opt, calib_data)
+        # optimizer processes all quantized modules, initialize_pre_scales only
+        # creates buffers for modules with known output channels (skips activations)
+        assert len(scales) >= count
+
+        # Step 4: Forward pass works
+        out = session(torch.randn(4, 4))
+        assert out.shape == (4, 3)
+        assert not torch.isnan(out).any()
+
+        # Step 5: Mode toggle works
+        session.use_fp32()
+        fp32_out = session(torch.randn(4, 4))
+        session.use_quant()
+        q_out = session(torch.randn(4, 4))
+        assert q_out.shape == fp32_out.shape
+        assert not torch.isnan(q_out).any()
+        assert not torch.isnan(fp32_out).any()
