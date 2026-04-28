@@ -8,10 +8,10 @@ import os
 import pytest
 import torch
 
-from src.quantize.elemwise import quantize_elemwise_op
-from src.quantize.mx_quantize import quantize_mx_op
+from src.quantize.elemwise import quantize
+from src.quantize.mx_quantize import quantize_mx
 from src.quantize.bfloat_quantize import quantize_bfloat
-from src.specs.specs import finalize_mx_specs
+from src.tests._compat import scheme_from_mx_specs
 
 GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "golden")
 
@@ -33,9 +33,12 @@ ELEMWISE_FORMATS = [
 @pytest.mark.parametrize("cfg_name", ELEMWISE_FORMATS)
 def test_elemwise_quantize_golden(cfg_name):
     golden = _load_golden(f"elemwise_quantize_{cfg_name}.pt")
-    new_out = quantize_elemwise_op(
+    info = scheme_from_mx_specs(golden["mx_specs"])
+    assert info is not None, f"Expected non-None scheme for {cfg_name}"
+    new_out = quantize(
         golden["input"].clone(),
-        mx_specs=finalize_mx_specs(golden["mx_specs"]),
+        info.scheme,
+        allow_denorm=info.allow_denorm,
     )
     assert torch.equal(new_out, golden["output"]), \
         f"elemwise golden mismatch for {cfg_name}"
@@ -54,9 +57,12 @@ BFLOAT_FORMATS = [
 @pytest.mark.parametrize("cfg_name", BFLOAT_FORMATS)
 def test_quantize_bfloat_golden(cfg_name):
     golden = _load_golden(f"quantize_bfloat_{cfg_name}.pt")
+    info = scheme_from_mx_specs(golden["mx_specs"])
+    assert info is not None, f"Expected non-None scheme for {cfg_name}"
     new_out = quantize_bfloat(
         golden["input"].clone(),
-        mx_specs=finalize_mx_specs(golden["mx_specs"]),
+        info.scheme,
+        allow_denorm=info.allow_denorm,
     )
     assert torch.equal(new_out, golden["output"]), \
         f"bfloat golden mismatch for {cfg_name}"
@@ -75,10 +81,11 @@ MX_QUANTIZE_FORMATS = [
 @pytest.mark.parametrize("fmt", MX_QUANTIZE_FORMATS)
 def test_mx_quantize_golden(fmt):
     golden = _load_golden(f"mx_quantize_{fmt}_bs32.pt")
-    new_out = quantize_mx_op(
+    info = scheme_from_mx_specs(golden["mx_specs"], use_mx_format=True)
+    assert info is not None, f"Expected non-None scheme for {fmt}"
+    new_out = quantize_mx(
         golden["input"].clone(),
-        mx_specs=finalize_mx_specs(golden["mx_specs"]),
-        elem_format=fmt,
+        info.scheme,
         axes=[-1],
     )
     assert torch.equal(new_out, golden["output"]), \

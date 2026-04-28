@@ -1,6 +1,6 @@
 """
 MX block quantization: _shared_exponents, _reshape_to_blocks,
-_quantize_mx, quantize_mx_op.
+_quantize_mx, quantize_mx.
 
 Rewritten from mx/mx_ops.py. Key changes:
 - Uses FormatBase.from_str() instead of _get_format_params() / ElemFormat
@@ -10,8 +10,6 @@ Rewritten from mx/mx_ops.py. Key changes:
 """
 import torch
 from src.formats.base import FormatBase
-from src.quantize.elemwise import _quantize_elemwise_core
-from src.specs.specs import mx_assert_test
 
 FP32_EXPONENT_BIAS = 127
 FP32_MIN_NORMAL = 2 ** (-FP32_EXPONENT_BIAS + 1)
@@ -82,7 +80,7 @@ def _reshape_to_blocks(A, axes, block_size):
     for axis in axes:
         pre_pad_size = orig_shape[axis]
         if isinstance(pre_pad_size, torch.Tensor):
-            pre_pad_size = int(pre_pad_size.value)
+            pre_pad_size = int(pre_pad_size.item())
         if pre_pad_size % block_size == 0:
             pad[2 * axis] = 0
         else:
@@ -135,7 +133,16 @@ def _quantize_mx(
     block_size=0,
     round_mode="nearest",
     flush_fp32_subnorms=False,
+    scale=None,
 ):
+    """Quantize tensor A using MX-style per-block shared exponents.
+
+    Args:
+        scale: Optional pre-computed shared exponent tensor.  If provided,
+            ``_shared_exponents()`` is skipped and this is used directly.
+            Must have the correct shape for broadcasting with the
+            (possibly tiled) ``A`` tensor.
+    """
     # Shortcut for no quantization
     if elem_format is None:
         return A
@@ -147,34 +154,33 @@ def _quantize_mx(
     axes = [axes] if type(axes) == int else axes
     axes = [x + A.ndim if x < 0 else x for x in axes]
 
-    # Get format parameters from FormatBase
+    # Get format instance
     if isinstance(elem_format, str):
         fmt = FormatBase.from_str(elem_format)
     else:
         fmt = elem_format
-    ebits = fmt.ebits
-    mbits = fmt.mbits
-    emax = fmt.emax
-    max_norm = fmt.max_norm
 
     # Perform tiling to the hardware vector size
     if block_size > 0:
         A, axes, orig_shape, padded_shape = _reshape_to_blocks(A, axes, block_size)
 
-    # Quantize
-    shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
+    if scale is not None:
+        shared_exp = scale
+    else:
+        # Quantize
+        shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
 
-    # Get shared exponents
-    shared_exp = _shared_exponents(
-        A, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
-    )
+        # Get shared exponents
+        shared_exp = _shared_exponents(
+            A, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
+        )
 
     # Flush subnormal FP32 inputs to zero
     if flush_fp32_subnorms:
         A = A * (shared_exp > -FP32_EXPONENT_BIAS).type(A.dtype)
 
     # Offset the max exponent by the largest representable exponent
-    shared_exp = shared_exp - emax
+    shared_exp = shared_exp - fmt.emax
 
     scale_emax = 2**(scale_bits-1) - 1
     shared_exp[shared_exp > scale_emax] = float("NaN")
@@ -182,9 +188,8 @@ def _quantize_mx(
 
     A = A / (2**shared_exp)
 
-    A = _quantize_elemwise_core(
-            A, mbits, ebits, max_norm, round_mode=round_mode,
-            allow_denorm=True, saturate_normals=True)
+    A = fmt.quantize_elemwise(A, round_mode=round_mode,
+                              allow_denorm=True, saturate_normals=True)
 
     A = A * (2**shared_exp)
 
@@ -199,31 +204,60 @@ def _quantize_mx(
 # Public API
 # ---------------------------------------------------------------------------
 
-def quantize_mx_op(
+def quantize_mx(
     A,
-    mx_specs,
-    elem_format=None,
-    block_size=None,
+    scheme,
     axes=None,
-    round_mode="nearest",
-    expand_and_reshape=False,
+    scale_bits=8,
+    shared_exp_method="max",
+    flush_fp32_subnorms=False,
 ):
-    mx_assert_test(mx_specs)
+    """Quantize tensor A using MX block quantization.
 
-    if elem_format is None:
+    When *scheme.transform* is not IdentityTransform, delegates to the
+    standard three-step :func:`quantize` flow (ADR-001 compliant).
+
+    When *scheme.transform* is IdentityTransform, uses the direct MX
+    path (``_quantize_mx``) as a fast path.
+
+    Args:
+        A: Input tensor.
+        scheme: QuantScheme. granularity.mode must be PER_BLOCK or PER_TENSOR.
+        axes: Axes for shared exponent computation.
+        scale_bits: Bits for shared scale (sign + magnitude). Default: 8.
+        shared_exp_method: "max" or "none". Default: "max".
+        flush_fp32_subnorms: Flush subnormal FP32 blocks to zero.
+
+    Returns:
+        Quantized tensor with same shape as A.
+
+    Raises:
+        ValueError: If scheme.granularity is PER_CHANNEL.
+    """
+    if scheme is None:
         return A
 
-    if block_size is None:
-        block_size = mx_specs["block_size"]
+    from src.scheme.granularity import GranularityMode
+    from src.scheme.transform import IdentityTransform
 
-    if mx_specs["scale_bits"] == 0:
-        scale_bits = 8
-    else:
-        scale_bits = mx_specs["scale_bits"]
+    if not isinstance(scheme.transform, IdentityTransform):
+        from src.quantize.elemwise import quantize
+
+        return quantize(A, scheme)
+    if scheme.granularity.mode == GranularityMode.PER_CHANNEL:
+        raise ValueError(
+            "quantize_mx does not support PER_CHANNEL granularity. "
+            "Use quantize(x, scheme) for per-channel quantization."
+        )
+
+    fmt = scheme.format
+    block_size = scheme.block_size
+    round_mode = scheme.round_mode
 
     return _quantize_mx(
-            A, scale_bits,
-            elem_format, block_size=block_size,
-            axes=axes, round_mode=round_mode,
-            shared_exp_method=mx_specs["shared_exp_method"],
-            flush_fp32_subnorms=mx_specs["mx_flush_fp32_subnorms"])
+        A, scale_bits, fmt,
+        block_size=block_size,
+        axes=axes, round_mode=round_mode,
+        shared_exp_method=shared_exp_method,
+        flush_fp32_subnorms=flush_fp32_subnorms,
+    )

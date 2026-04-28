@@ -159,5 +159,8 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Claude Code worktrees
+.claude/worktrees/
+
 # Golden reference files (large binary .pt files)
 src/tests/golden/

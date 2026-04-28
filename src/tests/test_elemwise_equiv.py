@@ -17,6 +17,8 @@ from mx.elemwise_ops import (
 from mx.formats import ElemFormat
 from mx.specs import finalize_mx_specs as old_finalize
 from src.tests.equivalence import assert_bit_identical
+from src.scheme.quant_scheme import QuantScheme
+from src.formats.fp_formats import FPFormat
 
 
 # ---------------------------------------------------------------------------
@@ -151,30 +153,27 @@ def test_quantize_elemwise_core_zeros():
 # ---------------------------------------------------------------------------
 
 MX_CONFIGS = [
-    {"bfloat": 16},
-    {"bfloat": 12},
-    {"w_elem_format": "fp8_e4m3", "a_elem_format": "fp8_e4m3", "block_size": 32, "bfloat": 16},
+    ("bfloat16", QuantScheme.per_tensor("bfloat16"), {"bfloat": 16}),
+    ("bfloat12", QuantScheme(format=FPFormat(name="bfloat12", ebits=8, mbits=5), round_mode="nearest"), {"bfloat": 12}),
 ]
 
 
-@pytest.mark.parametrize("config", MX_CONFIGS)
-def test_quantize_elemwise_op(config):
-    from src.quantize.elemwise import quantize_elemwise_op
-    from src.specs.specs import finalize_mx_specs as new_finalize
+@pytest.mark.parametrize("name,scheme,old_config", MX_CONFIGS, ids=[c[0] for c in MX_CONFIGS])
+def test_quantize_elemwise_op(name, scheme, old_config):
+    from src.quantize.elemwise import quantize
     torch.manual_seed(42)
     A = torch.randn(4, 32)
-    old_specs = old_finalize(config.copy())
-    new_specs = new_finalize(config.copy())
+    old_specs = old_finalize(old_config.copy())
     old_out = old_quantize_op(A.clone(), mx_specs=old_specs)
-    new_out = quantize_elemwise_op(A.clone(), mx_specs=new_specs)
-    assert torch.equal(old_out, new_out), f"elemwise_op mismatch for {config}"
+    new_out = quantize(A.clone(), scheme)
+    assert torch.equal(old_out, new_out), f"elemwise_op mismatch for {name}"
 
 
 def test_quantize_elemwise_op_none():
-    from src.quantize.elemwise import quantize_elemwise_op
+    from src.quantize.elemwise import quantize
     A = torch.randn(4, 32)
     old_out = old_quantize_op(A.clone(), mx_specs=None)
-    new_out = quantize_elemwise_op(A.clone(), mx_specs=None)
+    new_out = quantize(A.clone(), scheme=None)
     assert torch.equal(old_out, new_out)
 
 

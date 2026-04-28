@@ -14,7 +14,8 @@ from mx.formats import ElemFormat, _get_format_params, _get_min_norm, _get_max_n
 # New code imports
 from src.formats.base import FormatBase, compute_min_norm, compute_max_norm
 from src.formats.registry import FORMAT_REGISTRY, register_format, get_format
-from src.scheme.granularity import Granularity
+from src.scheme.granularity import GranularityMode, GranularitySpec
+from src.scheme.transform import TransformBase, IdentityTransform
 from src.scheme.quant_scheme import QuantScheme
 
 
@@ -138,13 +139,100 @@ def test_compute_max_norm_matches_old():
 
 
 # ---------------------------------------------------------------------------
-# 5. Granularity enum tests
+# 5. GranularityMode + GranularitySpec tests
 # ---------------------------------------------------------------------------
 
-def test_granularity_values():
-    assert Granularity.PER_TENSOR.value == "per_tensor"
-    assert Granularity.PER_CHANNEL.value == "per_channel"
-    assert Granularity.PER_BLOCK.value == "per_block"
+def test_granularity_mode_values():
+    assert GranularityMode.PER_TENSOR.value == "per_tensor"
+    assert GranularityMode.PER_CHANNEL.value == "per_channel"
+    assert GranularityMode.PER_BLOCK.value == "per_block"
+
+
+def test_granularity_spec_per_tensor():
+    g = GranularitySpec.per_tensor()
+    assert g.mode == GranularityMode.PER_TENSOR
+    assert g.block_size == 0
+    assert not g.is_mx
+
+
+def test_granularity_spec_per_channel():
+    g = GranularitySpec.per_channel(axis=1)
+    assert g.mode == GranularityMode.PER_CHANNEL
+    assert g.channel_axis == 1
+    assert g.block_size == 0
+    assert not g.is_mx
+
+
+def test_granularity_spec_per_block():
+    g = GranularitySpec.per_block(32)
+    assert g.mode == GranularityMode.PER_BLOCK
+    assert g.block_size == 32
+    assert g.is_mx
+
+
+def test_granularity_spec_per_block_requires_positive_size():
+    with pytest.raises(ValueError, match="PER_BLOCK requires block_size > 0"):
+        GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=0)
+
+
+def test_granularity_spec_per_tensor_rejects_block_size():
+    with pytest.raises(ValueError, match="PER_TENSOR requires block_size=0"):
+        GranularitySpec(mode=GranularityMode.PER_TENSOR, block_size=32)
+
+
+def test_granularity_spec_per_channel_rejects_block_size():
+    with pytest.raises(ValueError, match="PER_CHANNEL requires block_size=0"):
+        GranularitySpec(mode=GranularityMode.PER_CHANNEL, block_size=8)
+
+
+def test_granularity_spec_default_values():
+    g = GranularitySpec()
+    assert g.mode == GranularityMode.PER_TENSOR
+    assert g.block_size == 0
+    assert g.channel_axis == 0
+
+
+def test_granularity_spec_equality():
+    assert GranularitySpec.per_tensor() == GranularitySpec.per_tensor()
+    assert GranularitySpec.per_block(32) == GranularitySpec.per_block(32)
+    assert GranularitySpec.per_channel(axis=1) == GranularitySpec.per_channel(axis=1)
+
+
+def test_granularity_spec_inequality():
+    assert GranularitySpec.per_tensor() != GranularitySpec.per_block(32)
+    assert GranularitySpec.per_block(32) != GranularitySpec.per_block(16)
+    assert GranularitySpec.per_channel(axis=0) != GranularitySpec.per_channel(axis=1)
+
+
+def test_granularity_spec_hashing():
+    s = {GranularitySpec.per_tensor(), GranularitySpec.per_block(32), GranularitySpec.per_block(32)}
+    assert len(s) == 2  # per_block(32) deduplicated
+
+
+def test_granularity_spec_frozen():
+    g = GranularitySpec.per_block(32)
+    with pytest.raises(AttributeError):
+        g.block_size = 64
+
+
+def test_granularity_spec_per_block_negative_size():
+    with pytest.raises(ValueError, match="PER_BLOCK requires block_size > 0"):
+        GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=-1)
+
+
+def test_granularity_spec_per_channel_default_axis():
+    g = GranularitySpec.per_channel()
+    assert g.channel_axis == 0
+
+
+def test_granularity_spec_per_tensor_rejects_channel_axis():
+    with pytest.raises(ValueError, match="PER_TENSOR requires channel_axis=0"):
+        GranularitySpec(mode=GranularityMode.PER_TENSOR, channel_axis=5)
+
+
+def test_granularity_spec_per_block_rejects_channel_axis():
+    with pytest.raises(ValueError, match="PER_BLOCK requires channel_axis=0"):
+        GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=32, channel_axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -154,65 +242,65 @@ def test_granularity_values():
 def test_quant_scheme_basic():
     scheme = QuantScheme(
         format="fp8_e4m3",
-        granularity=Granularity.PER_BLOCK,
-        block_size=32,
+        granularity=GranularitySpec.per_block(32),
         round_mode="nearest",
     )
-    assert scheme.format == "fp8_e4m3"
-    assert scheme.granularity == Granularity.PER_BLOCK
+    assert scheme.format_name == "fp8_e4m3"
+    assert isinstance(scheme.format, FormatBase)
+    assert scheme.granularity == GranularitySpec.per_block(32)
     assert scheme.block_size == 32
     assert scheme.round_mode == "nearest"
 
 
 def test_quant_scheme_per_tensor():
     scheme = QuantScheme.per_tensor("fp8_e4m3")
-    assert scheme.granularity == Granularity.PER_TENSOR
+    assert scheme.granularity == GranularitySpec.per_tensor()
     assert scheme.block_size == 0
 
 
 def test_quant_scheme_per_channel():
     scheme = QuantScheme.per_channel("fp8_e4m3")
-    assert scheme.granularity == Granularity.PER_CHANNEL
+    assert scheme.granularity == GranularitySpec.per_channel()
     assert scheme.block_size == 0
 
 
 def test_quant_scheme_mxfp():
     scheme = QuantScheme.mxfp("fp6_e3m2", block_size=32)
-    assert scheme.granularity == Granularity.PER_BLOCK
+    assert scheme.granularity == GranularitySpec.per_block(32)
     assert scheme.block_size == 32
-    assert scheme.format == "fp6_e3m2"
+    assert scheme.format_name == "fp6_e3m2"
 
 
-def test_quant_scheme_immutability():
-    scheme = QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK, block_size=32)
+def test_quant_scheme_hashable():
+    scheme = QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32))
     scheme_dict = {scheme: "test"}
     assert scheme_dict[scheme] == "test"
 
 
 def test_quant_scheme_invalid_format_raises():
     with pytest.raises(ValueError, match="Unknown format"):
-        QuantScheme(format="nonexistent", granularity=Granularity.PER_BLOCK, block_size=32)
+        QuantScheme(format="nonexistent", granularity=GranularitySpec.per_block(32))
 
 
 def test_quant_scheme_invalid_round_mode_raises():
     with pytest.raises(ValueError, match="Invalid round_mode"):
-        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK,
-                    block_size=32, round_mode="invalid")
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32),
+                    round_mode="invalid")
 
 
 def test_quant_scheme_per_block_requires_block_size():
-    with pytest.raises(ValueError, match="PER_BLOCK granularity requires block_size > 0"):
-        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK, block_size=0)
+    with pytest.raises(ValueError, match="PER_BLOCK requires block_size > 0"):
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=0))
 
 
 def test_quant_scheme_per_tensor_rejects_block_size():
-    with pytest.raises(ValueError, match="requires block_size=0"):
-        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_TENSOR, block_size=32)
+    with pytest.raises(ValueError, match="PER_TENSOR requires block_size=0"):
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec(mode=GranularityMode.PER_TENSOR, block_size=32))
 
 
 def test_quant_scheme_per_channel_rejects_block_size():
-    with pytest.raises(ValueError, match="requires block_size=0"):
-        QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_CHANNEL, block_size=8)
+    with pytest.raises(ValueError, match="PER_CHANNEL requires block_size=0"):
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec(mode=GranularityMode.PER_CHANNEL, block_size=8))
 
 
 def test_quant_scheme_is_mx_property():
@@ -224,9 +312,183 @@ def test_quant_scheme_is_mx_property():
 
 def test_quant_scheme_dither_round_mode():
     """dither is supported in old _round_mantissa() but not in RoundingMode enum."""
-    scheme = QuantScheme(format="fp8_e4m3", granularity=Granularity.PER_BLOCK,
-                        block_size=32, round_mode="dither")
+    scheme = QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32),
+                        round_mode="dither")
     assert scheme.round_mode == "dither"
+
+
+def test_quant_scheme_default_granularity_is_per_tensor():
+    scheme = QuantScheme(format="fp8_e4m3")
+    assert scheme.granularity == GranularitySpec.per_tensor()
+    assert scheme.block_size == 0
+    assert not scheme.is_mx
+
+
+def test_quant_scheme_default_round_mode():
+    scheme = QuantScheme(format="fp8_e4m3")
+    assert scheme.round_mode == "nearest"
+
+
+def test_quant_scheme_equality():
+    a = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    b = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    assert a == b
+
+
+def test_quant_scheme_inequality():
+    a = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    b = QuantScheme.mxfp("fp8_e4m3", block_size=16)
+    assert a != b
+    c = QuantScheme.per_tensor("fp8_e4m3")
+    assert a != c
+
+
+def test_quant_scheme_frozen():
+    scheme = QuantScheme(format="fp8_e4m3")
+    with pytest.raises(AttributeError):
+        scheme.round_mode = "floor"
+
+
+def test_quant_scheme_per_channel_with_axis():
+    scheme = QuantScheme.per_channel("fp8_e4m3", axis=1)
+    assert scheme.granularity.channel_axis == 1
+
+
+def test_quant_scheme_mxfp_default_block_size():
+    scheme = QuantScheme.mxfp("fp8_e4m3")
+    assert scheme.block_size == 32
+
+
+def test_quant_scheme_empty_format_raises():
+    with pytest.raises(ValueError):
+        QuantScheme(format="")
+
+
+def test_quant_scheme_round_mode_case_sensitive():
+    with pytest.raises(ValueError, match="Invalid round_mode"):
+        QuantScheme(format="fp8_e4m3", granularity=GranularitySpec.per_block(32),
+                    round_mode="Nearest")
+
+
+# --- Transform tests ---
+
+def test_identity_transform_forward():
+    t = IdentityTransform()
+    x = torch.randn(4, 8)
+    assert torch.equal(t.forward(x), x)
+
+
+def test_identity_transform_inverse():
+    t = IdentityTransform()
+    x = torch.randn(4, 8)
+    assert torch.equal(t.inverse(x), x)
+
+
+def test_identity_transform_invertible():
+    assert IdentityTransform().invertible
+
+
+def test_identity_transform_equality():
+    assert IdentityTransform() == IdentityTransform()
+
+
+def test_transform_base_not_invertible_by_default():
+    # TransformBase itself is abstract, but the default invertible flag is False
+    assert TransformBase.invertible is False
+
+
+# --- QuantScheme transform field ---
+
+def test_quant_scheme_default_transform():
+    scheme = QuantScheme(format="fp8_e4m3")
+    assert isinstance(scheme.transform, IdentityTransform)
+
+
+def test_quant_scheme_explicit_transform():
+    scheme = QuantScheme(format="fp8_e4m3", transform=IdentityTransform())
+    assert isinstance(scheme.transform, IdentityTransform)
+
+
+# --- C1: TransformBase requires __eq__/__hash__ ---
+
+def test_transform_base_requires_eq_and_hash():
+    """Concrete TransformBase without __eq__/__hash__ should be rejected by ABC."""
+    class IncompleteTransform(TransformBase):
+        def forward(self, x):
+            return x
+    with pytest.raises(TypeError):
+        IncompleteTransform()
+
+
+# --- C2: transform type validation ---
+
+def test_quant_scheme_invalid_transform_type_raises():
+    with pytest.raises(TypeError, match="transform must be TransformBase"):
+        QuantScheme(format="fp8_e4m3", transform="invalid")
+
+
+def test_quant_scheme_invalid_transform_none_raises():
+    with pytest.raises(TypeError, match="transform must be TransformBase"):
+        QuantScheme(format="fp8_e4m3", transform=None)
+
+
+# --- C3: per_channel string axis guard ---
+
+def test_per_channel_rejects_string_axis():
+    with pytest.raises(TypeError, match="axis must be int"):
+        QuantScheme.per_channel("fp8_e4m3", "floor")
+
+
+# --- M2: IdentityTransform hash consistency ---
+
+def test_quant_scheme_identity_transform_hash_stable():
+    s1 = QuantScheme(format="fp8_e4m3", transform=IdentityTransform())
+    s2 = QuantScheme(format="fp8_e4m3", transform=IdentityTransform())
+    assert s1 == s2
+    assert hash(s1) == hash(s2)
+    assert len({s1, s2}) == 1
+
+
+# --- M4: Custom Transform equality in QuantScheme ---
+
+def test_quant_scheme_custom_transform_equality():
+    class MyTransform(TransformBase):
+        def forward(self, x):
+            return x
+        def __eq__(self, other):
+            return isinstance(other, MyTransform)
+        def __hash__(self):
+            return hash("MyTransform")
+
+    s1 = QuantScheme(format="fp8_e4m3", transform=MyTransform())
+    s2 = QuantScheme(format="fp8_e4m3", transform=MyTransform())
+    assert s1 == s2
+    assert hash(s1) == hash(s2)
+    assert len({s1, s2}) == 1
+
+
+# --- QuantScheme format as FormatBase ---
+
+def test_quant_scheme_format_auto_coercion_from_str():
+    scheme = QuantScheme(format="fp8_e4m3")
+    assert isinstance(scheme.format, FormatBase)
+    assert scheme.format.name == "fp8_e4m3"
+
+
+def test_quant_scheme_format_from_format_base():
+    fmt = FormatBase.from_str("int8")
+    scheme = QuantScheme(format=fmt)
+    assert scheme.format is fmt
+
+
+def test_quant_scheme_format_name_property():
+    scheme = QuantScheme.mxfp("fp8_e4m3", block_size=32)
+    assert scheme.format_name == "fp8_e4m3"
+
+
+def test_quant_scheme_invalid_format_type_raises():
+    with pytest.raises(TypeError, match="format must be FormatBase"):
+        QuantScheme(format=123)
 
 
 # ---------------------------------------------------------------------------
@@ -296,4 +558,80 @@ def test_format_no_dict(fmt_name):
     """Subclasses with __slots__ = () should not have per-instance __dict__."""
     fmt = FormatBase.from_str(fmt_name)
     assert not hasattr(fmt, "__dict__"), f"{fmt_name} has __dict__ (missing __slots__ = ())"
+
+
+# ---------------------------------------------------------------------------
+# 11. src.scheme module export tests
+# ---------------------------------------------------------------------------
+
+def test_scheme_module_exports_granularity_mode():
+    from src.scheme import GranularityMode
+    assert GranularityMode.PER_TENSOR is not None
+
+
+def test_scheme_module_exports_granularity_spec():
+    from src.scheme import GranularitySpec
+    assert GranularitySpec.per_block(32).block_size == 32
+
+
+def test_scheme_module_exports_quant_scheme():
+    from src.scheme import QuantScheme
+    assert QuantScheme.per_tensor("int8").format_name == "int8"
+
+
+# ---------------------------------------------------------------------------
+# P2F-7: Granularity type guard + channel_axis negative / out-of-bounds
+# ---------------------------------------------------------------------------
+
+# C1: QuantScheme rejects invalid granularity types
+def test_quant_scheme_invalid_granularity_type_raises():
+    with pytest.raises(TypeError, match="granularity must be GranularitySpec"):
+        QuantScheme(format="fp8_e4m3", granularity="per_tensor")
+
+
+def test_quant_scheme_invalid_granularity_none_raises():
+    with pytest.raises(TypeError, match="granularity must be GranularitySpec"):
+        QuantScheme(format="fp8_e4m3", granularity=None)
+
+
+def test_quant_scheme_invalid_granularity_int_raises():
+    with pytest.raises(TypeError, match="granularity must be GranularitySpec"):
+        QuantScheme(format="fp8_e4m3", granularity=123)
+
+
+# C2: channel_axis negative indexing + out-of-bounds
+def test_granularity_spec_per_channel_negative_axis_allowed():
+    """GranularitySpec accepts negative axis (not validated at construction time)."""
+    g = GranularitySpec.per_channel(axis=-1)
+    assert g.channel_axis == -1
+
+
+def test_format_quantize_per_channel_negative_axis_normalization():
+    """_quantize_per_channel normalizes -1 to ndim-1, producing same result as positive axis."""
+    fmt = FormatBase.from_str("fp8_e4m3")
+    x = torch.randn(3, 4, 5)
+    g_pos = GranularitySpec.per_channel(axis=2)
+    g_neg = GranularitySpec.per_channel(axis=-1)
+    assert torch.equal(
+        fmt.quantize(x.clone(), g_pos, "nearest"),
+        fmt.quantize(x.clone(), g_neg, "nearest"),
+    )
+
+
+def test_format_quantize_per_channel_out_of_bounds_axis_raises():
+    """Out-of-bounds negative axis raises ValueError at quantization time."""
+    fmt = FormatBase.from_str("fp8_e4m3")
+    x = torch.randn(3, 4)
+    g = GranularitySpec.per_channel(axis=-100)
+    with pytest.raises(ValueError, match="out of range"):
+        fmt.quantize(x, g, "nearest")
+
+
+def test_format_quantize_per_channel_positive_out_of_bounds_axis_raises():
+    """Out-of-bounds positive axis raises ValueError at quantization time."""
+    fmt = FormatBase.from_str("fp8_e4m3")
+    x = torch.randn(3, 4)
+    g = GranularitySpec.per_channel(axis=5)
+    with pytest.raises(ValueError, match="out of range"):
+        fmt.quantize(x, g, "nearest")
 

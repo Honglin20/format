@@ -1,12 +1,11 @@
 """
-Element-wise quantization: _round_mantissa, _quantize_elemwise_core,
-_quantize_elemwise, _quantize_bfloat, _quantize_fp, quantize_elemwise_op.
+Element-wise quantization.
 
-Rewritten from mx/elemwise_ops.py. Key changes:
-- Uses src/formats/base.py instead of mx/formats.py
-- Parameter 'round' renamed to 'round_mode'
-- Uses compute_min_norm/compute_max_norm from src/formats/base.py
-- Custom CUDA path omitted (Python/CPU path only for now)
+Primary API: quantize(x, scheme) — QuantScheme-driven unified entry.
+
+Internal helpers: _quantize_elemwise_core, _round_mantissa, _safe_lshift, _safe_rshift.
+Legacy wrappers (kept for internal equivalence tests):
+  _quantize_elemwise, _quantize_bfloat, _quantize_fp
 """
 import torch
 from src.formats.base import compute_min_norm, compute_max_norm, FormatBase
@@ -122,60 +121,65 @@ def _quantize_elemwise(A, elem_format, round_mode='nearest',
 
     fmt = FormatBase.from_str(elem_format) if isinstance(elem_format, str) else elem_format
 
-    return _quantize_elemwise_core(
-            A, fmt.mbits, fmt.ebits, fmt.max_norm,
-            round_mode=round_mode, allow_denorm=allow_denorm,
-            saturate_normals=saturate_normals)
+    return fmt.quantize_elemwise(A, round_mode=round_mode,
+                                 allow_denorm=allow_denorm,
+                                 saturate_normals=saturate_normals)
 
 
 def _quantize_bfloat(A, bfloat, round_mode='nearest', allow_denorm=True):
+    """Legacy: kept for internal equivalence tests only."""
     if bfloat == 0 or bfloat == 32:
         return A
 
     max_norm = compute_max_norm(8, bfloat - 7)
-
-    return _quantize_elemwise_core(
-            A, bits=bfloat-7, exp_bits=8, max_norm=max_norm, round_mode=round_mode,
-            allow_denorm=allow_denorm)
+    from src.formats.fp_formats import FPFormat
+    fmt = FPFormat(name=f"bfloat{bfloat}", ebits=8, mbits=bfloat - 7,
+                   max_norm_override=max_norm)
+    return fmt.quantize_elemwise(A, round_mode=round_mode,
+                                 allow_denorm=allow_denorm,
+                                 saturate_normals=False)
 
 
 def _quantize_fp(A, exp_bits=None, mantissa_bits=None,
                  round_mode='nearest', allow_denorm=True):
+    """Legacy: kept for internal equivalence tests only."""
     if exp_bits is None or mantissa_bits is None:
         return A
 
     max_norm = compute_max_norm(exp_bits, mantissa_bits + 2)
-
-    return _quantize_elemwise_core(
-            A, bits=mantissa_bits + 2, exp_bits=exp_bits,
-            max_norm=max_norm, round_mode=round_mode, allow_denorm=allow_denorm)
+    from src.formats.fp_formats import FPFormat
+    fmt = FPFormat(name=f"fp_e{exp_bits}m{mantissa_bits}", ebits=exp_bits,
+                   mbits=mantissa_bits + 2, max_norm_override=max_norm)
+    return fmt.quantize_elemwise(A, round_mode=round_mode,
+                                 allow_denorm=allow_denorm,
+                                 saturate_normals=False)
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# QuantScheme-driven unified entry point
 # ---------------------------------------------------------------------------
 
-def quantize_elemwise_op(A, mx_specs, round_mode=None):
-    if mx_specs is None:
-        return A
-    elif round_mode is None:
-        round_mode = mx_specs['round']
+def quantize(x, scheme=None, allow_denorm=True, scale=None):
+    """Quantize tensor x using a QuantScheme (format + granularity + transform).
 
-    if mx_specs['bfloat'] == 16 and round_mode == 'even'\
-        and torch.cuda.is_bf16_supported() \
-        and mx_specs['bfloat_subnorms'] == True:
-        return A.to(torch.bfloat16)
+    This is the primary entry point for tensor-level quantization.
 
-    if mx_specs['bfloat'] > 0 and mx_specs['fp'] > 0:
-        raise ValueError("Cannot set both [bfloat] and [fp] in mx_specs.")
-    elif mx_specs['bfloat'] > 9:
-        A = _quantize_bfloat(A, bfloat=mx_specs['bfloat'], round_mode=round_mode,
-                             allow_denorm=mx_specs['bfloat_subnorms'])
-    elif mx_specs['bfloat'] > 0 and mx_specs['bfloat'] <= 9:
-        raise ValueError("Cannot set [bfloat] <= 9 in mx_specs.")
-    elif mx_specs['fp'] > 6:
-        A = _quantize_fp(A, exp_bits=5, mantissa_bits=mx_specs['fp'] - 6,
-                         round_mode=round_mode, allow_denorm=mx_specs['bfloat_subnorms'])
-    elif mx_specs['fp'] > 0 and mx_specs['fp'] <= 6:
-        raise ValueError("Cannot set [fp] <= 6 in mx_specs.")
-    return A
+    Args:
+        x: Input tensor.
+        scheme: QuantScheme specifying format, granularity, transform, and round_mode.
+            If None, input is returned unchanged (no quantization path).
+        allow_denorm: If False, flush subnormal values to zero (float formats only).
+        scale: Optional pre-computed scale tensor.  If provided, the format
+            uses this scale instead of computing one from ``x``.  Only
+            meaningful for PER_CHANNEL and PER_BLOCK granularity.
+
+    Returns:
+        Quantized tensor with same shape as x.
+    """
+    if scheme is None:
+        return x
+    x_t = scheme.transform.forward(x)
+    x_q = scheme.format.quantize(x_t, scheme.granularity, scheme.round_mode,
+                                  allow_denorm=allow_denorm, scale=scale)
+    return scheme.transform.inverse(x_q)
+

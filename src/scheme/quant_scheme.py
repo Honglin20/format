@@ -1,36 +1,65 @@
 """
-QuantScheme: format + granularity + round_mode — the tensor-level quantization strategy.
+QuantScheme: format + granularity + transform + round_mode — the three-axis
+tensor-level quantization strategy.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Union
 
-from .granularity import Granularity
+from ..formats.base import FormatBase
+from .granularity import GranularitySpec
+from .transform import TransformBase, IdentityTransform
 
-# Old code's RoundingMode enum had nearest/floor/even. "dither" was implemented
-# in old _round_mantissa() (mx/elemwise_ops.py) but not in the enum.
-# Including it here as valid is an intentional extension of the old public API
-# to match the actual runtime behavior.
 _VALID_ROUND_MODES = {"nearest", "floor", "even", "dither"}
+
+
+def _resolve_format(fmt: Union[str, FormatBase]) -> FormatBase:
+    """Convert string to FormatBase via registry, or pass through FormatBase."""
+    if isinstance(fmt, FormatBase):
+        return fmt
+    if isinstance(fmt, str):
+        from ..formats.registry import get_format
+        return get_format(fmt)
+    raise TypeError(f"format must be str or FormatBase, got {type(fmt).__name__}")
 
 
 @dataclass(frozen=True)
 class QuantScheme:
-    """Tensor-level quantization scheme.
+    """Tensor-level quantization scheme (three-axis design).
 
     Combines:
-    - format: element format string (e.g., "fp8_e4m3", "int8")
-    - granularity: how the scale is shared (per_tensor, per_channel, per_block)
-    - block_size: block size for per_block granularity (0 otherwise)
+    - format: FormatBase instance (e.g., FP8E4M3Format(), Int8Format())
+    - granularity: GranularitySpec (mode + block_size + channel_axis)
+    - transform: TransformBase (default: IdentityTransform)
     - round_mode: rounding mode ("nearest", "floor", "even", "dither")
+
+    Default: INT8, per_tensor, IdentityTransform, round_mode="nearest".
     """
-    format: str
-    granularity: Granularity = Granularity.PER_BLOCK
-    block_size: int = 0
+    format: FormatBase = field(default_factory=lambda: _resolve_format("int8"))
+    granularity: GranularitySpec = field(default_factory=GranularitySpec.per_tensor)
+    """Default: PER_TENSOR (single shared scale for the whole tensor)."""
+    transform: TransformBase = field(default_factory=IdentityTransform)
     round_mode: str = "nearest"
 
     def __post_init__(self):
-        # Validate format string resolves in registry
-        from ..formats.registry import get_format
-        get_format(self.format)  # raises ValueError if unknown
+        # Coerce string format to FormatBase (supports factory methods accepting str)
+        if isinstance(self.format, str):
+            # frozen dataclass standard pattern: use object.__setattr__ inside __post_init__
+            object.__setattr__(self, "format", _resolve_format(self.format))
+
+        if not isinstance(self.format, FormatBase):
+            raise TypeError(
+                f"format must be FormatBase, got {type(self.format).__name__}"
+            )
+
+        if not isinstance(self.granularity, GranularitySpec):
+            raise TypeError(
+                f"granularity must be GranularitySpec, got {type(self.granularity).__name__}"
+            )
+
+        if not isinstance(self.transform, TransformBase):
+            raise TypeError(
+                f"transform must be TransformBase, got {type(self.transform).__name__}"
+            )
 
         # Validate round_mode
         if self.round_mode not in _VALID_ROUND_MODES:
@@ -38,33 +67,40 @@ class QuantScheme:
                 f"Invalid round_mode {self.round_mode!r}. Must be one of {_VALID_ROUND_MODES}"
             )
 
-        # Validate block_size consistency with granularity
-        if self.granularity == Granularity.PER_BLOCK and self.block_size <= 0:
-            raise ValueError(
-                f"PER_BLOCK granularity requires block_size > 0, got {self.block_size}"
+    @staticmethod
+    def per_tensor(format: Union[str, FormatBase], round_mode: str = "nearest") -> "QuantScheme":
+        return QuantScheme(format=_resolve_format(format),
+                          granularity=GranularitySpec.per_tensor(),
+                          round_mode=round_mode)
+
+    @staticmethod
+    def per_channel(format: Union[str, FormatBase], axis: int = 0,
+                    round_mode: str = "nearest") -> "QuantScheme":
+        if isinstance(axis, str):
+            raise TypeError(
+                f"axis must be int, not str. "
+                f"Did you mean: per_channel({format!r}, round_mode={axis!r})? "
+                f"The API changed: axis was inserted before round_mode."
             )
-        if self.granularity in (Granularity.PER_TENSOR, Granularity.PER_CHANNEL):
-            if self.block_size != 0:
-                raise ValueError(
-                    f"{self.granularity} granularity requires block_size=0, got {self.block_size}"
-                )
+        return QuantScheme(format=_resolve_format(format),
+                          granularity=GranularitySpec.per_channel(axis),
+                          round_mode=round_mode)
 
     @staticmethod
-    def per_tensor(format: str, round_mode: str = "nearest") -> "QuantScheme":
-        return QuantScheme(format=format, granularity=Granularity.PER_TENSOR,
-                          block_size=0, round_mode=round_mode)
-
-    @staticmethod
-    def per_channel(format: str, round_mode: str = "nearest") -> "QuantScheme":
-        return QuantScheme(format=format, granularity=Granularity.PER_CHANNEL,
-                          block_size=0, round_mode=round_mode)
-
-    @staticmethod
-    def mxfp(format: str, block_size: int = 32, round_mode: str = "nearest") -> "QuantScheme":
-        return QuantScheme(format=format, granularity=Granularity.PER_BLOCK,
-                          block_size=block_size, round_mode=round_mode)
+    def mxfp(format: Union[str, FormatBase], block_size: int = 32,
+             round_mode: str = "nearest") -> "QuantScheme":
+        return QuantScheme(format=_resolve_format(format),
+                          granularity=GranularitySpec.per_block(block_size),
+                          round_mode=round_mode)
 
     @property
     def is_mx(self) -> bool:
-        """True if this is a block-level (MX) quantization scheme."""
-        return self.granularity == Granularity.PER_BLOCK
+        return self.granularity.is_mx
+
+    @property
+    def block_size(self) -> int:
+        return self.granularity.block_size
+
+    @property
+    def format_name(self) -> str:
+        return self.format.name
