@@ -378,6 +378,46 @@ def run_part_b_4bit(
     return results
 
 
+def run_part_c_pot_scaling(
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+    eval_loader: DataLoader,
+) -> dict:
+    """Part C: INT per-channel with FP32 scaling vs PoT scaling (8-bit & 4-bit).
+
+    Compares power-of-two (PoT) constrained learning scales against
+    unconstrained FP32 scales for both 8-bit and 4-bit INT per-channel
+    quantization, using LSQ (Learned Step-size Quantization) optimization.
+
+    Args:
+        fp32_model: Reference FP32 model.
+        calib_data: List of calibration batches.
+        eval_loader: Evaluation DataLoader.
+
+    Returns:
+        Dict mapping experiment name to result dict.
+    """
+    print("\n### Part C: FP32 vs PoT Scaling ###")
+    configs = {
+        "INT8-PC-FP32": ("int8", False),
+        "INT8-PC-PoT":  ("int8", True),
+        "INT4-PC-FP32": ("int4", False),
+        "INT4-PC-PoT":  ("int4", True),
+    }
+    results = {}
+    for name, (fmt, pot) in configs.items():
+        print(f"  Running {name} (LSQ, pot={pot})...")
+        cfg = make_op_cfg(fmt, PER_C0)
+        results[name] = run_experiment(
+            cfg, fp32_model, calib_data, eval_loader,
+            lsq_steps=100, lsq_pot=pot,
+        )
+    results["FP32 (baseline)"] = {
+        "accuracy": results[list(configs.keys())[0]]["fp32_accuracy"],
+    }
+    return results
+
+
 def run_format_study(
     build_model: Callable[[], nn.Module],
     make_calib_data: Callable[..., List[torch.Tensor]],
