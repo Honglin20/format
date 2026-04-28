@@ -313,6 +313,38 @@ def _extract_metric_per_layer(report: Report, metric: str) -> Dict[str, float]:
         return grouped.to_dict()
 
 
+def run_part_a_8bit(
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+    eval_loader: DataLoader,
+) -> dict:
+    """Part A: Compare MXINT-8, MXFP-8, INT8-PC (all 8-bit, PoT scaling).
+
+    Args:
+        fp32_model: Reference FP32 model.
+        calib_data: List of calibration batches.
+        eval_loader: Evaluation DataLoader.
+
+    Returns:
+        Dict mapping experiment name to result dict, including an
+        ``FP32 (baseline)`` entry with the reference accuracy.
+    """
+    print("\n### Part A: 8-bit Format Comparison ###")
+    configs = {
+        "MXINT-8": make_op_cfg("int8", PER_B32),
+        "MXFP-8":  make_op_cfg("fp8_e4m3", PER_B32),
+        "INT8-PC": make_op_cfg("int8", PER_C0),
+    }
+    results = {}
+    for name, cfg in configs.items():
+        print(f"  Running {name}...")
+        results[name] = run_experiment(cfg, fp32_model, calib_data, eval_loader)
+    results["FP32 (baseline)"] = {
+        "accuracy": results[list(configs.keys())[0]]["fp32_accuracy"],
+    }
+    return results
+
+
 def run_format_study(
     build_model: Callable[[], nn.Module],
     make_calib_data: Callable[..., List[torch.Tensor]],
