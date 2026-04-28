@@ -162,5 +162,8 @@ cython_debug/
 # Claude Code worktrees
 .claude/worktrees/
 
+# Git worktrees
+.worktrees/
+
 # Golden reference files (large binary .pt files)
 src/tests/golden/
