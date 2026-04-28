@@ -214,3 +214,64 @@ class SmoothQuantTransform(TransformBase):
     def __hash__(self) -> int:
         """Hash based on the scale tensor values and channel_axis."""
         return hash((self._channel_axis, tuple(self._scale.flatten().tolist())))
+
+
+class SmoothQuantWeightTransform(TransformBase):
+    """Weight-side SmoothQuant compensation: ``forward(W) = W * scale``.
+
+    Companion to :class:`SmoothQuantTransform`.  While the activation side
+    divides by the per-channel scale (``x / s``), the weight side multiplies
+    by the same scale (``W * s``) to maintain mathematical equivalence::
+
+        (X / s) @ (W * s) = X @ W
+
+    The scale is the same tensor used in the activation-side transform,
+    obtained via ``sq_transform.scale``.
+
+    The weight's input-channel dimension defaults to **dim 1** (``[OC, IC]``
+    for Linear, ``[OC, IC, H, W]`` for Conv).  The scale broadcasts as
+    ``[1, IC, 1, ...]``.
+
+    Args:
+        scale: 1D tensor of per-channel compensation factors. Cloned internally.
+        channel_axis: Dimension of ``W`` that is the input-channel axis.
+               Default ``1`` (matches both Linear [OC, IC] and
+               Conv [OC, IC, H, W] weight layouts).
+    """
+
+    invertible = True
+
+    def __init__(self, scale, channel_axis=1):
+        object.__setattr__(self, "_scale", scale.detach().clone())
+        object.__setattr__(self, "_channel_axis", channel_axis)
+
+    @property
+    def scale(self):
+        """The per-channel compensation factor (read-only)."""
+        return self._scale
+
+    @property
+    def channel_axis(self):
+        """The weight input-channel dimension index."""
+        return self._channel_axis
+
+    def _broadcast_scale(self, W):
+        shape = [1] * W.ndim
+        shape[self._channel_axis] = -1
+        return self._scale.view(*shape)
+
+    def forward(self, W):
+        return W * self._broadcast_scale(W)
+
+    def inverse(self, W_q):
+        return W_q / self._broadcast_scale(W_q)
+
+    def __eq__(self, other):
+        if not isinstance(other, SmoothQuantWeightTransform):
+            return False
+        return (self._channel_axis == other._channel_axis
+                and torch.equal(self._scale, other._scale))
+
+    def __hash__(self):
+        return hash((self._channel_axis,
+                     tuple(self._scale.flatten().tolist())))
