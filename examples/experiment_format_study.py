@@ -206,6 +206,48 @@ def make_op_cfg_weight_only(
     return OpQuantConfig(weight=scheme)
 
 
+def _make_sq_op_cfg(
+    fmt_name: str,
+    granularity: GranularitySpec,
+    sq_transform: TransformBase,
+    weight_only: bool,
+) -> OpQuantConfig:
+    """Create OpQuantConfig with SmoothQuant transform only on ``input``.
+
+    SmoothQuant is an activation-side transform: ``forward(x) = x / s``,
+    ``inverse(x_q) = x_q * s``.  Applying it to weights would produce
+    ``W / s`` instead of the required ``W * s``, and applying it to the
+    output is semantically meaningless.  This helper limits the transform
+    to the input role only.
+
+    Args:
+        fmt_name: Format name string.
+        granularity: ``GranularitySpec``.
+        sq_transform: The per-layer ``SmoothQuantTransform``.
+        weight_only: If True, only ``input`` + ``weight`` are quantized
+            (used for per-channel formats like NF4).
+
+    Returns:
+        ``OpQuantConfig`` with ``sq_transform`` on ``input`` and
+        ``IdentityTransform`` on all other roles.
+    """
+    fmt = FormatBase.from_str(fmt_name)
+    input_scheme = QuantScheme(
+        format=fmt, granularity=granularity, transform=sq_transform,
+    )
+    no_tx = IdentityTransform()
+    if weight_only:
+        weight_scheme = QuantScheme(
+            format=fmt, granularity=granularity, transform=no_tx,
+        )
+        return OpQuantConfig(input=input_scheme, weight=weight_scheme)
+    else:
+        scheme = QuantScheme(
+            format=fmt, granularity=granularity, transform=no_tx,
+        )
+        return OpQuantConfig(input=input_scheme, weight=scheme, output=scheme)
+
+
 # ---------------------------------------------------------------------------
 # Experiment runner stubs
 # ---------------------------------------------------------------------------
@@ -429,47 +471,69 @@ def run_part_c_pot_scaling(
     return results
 
 
-def _make_smoothquant_transform(
+def _make_smoothquant_transforms(
     fp32_model: nn.Module,
     calib_data: List[torch.Tensor],
-) -> TransformBase:
-    """Create SmoothQuantTransform from calibration activation + first Linear weight.
+) -> Dict[str, TransformBase]:
+    """Create per-layer SmoothQuantTransform dict.
 
-    If no Linear module is found in ``fp32_model``, returns ``IdentityTransform()``
-    as a safe fallback.
+    Runs one forward pass through the FP32 model to capture each layer's
+    activation and weight, then creates a per-layer SmoothQuantTransform
+    with correctly-shaped per-channel scales.
 
     Args:
-        fp32_model: FP32 reference model (used to extract first Linear weight).
-        calib_data: List of calibration batches (first batch used as activation).
+        fp32_model: FP32 reference model.
+        calib_data: List of calibration batches (first batch used).
 
     Returns:
-        ``SmoothQuantTransform`` if a Linear module is found, else
-        ``IdentityTransform()``.
+        Dict mapping layer name to ``SmoothQuantTransform`` (or
+        ``IdentityTransform`` on failure).
     """
     if fp32_model is None:
-        return IdentityTransform()
-    x_sample = calib_data[0]
+        return {}
+
+    activations: Dict[str, torch.Tensor] = {}
+    weights: Dict[str, torch.Tensor] = {}
+    hooks = []
+
+    def _hook(name):
+        def fn(module, _input, _output):
+            activations[name] = _input[0].detach()
+            if hasattr(module, "weight") and module.weight is not None:
+                weights[name] = module.weight.data
+        return fn
+
+    for name, module in fp32_model.named_modules():
+        if isinstance(module, (nn.Linear, nn.Conv2d)):
+            hooks.append(module.register_forward_hook(_hook(name)))
+
     with torch.no_grad():
         fp32_model.eval()
-        target_weight = None
-        for module in fp32_model.modules():
-            if isinstance(module, nn.Linear):
-                target_weight = module.weight.data
-                break
-        if target_weight is None:
-            return IdentityTransform()
-    return SmoothQuantTransform.from_calibration(
-        X_act=x_sample, W=target_weight, alpha=0.5,
-    )
+        fp32_model(calib_data[0])
+
+    for h in hooks:
+        h.remove()
+
+    per_layer: Dict[str, TransformBase] = {}
+    for name in activations:
+        if name in weights:
+            try:
+                per_layer[name] = SmoothQuantTransform.from_calibration(
+                    X_act=activations[name], W=weights[name], alpha=0.5,
+                )
+            except Exception:
+                per_layer[name] = IdentityTransform()
+
+    return per_layer
 
 
 def _build_per_layer_optimal_cfg(
     variant_results: dict,
-    fp32_model: nn.Module,
-    calib_data: List[torch.Tensor],
+    sq_transforms: dict,
     fmt_str: str,
     gran: GranularitySpec,
     cfg_builder: Callable,
+    weight_only: bool = False,
 ) -> dict:
     """Build per-layer OpQuantConfig dict choosing best transform per layer by QSNR.
 
@@ -479,11 +543,12 @@ def _build_per_layer_optimal_cfg(
     Args:
         variant_results: Dict mapping ``"None"``, ``"SmoothQuant"``, ``"Hadamard"``
             to their experiment result dicts (which contain ``qsnr_per_layer``).
-        fp32_model: FP32 reference model (for SmoothQuant calibration data).
-        calib_data: List of calibration batches (for SmoothQuant).
+        sq_transforms: Per-layer SmoothQuantTransform dict from
+            ``_make_smoothquant_transforms``.
         fmt_str: Format name string for the config builder.
         gran: ``GranularitySpec`` for the config builder.
         cfg_builder: ``make_op_cfg`` or ``make_op_cfg_weight_only``.
+        weight_only: Whether the format is weight-only (NF4, INT4-PC).
 
     Returns:
         Dict mapping layer name to ``OpQuantConfig``.
@@ -495,17 +560,18 @@ def _build_per_layer_optimal_cfg(
             if qsnr > layer_best_tx.get(layer, ("", -float("inf")))[1]:
                 layer_best_tx[layer] = (tx_name, qsnr)
 
-    # Create a single SmoothQuantTransform for all SQ-chosen layers
-    sq_transform = _make_smoothquant_transform(fp32_model, calib_data)
     tx_map = {
         "None": None,
-        "SmoothQuant": sq_transform,
         "Hadamard": HadamardTransform(),
     }
 
     per_layer_cfg = {}
     for layer, (tx_name, _) in layer_best_tx.items():
-        per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name])
+        if tx_name == "SmoothQuant":
+            sq_tx = sq_transforms.get(layer, IdentityTransform())
+            per_layer_cfg[layer] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
+        else:
+            per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name])
 
     return per_layer_cfg
 
@@ -549,13 +615,23 @@ def run_part_d_transforms(
 
         # Phase 1: Run each transform variant
         variant_results = {}
-        transforms_to_try = {
+        sq_transforms = _make_smoothquant_transforms(fp32_model, calib_data)
+        # For the single-transform SmoothQuant variant, build per-layer configs
+        # so each layer gets its own correctly-shaped SmoothQuantTransform.
+        # SmoothQuant is applied ONLY to the input (activation) role:
+        #   activation: x / s → quantize → x_q * s  ✓
+        # Weight compensation (W * s before quantize) is not done via transform
+        # because TransformBase.forward is x/s, not x*s.
+        sq_per_layer_cfg = {}
+        for lname, sq_tx in sq_transforms.items():
+            sq_per_layer_cfg[lname] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
+
+        # Single-transform variants: build a single OpQuantConfig
+        single_tx = {
             "None": None,
-            "SmoothQuant": _make_smoothquant_transform(fp32_model, calib_data),
             "Hadamard": HadamardTransform(),
         }
-
-        for tx_name, tx in transforms_to_try.items():
+        for tx_name, tx in single_tx.items():
             label = f"{fmt_name}-{tx_name}"
             print(f"    Running {label}...")
             cfg = builder(fmt_str, gran, transform=tx)
@@ -563,9 +639,15 @@ def run_part_d_transforms(
                 cfg, fp32_model, calib_data, eval_loader,
             )
 
+        # SmoothQuant: each layer has its own correctly-shaped transform
+        print(f"    Running {fmt_name}-SmoothQuant...")
+        variant_results["SmoothQuant"] = run_experiment(
+            sq_per_layer_cfg, fp32_model, calib_data, eval_loader,
+        )
+
         # Phase 2: Per-layer optimal
         per_layer_optimal_cfg = _build_per_layer_optimal_cfg(
-            variant_results, fp32_model, calib_data, fmt_str, gran, builder,
+            variant_results, sq_transforms, fmt_str, gran, builder, weight_only,
         )
         print(f"    Running {fmt_name}-PerLayerOpt...")
         opt_result = run_experiment(

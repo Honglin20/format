@@ -9,24 +9,23 @@
 ## Progress
 
 - [x] **Task 1: Experiment script skeleton and user-facing API** ✅
-- [ ] Task 2: Implement run_experiment() — single config runner
-- [ ] Task 3: Part A — 8-bit format comparison
-- [ ] Task 4: Part B — 4-bit format comparison
-- [ ] Task 5: Part C — FP32 vs PoT scaling comparison
-- [ ] Task 6: Part D — Transform analysis (SmoothQuant + Hadamard)
-- [ ] Task 7: Per-layer optimal transform selection
-- [ ] Task 8: Block size sensitivity sweep
-- [ ] Task 9: Table generation (6 tables)
-- [ ] Task 10: Figure generation (11 figures)
-- [ ] Task 11: Cleanup, defaults, and documentation
+- [x] **Task 2: Implement run_experiment() — single config runner** ✅
+- [x] **Task 3: Part A — 8-bit format comparison** ✅
+- [x] **Task 4: Part B — 4-bit format comparison** ✅
+- [x] **Task 5: Part C — FP32 vs PoT scaling comparison** ✅
+- [x] **Task 6: Part D — Transform analysis (SmoothQuant + Hadamard)** ✅
+- [ ] Task 7: Block size sensitivity sweep
+- [ ] Task 8: Table generation (6 tables)
+- [ ] Task 9: Figure generation (11 figures)
+- [ ] Task 10: Cleanup, defaults, and documentation
 
 ## 下一步（具体动作）
 
-Implement Task 2: fill in `run_experiment()` — create QuantSession, calibrate, analyze with observers, evaluate E2E accuracy.
+Implement Task 7: block size sensitivity sweep over {16, 32, 64, 128} for 8-bit and 4-bit MX formats.
 
 ## 断点续传必读文件
 
-1. `examples/experiment_format_study.py`（全文）
+1. `examples/experiment_format_study.py`（全文，包含 run_part_a/b/c/d）
 2. `docs/plans/2026-04-28-format-study-plan.md`（全文）
 3. `docs/plans/2026-04-28-format-study-design.md`（实验矩阵）
 
@@ -44,3 +43,4 @@ Implement Task 2: fill in `run_experiment()` — create QuantSession, calibrate,
 10. **PreScaleTransform 引用模式**：持有 scale tensor 引用（非拷贝），register_buffer 后再创建 Transform 以保证 load_state_dict 一致性
 11. **LSQ 梯度流**：pre_scale 在 custom autograd Function 内部无梯度，必须在 module 外部手动应用：`module(x * pre_scale) / pre_scale`
 12. **PoT 投影梯度下降**：每步 optimizer.step() 后 `pre_scale.data = 2**round(log2(scale))`，微小模型 per-tensor 效果有限，per-channel 更有价值
+13. **_quantize_per_block 不转发 scale**：CalibrationSession 分配 _output_scale (amax) 给所有模块，但 _quantize_mx 的 scale 参数期望 shared exponent 而非 amax；per_block 必须忽略外部 scale 以避免形状不匹配
