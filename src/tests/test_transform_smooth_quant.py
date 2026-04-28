@@ -154,6 +154,59 @@ class TestComputeSmoothQuantScale:
         assert not torch.isinf(scale).any(), "Inf in scale"
 
 
+    def test_act_channel_axis_conv2d(self):
+        """act_channel_axis=1 reduces over all dims except dim=1 for Conv2d-style activation."""
+        compute_smoothquant_scale, _ = _try_import()
+        torch.manual_seed(42)
+        # Conv2d activation: (N=2, C=3, H=4, W=5) — channel at dim=1
+        X = torch.randn(2, 3, 4, 5)
+        W = torch.randn(8, 3, 3, 3)  # Conv weight (OC=8, IC=3, KH=3, KW=3)
+
+        scale = compute_smoothquant_scale(X, W, alpha=0.5,
+                                           act_channel_axis=1, w_channel_axis=1)
+
+        assert scale.shape == (3,), f"Expected (3,), got {scale.shape}"
+
+        # Verify act_channel_axis=1 gives same result as manually computing per-channel
+        act_amax_manual = torch.amax(torch.abs(X), dim=(0, 2, 3))  # reduce all except dim 1
+        w_amax_manual = torch.amax(torch.abs(W), dim=(0, 2, 3))    # reduce all except dim 1
+        expected = (act_amax_manual.clamp(min=1e-12).pow(0.5)
+                    / w_amax_manual.clamp(min=1e-12).pow(0.5))
+        assert torch.allclose(scale, expected, atol=1e-6)
+
+    def test_act_channel_axis_default(self):
+        """Default act_channel_axis=-1 preserves backward compatibility."""
+        compute_smoothquant_scale, _ = _try_import()
+        torch.manual_seed(42)
+        X = torch.randn(4, 16)
+        W = torch.randn(8, 16)
+        scale_new = compute_smoothquant_scale(X, W, act_channel_axis=-1, w_channel_axis=1)
+        scale_old = compute_smoothquant_scale(X, W)
+        assert torch.equal(scale_new, scale_old)
+
+    def test_w_channel_axis_zero(self):
+        """w_channel_axis=0: reduce all except dim 0 (unusual weight layout)."""
+        compute_smoothquant_scale, _ = _try_import()
+        torch.manual_seed(42)
+        # Unusual weight: [IC=4, OC=8] (transposed)
+        W = torch.randn(4, 8)  # [IC, OC] — input channel at dim 0
+        act_stats = torch.randn(4).abs()
+        scale = compute_smoothquant_scale(act_stats, W, w_channel_axis=0)
+        assert scale.shape == (4,)
+
+    def test_from_calibration_passes_act_channel_axis(self):
+        """from_calibration passes act_channel_axis through to the transform."""
+        _, SmoothQuantTransform = _try_import()
+        torch.manual_seed(42)
+        X = torch.randn(2, 3, 4, 5)  # Conv2d-style: channel at dim=1
+        W = torch.randn(8, 3, 3, 3)
+        t = SmoothQuantTransform.from_calibration(
+            X, W, act_channel_axis=1
+        )
+        assert t.channel_axis == 1
+        assert t.scale.shape == (3,)
+
+
 # ============================================================================
 # 2. SmoothQuantTransform class tests
 # ============================================================================
