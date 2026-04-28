@@ -10,12 +10,14 @@ Provides:
   for convenience.
 """
 from .hadamard import HadamardTransform, hadamard
+from .pre_scale import PreScaleTransform
 from .smooth_quant import SmoothQuantTransform, compute_smoothquant_scale
 from src.scheme.transform import TransformBase, IdentityTransform
 
 __all__ = [
     "HadamardTransform",
     "hadamard",
+    "PreScaleTransform",
     "SmoothQuantTransform",
     "compute_smoothquant_scale",
     "TransformBase",
