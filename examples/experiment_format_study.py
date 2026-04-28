@@ -345,6 +345,39 @@ def run_part_a_8bit(
     return results
 
 
+def run_part_b_4bit(
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+    eval_loader: DataLoader,
+) -> dict:
+    """Part B: Compare MXINT-4, MXFP-4, INT4-PC, NF4-PC (all 4-bit).
+
+    Args:
+        fp32_model: Reference FP32 model.
+        calib_data: List of calibration batches.
+        eval_loader: Evaluation DataLoader.
+
+    Returns:
+        Dict mapping experiment name to result dict, including an
+        ``FP32 (baseline)`` entry with the reference accuracy.
+    """
+    print("\n### Part B: 4-bit Format Comparison ###")
+    configs = {
+        "MXINT-4": make_op_cfg("int4", PER_B32),
+        "MXFP-4":  make_op_cfg("fp4_e2m1", PER_B32),
+        "INT4-PC": make_op_cfg("int4", PER_C0),
+        "NF4-PC":  make_op_cfg_weight_only("nf4", PER_C0),
+    }
+    results = {}
+    for name, cfg in configs.items():
+        print(f"  Running {name}...")
+        results[name] = run_experiment(cfg, fp32_model, calib_data, eval_loader)
+    results["FP32 (baseline)"] = {
+        "accuracy": results[list(configs.keys())[0]]["fp32_accuracy"],
+    }
+    return results
+
+
 def run_format_study(
     build_model: Callable[[], nn.Module],
     make_calib_data: Callable[..., List[torch.Tensor]],
