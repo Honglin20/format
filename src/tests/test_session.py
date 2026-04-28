@@ -723,3 +723,40 @@ class TestPreScaleIntegration:
         assert q_out.shape == fp32_out.shape
         assert not torch.isnan(q_out).any()
         assert not torch.isnan(fp32_out).any()
+
+    def test_e2e_pre_scale_pot_pipeline(self):
+        """Full pipeline with PoT pre-scale: calibrate -> init -> optimize -> verify PoT."""
+        from src.session import QuantSession
+        from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+
+        torch.manual_seed(42)
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg, keep_fp32=True)
+
+        calib_data = [torch.randn(8, 4) for _ in range(6)]
+
+        # Calibrate
+        with session.calibrate():
+            for batch in calib_data:
+                session(batch)
+
+        # Initialize with pot=True
+        count = session.initialize_pre_scales(calib_data, init="absmax", pot=True)
+        assert count > 0
+
+        # LSQ optimize with pot=True
+        opt = LayerwiseScaleOptimizer(num_steps=20, num_batches=3, lr=0.01, pot=True)
+        scales = session.optimize_scales(opt, calib_data)
+        assert len(scales) >= count
+
+        # All optimized scales must be PoT
+        for scale in scales.values():
+            log2 = torch.log2(scale)
+            assert torch.equal(log2, torch.round(log2)), \
+                f"scale {scale} is not power-of-two"
+
+        # Forward pass works
+        out = session(torch.randn(4, 4))
+        assert out.shape == (4, 3)
+        assert not torch.isnan(out).any()

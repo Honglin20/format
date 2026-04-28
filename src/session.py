@@ -261,6 +261,7 @@ class QuantSession:
         self,
         calib_data: List[torch.Tensor],
         init: str = "absmax",
+        pot: bool = False,
     ) -> int:
         """Initialize ``_pre_scale`` buffers on all quantized modules.
 
@@ -272,6 +273,8 @@ class QuantSession:
             calib_data: List of input tensors from calibration.
             init: Initialization method — ``"absmax"`` (per-tensor absmax
                   of fp32 outputs) or ``"ones"`` (all ones).
+            pot: If True, create a power-of-two PreScaleTransform
+                 (hardware-friendly bit-shift scaling).
 
         Returns:
             Number of modules that received pre-scale buffers.
@@ -300,7 +303,7 @@ class QuantSession:
             module.register_buffer("_pre_scale", init_scale)
 
             # Update cfg to route through PreScaleTransform
-            transform = PreScaleTransform(scale=module._pre_scale)
+            transform = PreScaleTransform(scale=module._pre_scale, pot=pot)
             module.cfg = _replace_transform(module.cfg, transform)
             count += 1
 

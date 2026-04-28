@@ -98,3 +98,30 @@ class TestLayerwiseScaleOptimizerIntegration:
         out = qmodel(torch.randn(2, 4))
         assert out.shape == (2, 3)
         assert not torch.isnan(out).any()
+
+    def test_pot_optimization_produces_power_of_two_scales(self):
+        """With pot=True, optimized scales should be exact powers of two."""
+        from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+        from src.mapping.quantize_model import quantize_model
+
+        torch.manual_seed(42)
+        model = _TinyModel()
+        fp32_model = _TinyModel()
+        fp32_model.load_state_dict(model.state_dict())
+
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_tensor(),
+        )
+        cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
+        qmodel = quantize_model(model, cfg)
+
+        batches = [torch.randn(2, 4) for _ in range(4)]
+        opt = LayerwiseScaleOptimizer(num_steps=30, num_batches=4, lr=0.01, pot=True)
+        scales = opt.optimize(qmodel, fp32_model, batches)
+
+        assert len(scales) > 0
+        for scale in scales.values():
+            log2 = torch.log2(scale)
+            assert torch.equal(log2, torch.round(log2)), \
+                f"scale {scale} is not power-of-two"

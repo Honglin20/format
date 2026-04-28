@@ -115,3 +115,79 @@ class TestPreScaleTransform:
         from src.transform.pre_scale import PreScaleTransform
         with pytest.raises(TypeError, match="must be a torch.Tensor"):
             PreScaleTransform(scale=[1.0, 2.0])
+
+    # ---- PoT (power-of-two) tests ----
+
+    def test_pot_forward_is_power_of_two(self):
+        """With pot=True, scale is projected to nearest PoT before use."""
+        from src.transform.pre_scale import PreScaleTransform
+        scale = torch.tensor([3.0, 0.3, 7.0])  # → 4, 0.25, 8
+        x = torch.ones(3, 4)
+        t = PreScaleTransform(scale=scale, pot=True)
+        out = t.forward(x)
+        assert torch.allclose(out[0], torch.full((4,), 4.0))
+        assert torch.allclose(out[1], torch.full((4,), 0.25))
+        assert torch.allclose(out[2], torch.full((4,), 8.0))
+
+    def test_pot_inverse_divides_by_pot(self):
+        from src.transform.pre_scale import PreScaleTransform
+        scale = torch.tensor([3.0, 0.3])  # → 4, 0.25
+        x_q = torch.ones(2, 3) * 4.0
+        t = PreScaleTransform(scale=scale, pot=True)
+        out = t.inverse(x_q)
+        assert torch.allclose(out[0], torch.ones(3))
+        assert torch.allclose(out[1], torch.full((3,), 16.0))  # 4/0.25=16
+
+    def test_pot_scale_values_are_exact_powers_of_two(self):
+        from src.transform.pre_scale import PreScaleTransform, _pot_scale
+        scale = torch.tensor([1.7, 3.14, 0.4, 15.0])
+        pot = _pot_scale(scale)
+        expected = torch.tensor([2.0, 4.0, 0.5, 16.0])
+        assert torch.equal(pot, expected)
+        # Verify they are exact powers of two
+        log2 = torch.log2(pot)
+        assert torch.equal(log2, torch.round(log2))
+
+    def test_pot_eq_differs_from_non_pot(self):
+        from src.transform.pre_scale import PreScaleTransform
+        s = torch.tensor([2.0])
+        t1 = PreScaleTransform(scale=s, pot=True)
+        t2 = PreScaleTransform(scale=s, pot=False)
+        assert t1 != t2
+
+    def test_pot_hash_differs_from_non_pot(self):
+        from src.transform.pre_scale import PreScaleTransform
+        s = torch.tensor([2.0])
+        t1 = PreScaleTransform(scale=s, pot=True)
+        t2 = PreScaleTransform(scale=s, pot=False)
+        assert hash(t1) != hash(t2)
+
+    def test_pot_roundtrip_preserves_shape(self):
+        """With pot=True, roundtrip values are approximate but shape is preserved."""
+        from src.transform.pre_scale import PreScaleTransform
+        scale = torch.rand(4)
+        x = torch.randn(4, 8)
+        t = PreScaleTransform(scale=scale, pot=True)
+        out = t.inverse(t.forward(x))
+        assert out.shape == x.shape
+
+    def test_pot_integration_with_quant_scheme(self):
+        """QuantScheme with PoT PreScaleTransform works in quantize()."""
+        from src.transform.pre_scale import PreScaleTransform
+        from src.formats.base import FormatBase
+        fmt = FormatBase.from_str("int8")
+        scale = torch.tensor([3.0])  # → PoT 4
+        scheme = QuantScheme(
+            format=fmt,
+            granularity=GranularitySpec.per_tensor(),
+            transform=PreScaleTransform(scale=scale, pot=True),
+        )
+        x = torch.tensor([0.1, -0.2, 0.3])
+        out = quantize(x, scheme)
+        assert out.shape == x.shape
+        assert not torch.isnan(out).any()
+
+    def test_pot_repr(self):
+        from src.transform.pre_scale import PreScaleTransform
+        t = PreScaleTransform(scale=torch.ones(3), pot=True)
+        assert "pot=True" in repr(t)

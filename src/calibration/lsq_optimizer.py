@@ -56,6 +56,8 @@ class LayerwiseScaleOptimizer:
         optimizer: Optimizer name — "adam" or "sgd" (default: "adam").
         lr: Learning rate (default: 1e-3).
         loss: Loss function — "mse" (default: "mse").
+        pot: If True, project pre_scale to power-of-two after each step
+             (hardware-friendly bit-shift scaling).
     """
 
     _VALID_OPTIMIZERS = {"adam", "sgd"}
@@ -68,6 +70,7 @@ class LayerwiseScaleOptimizer:
         optimizer: str = "adam",
         lr: float = 1e-3,
         loss: str = "mse",
+        pot: bool = False,
     ):
         if num_steps < 1:
             raise ValueError(f"num_steps must be >= 1, got {num_steps}")
@@ -89,6 +92,7 @@ class LayerwiseScaleOptimizer:
         self.optimizer = optimizer
         self.lr = lr
         self.loss = loss
+        self.pot = pot
 
     def optimize(
         self,
@@ -156,6 +160,11 @@ class LayerwiseScaleOptimizer:
                     loss = loss_fn(y_q, y_fp32)
                     loss.backward()
                     opt.step()
+                    if self.pot:
+                        with torch.no_grad():
+                            pre_scale.data = 2 ** torch.round(
+                                torch.log2(pre_scale.data)
+                            )
             module.eval()
 
             # Freeze: store optimized scale
@@ -164,7 +173,7 @@ class LayerwiseScaleOptimizer:
 
             # Inject frozen PreScaleTransform into cfg for inference
             original_cfg = module.cfg
-            frozen_transform = PreScaleTransform(scale=optimized_scale)
+            frozen_transform = PreScaleTransform(scale=optimized_scale, pot=self.pot)
             module.cfg = _replace_transform(original_cfg, frozen_transform)
 
             # Persist as module buffer for inference
