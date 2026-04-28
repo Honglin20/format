@@ -1,48 +1,34 @@
 # Current Task
 
-**Task ID**: P5 — Learnable Pre-Scale（Phase 8 研究能力扩展）
-**ADR**: docs/architecture/006-p5-learnable-pre-scale.md
-**Plan**: docs/plans/2026-04-28-p5-pre-scale.md
+**Task ID**: P8 — Format Precision Study (Task 1/11)
+**Plan**: docs/plans/2026-04-28-format-study-plan.md
+**Design**: docs/plans/2026-04-28-format-study-design.md
 **Branch**: feature/refactor-src
 **Tests baseline**: 1305 passed, 0 xfail
 
-## P5 子任务（全部完成 ✅）
+## Progress
 
-- [x] **Task 1: PreScaleTransform**（src/transform/pre_scale.py + 22 tests，含 PoT）
-- [x] **Task 2: Fix quantize_mx()**（ADR-001 合规：非 Identity transform 时委托 quantize()）
-- [x] **Task 3: LayerwiseScaleOptimizer**（src/calibration/lsq_optimizer.py，9 tests，含 PoT）
-- [x] **Task 4: QuantSession 集成**（initialize_pre_scales / optimize_scales，8 tests）
-- [x] **Task 5: 内部 scale 固定**（_fix_internal_scales，per-channel amax buffer）
-- [x] **Task 6: E2E 集成测试**（1 test，full pipeline）
-- [x] **文档与示例更新**：
-  - README.md — Transform 表 + LSQ 章节 + 示例 07 + 测试数量 1305
-  - examples/07_pre_scale.py — PreScale + LSQ + PoT 完整示例
-  - examples/00_comprehensive.py — Section 12（Pre-Scale + LSQ）+ 所有 tuple 语法修复
-  - examples/06_transforms.py — tuple 语法修复
-  - docs/architecture/006-p5-learnable-pre-scale.md — 判断标准全部打勾
+- [x] **Task 1: Experiment script skeleton and user-facing API** ✅
+- [ ] Task 2: Implement run_experiment() — single config runner
+- [ ] Task 3: Part A — 8-bit format comparison
+- [ ] Task 4: Part B — 4-bit format comparison
+- [ ] Task 5: Part C — FP32 vs PoT scaling comparison
+- [ ] Task 6: Part D — Transform analysis (SmoothQuant + Hadamard)
+- [ ] Task 7: Per-layer optimal transform selection
+- [ ] Task 8: Block size sensitivity sweep
+- [ ] Task 9: Table generation (6 tables)
+- [ ] Task 10: Figure generation (11 figures)
+- [ ] Task 11: Cleanup, defaults, and documentation
 
-## Phase 8 所有完成项
+## 下一步（具体动作）
 
-- [x] 8A.1 Hadamard Transform（18 tests）
-- [x] 8B.1 Scale Strategy（20 tests）
-- [x] 8B.2 Calibration Pipeline（15 tests）
-- [x] 8A.2 SmoothQuant Transform（29 tests）
-- [x] 8B.3 Scale Persistence（20 tests）— save_scales/load_scales 磁盘持久化
-- [x] P3 NF4 / Lookup Table Format（51 tests）
-- [x] QuantSession 统一 API（34 tests）
-- [x] P5 Learnable Pre-Scale（40 tests）— PreScaleTransform + LSQ + PoT
-
-## 下一步
-
-P5 全部完成（1305 tests, +40）。下一步：
-- P1 收尾：Bias Correction Transform + Cross-Layer Equalization（低优先级）
-- P7: Auto Search / 自动化量化配置搜索（低优先级）
+Implement Task 2: fill in `run_experiment()` — create QuantSession, calibrate, analyze with observers, evaluate E2E accuracy.
 
 ## 断点续传必读文件
 
-1. `CLAUDE.md`（全文）
-2. `docs/status/CURRENT.md`（本文件）
-3. `docs/architecture/006-p5-learnable-pre-scale.md`（P5 ADR）
+1. `examples/experiment_format_study.py`（全文）
+2. `docs/plans/2026-04-28-format-study-plan.md`（全文）
+3. `docs/plans/2026-04-28-format-study-design.md`（实验矩阵）
 
 ## 关键经验记录
 
