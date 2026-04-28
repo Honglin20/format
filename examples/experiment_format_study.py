@@ -246,8 +246,12 @@ def run_experiment(
     if not calib_data:
         raise ValueError("calib_data must contain at least one batch")
 
+    # Deep-copy fp32_model before QuantSession mutates it in-place via
+    # quantize_model().  Without this copy, repeated calls with the same
+    # fp32_model reference would pass an already-quantized model on the
+    # second and later runs, producing identical QSNR for all configs.
     session = QuantSession(
-        fp32_model, cfg,
+        copy.deepcopy(fp32_model), cfg,
         calibrator=MSEScaleStrategy(),
         keep_fp32=True,
     )
