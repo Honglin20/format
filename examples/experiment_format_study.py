@@ -1326,8 +1326,137 @@ def run_format_study(
     Returns:
         Dict mapping experiment name to result dict.
     """
-    _ = build_model, make_calib_data, make_eval_loader, eval_fn, output_dir
-    return {}
+    if output_dir is None:
+        output_dir = f"results/format_study_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    os.makedirs(f"{output_dir}/figures", exist_ok=True)
+    os.makedirs(f"{output_dir}/tables", exist_ok=True)
+
+    print("=" * 60)
+    print("Quantization Format Precision Study")
+    print(f"Output: {output_dir}")
+    print("=" * 60)
+
+    fp32_model = build_model()
+    fp32_model.eval()
+    calib_data = make_calib_data()
+    eval_loader = make_eval_loader()
+
+    all_results: Dict[str, dict] = {}
+
+    # Part A: 8-bit format comparison
+    print("\n" + "=" * 60)
+    print("PART A: 8-bit Format Comparison")
+    print("=" * 60)
+    all_results["part_a"] = run_part_a_8bit(fp32_model, calib_data, eval_loader)
+    print(generate_table_1(all_results["part_a"], output_dir))
+
+    # Part B: 4-bit format comparison
+    print("\n" + "=" * 60)
+    print("PART B: 4-bit Format Comparison")
+    print("=" * 60)
+    all_results["part_b"] = run_part_b_4bit(fp32_model, calib_data, eval_loader)
+    print(generate_table_2(all_results["part_b"], output_dir))
+
+    # Part C: FP32 vs PoT scaling
+    print("\n" + "=" * 60)
+    print("PART C: FP32 vs PoT Scaling")
+    print("=" * 60)
+    all_results["part_c"] = run_part_c_pot_scaling(fp32_model, calib_data, eval_loader)
+    print(generate_table_3(all_results["part_c"], output_dir))
+
+    # Part D: Transform study
+    print("\n" + "=" * 60)
+    print("PART D: Transform Study")
+    print("=" * 60)
+    all_results["part_d"] = run_part_d_transforms(fp32_model, calib_data, eval_loader)
+    print(generate_table_4(all_results["part_d"], output_dir))
+    print(generate_table_5(all_results["part_d"], output_dir))
+
+    # Table 6: Layer sensitivity
+    print(generate_table_6(all_results, output_dir))
+
+    # Figures
+    print("\n### Generating Figures ###")
+    plot_tasks = [
+        (plot_fig1_qsnr_8bit, all_results["part_a"], "fig1_qsnr_8bit"),
+        (plot_fig2_qsnr_4bit, all_results["part_b"], "fig2_qsnr_4bit"),
+        (plot_fig3_mse_box_8bit, all_results["part_a"], "fig3_mse_8bit"),
+        (plot_fig4_mse_box_4bit, all_results["part_b"], "fig4_mse_4bit"),
+        (plot_fig5_pot_delta, all_results["part_c"], "fig5_pot_delta"),
+        (plot_fig6_histogram_overlay, all_results, "fig6_histogram"),
+        (plot_fig7_transform_heatmap, all_results["part_d"], "fig7_transform_heatmap"),
+        (plot_fig8_transform_pie, all_results["part_d"], "fig8_transform_pie"),
+        (plot_fig9_transform_delta, all_results["part_d"], "fig9_transform_delta"),
+        (plot_fig10_error_vs_distribution, all_results, "fig10_error_vs_dist"),
+        (plot_fig11_layer_type_qsnr, all_results, "fig11_layer_type_qsnr"),
+    ]
+    for fn, data, name in plot_tasks:
+        try:
+            fn(data, output_dir)
+            print(f"  {name}: OK")
+        except Exception as e:
+            print(f"  {name}: FAILED — {e}")
+
+    # Save results JSON
+    _save_results_json(all_results, output_dir)
+
+    print(f"\nStudy complete. Results in {output_dir}/")
+    return all_results
+
+
+def _save_results_json(all_results: dict, output_dir: str):
+    """Save a serializable subset of results to JSON."""
+    serializable: Dict[str, dict] = {}
+    for part_name, part_data in all_results.items():
+        if not part_name.startswith("part_"):
+            continue
+        serializable[part_name] = {}
+        if isinstance(part_data, dict):
+            for config_name, config_data in part_data.items():
+                entry: Dict[str, dict] = {}
+                if isinstance(config_data, dict):
+                    if "accuracy" in config_data:
+                        entry["accuracy"] = config_data["accuracy"]
+                    if "qsnr_per_layer" in config_data:
+                        entry["qsnr_per_layer"] = config_data["qsnr_per_layer"]
+                    if "mse_per_layer" in config_data:
+                        entry["mse_per_layer"] = config_data["mse_per_layer"]
+                serializable[part_name][config_name] = entry
+
+    os.makedirs(output_dir, exist_ok=True)
+    with open(f"{output_dir}/results.json", "w") as f:
+        json.dump(serializable, f, indent=2, default=str)
+    print(f"  results.json: saved")
+
+
+def run_block_size_sweep(
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+    eval_loader: DataLoader,
+    fmt_name: str = "int8",
+) -> dict:
+    """Sweep block sizes for MX format sensitivity analysis.
+
+    Args:
+        fp32_model: Reference FP32 model.
+        calib_data: List of calibration batches.
+        eval_loader: Evaluation DataLoader.
+        fmt_name: Format name (default ``"int8"``).
+
+    Returns:
+        Dict mapping ``"{fmt_name}-blk{size}"`` to experiment result dict.
+    """
+    results = {}
+    for bs in (16, 32, 64, 128):
+        label = f"{fmt_name}-blk{bs}"
+        gran = GranularitySpec.per_block(size=bs, axis=-1)
+        cfg = make_op_cfg(fmt_name, gran)
+        print(f"  Block size {bs}...")
+        try:
+            results[label] = run_experiment(cfg, fp32_model, calib_data, eval_loader)
+        except Exception as e:
+            print(f"    FAILED: {e}")
+    return results
 
 
 # ---------------------------------------------------------------------------
