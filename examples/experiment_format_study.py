@@ -44,7 +44,7 @@ from src.analysis.correlation import LayerSensitivity, ErrorByDistribution
 from src.analysis.e2e import compare_sessions
 from src.session import QuantSession
 from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
-from src.calibration.strategies import ScaleStrategy
+from src.calibration.strategies import MSEScaleStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -212,12 +212,10 @@ def run_experiment(
     *,
     lsq_steps: int = 0,
     lsq_pot: bool = False,
+    lsq_lr: float = 1e-3,
+    eval_fn: Optional[Callable] = None,
 ) -> dict:
     """Run a single quantization experiment and return results.
-
-    .. note::
-        Stub — returns empty ``dict``.  Implementation will be added
-        in Task 2 of the format study plan.
 
     Args:
         cfg: ``OpQuantConfig`` for this experiment.
@@ -227,13 +225,91 @@ def run_experiment(
         observers: List of Observer instances (default: QSNR + MSE).
         lsq_steps: If > 0, run LSQ pre-scale optimization for this many steps.
         lsq_pot: If True, constrain pre-scale to power-of-two during LSQ.
+        lsq_lr: Learning rate for LSQ optimizer.
+        eval_fn: Optional ``(logits, labels) -> dict`` eval function.
+            If ``None``, uses the internal accuracy default.
 
     Returns:
-        Dict with keys including ``accuracy``, ``report``, ``qsnr_per_layer``,
-        ``mse_per_layer``, etc.
+        Dict with keys ``accuracy``, ``fp32_accuracy``, ``delta``, ``report``,
+        ``session``, ``qsnr_per_layer``, ``mse_per_layer``.
     """
-    _ = cfg, fp32_model, calib_data, eval_loader, observers, lsq_steps, lsq_pot
-    return {}
+    if observers is None:
+        observers = [QSNRObserver(), MSEObserver()]
+
+    model_copy = copy.deepcopy(fp32_model)
+    session = QuantSession(
+        model_copy, cfg,
+        calibrator=MSEScaleStrategy(),
+        observers=observers,
+        keep_fp32=True,
+    )
+
+    # 1. Calibrate
+    with session.calibrate():
+        for batch in calib_data:
+            session(batch)
+
+    # 2. Optional LSQ pre-scale optimization
+    if lsq_steps > 0:
+        session.initialize_pre_scales(calib_data, init="ones", pot=lsq_pot)
+        opt = LayerwiseScaleOptimizer(
+            num_steps=lsq_steps,
+            num_batches=len(calib_data),
+            optimizer="adam",
+            lr=lsq_lr,
+            pot=lsq_pot,
+        )
+        session.optimize_scales(opt, calib_data)
+
+    # 3. Analyze with observers
+    with session.analyze(observers=observers) as ctx:
+        for batch in calib_data:
+            session(batch)
+    report = ctx.report()
+
+    # 4. E2E accuracy
+    if eval_fn is not None:
+        result = session.compare(eval_loader, eval_fn=eval_fn)
+    else:
+        result = session.compare(eval_loader)
+
+    # 5. Extract per-layer QSNR/MSE summaries
+    qsnr_per_layer = _extract_metric_per_layer(report, "qsnr_db")
+    mse_per_layer = _extract_metric_per_layer(report, "mse")
+
+    return {
+        "accuracy": result["quant"],
+        "fp32_accuracy": result["fp32"],
+        "delta": result["delta"],
+        "report": report,
+        "session": session,
+        "qsnr_per_layer": qsnr_per_layer,
+        "mse_per_layer": mse_per_layer,
+    }
+
+
+def _extract_metric_per_layer(report: Report, metric: str) -> Dict[str, float]:
+    """Extract per-layer average of a metric from Report.
+
+    Args:
+        report: ``Report`` instance.
+        metric: Metric name to extract (e.g. ``"qsnr_db"``, ``"mse"``).
+
+    Returns:
+        Dict mapping layer name to average metric value.
+    """
+    df = report.to_dataframe()
+    if isinstance(df, list):
+        result = {}
+        for row in df:
+            name = row.get("layer", "unknown")
+            val = row.get(metric)
+            if val is not None:
+                result.setdefault(name, []).append(val)
+        return {k: sum(v) / len(v) for k, v in result.items()}
+    else:
+        grouped = df.groupby("layer")[metric].mean()
+        return grouped.to_dict()
 
 
 def run_format_study(
