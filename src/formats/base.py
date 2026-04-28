@@ -176,6 +176,15 @@ class FormatBase(ABC):
         During JIT tracing (ONNX export), return x unchanged — the Function's
         symbolic() method handles quantization in the ONNX graph.  The traced
         forward() is only used for shape inference.
+
+        Note:
+            The ``scale`` parameter is intentionally ignored for PER_BLOCK
+            quantization.  Per-block quantization computes its own block-level
+            shared exponents from the input tensor.  External ``scale`` values
+            (e.g. from calibration) are amax/scale-factor values designed for
+            PER_CHANNEL, not shared exponents; passing them to ``_quantize_mx``
+            would cause a semantic mismatch (amax vs shared exponent) and
+            produce shape incompatibilities.
         """
         if torch.jit.is_tracing():
             return x
@@ -184,7 +193,7 @@ class FormatBase(ABC):
             x, scale_bits=8, elem_format=self,
             block_size=granularity.block_size,
             axes=granularity.block_axis, round_mode=round_mode,
-            scale=scale,
+            scale=None,
         )
 
     def export_onnx(self, g, x, scheme):
