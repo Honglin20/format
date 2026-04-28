@@ -241,37 +241,49 @@ class SmoothQuantWeightTransform(TransformBase):
 
     invertible = True
 
-    def __init__(self, scale, channel_axis=1):
+    def __init__(self, scale: Tensor, channel_axis: int = 1):
         object.__setattr__(self, "_scale", scale.detach().clone())
         object.__setattr__(self, "_channel_axis", channel_axis)
 
     @property
-    def scale(self):
+    def scale(self) -> Tensor:
         """The per-channel compensation factor (read-only)."""
         return self._scale
 
     @property
-    def channel_axis(self):
+    def channel_axis(self) -> int:
         """The weight input-channel dimension index."""
         return self._channel_axis
 
-    def _broadcast_scale(self, W):
+    def _broadcast_scale(self, W: Tensor) -> Tensor:
+        """Reshape ``self._scale`` to broadcast against ``W``.
+
+        Places scale at ``self._channel_axis`` and size-1 everywhere else.
+
+        Raises:
+            ValueError: If ``self._channel_axis`` is out of bounds for ``W``.
+        """
+        if not (-W.ndim <= self._channel_axis < W.ndim):
+            raise ValueError(
+                f"channel_axis={self._channel_axis} is out of bounds for "
+                f"tensor with {W.ndim} dimensions"
+            )
         shape = [1] * W.ndim
         shape[self._channel_axis] = -1
         return self._scale.view(*shape)
 
-    def forward(self, W):
+    def forward(self, W: Tensor) -> Tensor:
         return W * self._broadcast_scale(W)
 
-    def inverse(self, W_q):
+    def inverse(self, W_q: Tensor) -> Tensor:
         return W_q / self._broadcast_scale(W_q)
 
-    def __eq__(self, other):
+    def __eq__(self, other) -> bool:
         if not isinstance(other, SmoothQuantWeightTransform):
             return False
         return (self._channel_axis == other._channel_axis
                 and torch.equal(self._scale, other._scale))
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((self._channel_axis,
                      tuple(self._scale.flatten().tolist())))

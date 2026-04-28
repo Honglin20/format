@@ -380,7 +380,8 @@ class TestSmoothQuantTransform:
 
 class TestSmoothQuantWeightTransform:
 
-    def _try_import_wt(self):
+    @staticmethod
+    def _try_import_wt():
         try:
             from src.transform.smooth_quant import SmoothQuantWeightTransform
             return SmoothQuantWeightTransform
@@ -486,6 +487,30 @@ class TestSmoothQuantWeightTransform:
         t1 = SmoothQuantWeightTransform(torch.tensor([0.5, 2.0, 1.0]))
         t2 = SmoothQuantWeightTransform(torch.tensor([0.5, 2.0, 1.0]))
         assert hash(t1) == hash(t2)
+
+    def test_channel_axis_out_of_bounds_raises(self):
+        """Out-of-bounds channel_axis raises ValueError."""
+        SmoothQuantWeightTransform = self._try_import_wt()
+        scale = torch.tensor([2.0, 4.0])
+        t = SmoothQuantWeightTransform(scale, channel_axis=5)  # 5 > ndim=2
+        W = torch.randn(4, 2)
+        with pytest.raises(ValueError, match="out of bounds"):
+            t.forward(W)
+
+    def test_not_equal_to_identity(self):
+        """SmoothQuantWeightTransform != IdentityTransform."""
+        SmoothQuantWeightTransform = self._try_import_wt()
+        t = SmoothQuantWeightTransform(torch.tensor([0.5, 2.0]))
+        assert t != IdentityTransform()
+
+    def test_not_equal_to_activation_transform(self):
+        """SmoothQuantWeightTransform != SmoothQuantTransform with same scale."""
+        SmoothQuantWeightTransform = self._try_import_wt()
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([0.5, 2.0, 1.0])
+        t_w = SmoothQuantWeightTransform(scale)
+        t_a = SmoothQuantTransform(scale)
+        assert t_w != t_a
 
 
 # ============================================================================
