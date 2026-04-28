@@ -1,9 +1,10 @@
 # Current Task
 
-**Task ID**: P8.X — QuantSession 统一 API（Phase 8 研究能力扩展）
-**Next**: P5 — LSQ / PACT 可学习量化参数 或 P1 — Bias Correction / CLE
+**Task ID**: P5 — Learnable Pre-Scale（Phase 8 研究能力扩展）
+**ADR**: docs/architecture/006-p5-learnable-pre-scale.md
+**Plan**: docs/plans/2026-04-28-p5-pre-scale.md
 **Branch**: feature/refactor-src
-**Tests baseline**: 1265 passed, 0 xfail（+30 format registry, +8 scale persistence）
+**Tests baseline**: 1294 passed, 0 xfail
 
 ## QuantSession 完成状态
 
@@ -38,17 +39,29 @@ session.train() / .eval() / .parameters() / .state_dict()  # 委托
 - [x] P3 NF4 / Lookup Table Format（51 tests）
 - [x] QuantSession 统一 API（34 tests）
 
+## P5 子任务
+
+- [x] **Task 1: PreScaleTransform**（src/transform/pre_scale.py + 13 tests）
+- [x] **Task 2: Fix quantize_mx()**（ADR-001 合规：非 Identity transform 时委托 quantize()，1 test）
+- [x] **Task 3: LayerwiseScaleOptimizer**（src/calibration/lsq_optimizer.py，8 tests）
+- [x] **Task 4: QuantSession 集成**（initialize_pre_scales / optimize_scales，6 tests）
+- [x] **Task 5: 内部 scale 固定**（_fix_internal_scales，per-channel amax buffer）
+- [x] **Task 6: E2E 集成测试**（1 test，full pipeline）
+
 ## 下一步
 
-P5 — LSQ / PACT 可学习量化参数，或 P1 — Bias Correction / CLE。
+P5 全部完成（1294 tests, +29）。下一步：
+- P1 收尾：Bias Correction Transform + Cross-Layer Equalization（低优先级）
+- P2: Calibration 管线增强（可插拔 scale 策略已完成，calibration dataset + scale persistence 已完成）
+- P4: 参数化格式注册（已完成 LookupFormat，可扩展其他参数化格式）
 
 ## 断点续传必读文件
 
 1. `CLAUDE.md`（全文）
-2. `src/session.py`（QuantSession 实现）
-3. `src/analysis/e2e.py`（Comparator / compare_models / compare_sessions）
-4. `src/calibration/pipeline.py`（CalibrationSession 上下文管理器）
-5. `~/.claude/projects/.../memory/format-research-roadmap.md`（P4/P5 详细说明）
+2. `docs/architecture/006-p5-learnable-pre-scale.md`（P5 ADR）
+3. `docs/plans/2026-04-28-p5-pre-scale.md`（P5 实现计划，6 个 task）
+4. `src/scheme/transform.py`（TransformBase，PreScaleTransform 插入点）
+5. `src/quantize/mx_quantize.py:207-271`（quantize_mx 待修复）
 
 ## 关键经验记录
 
