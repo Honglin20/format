@@ -418,6 +418,155 @@ def run_part_c_pot_scaling(
     return results
 
 
+def _make_smoothquant_transform(
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+) -> TransformBase:
+    """Create SmoothQuantTransform from calibration activation + first Linear weight.
+
+    If no Linear module is found in ``fp32_model``, returns ``IdentityTransform()``
+    as a safe fallback.
+
+    Args:
+        fp32_model: FP32 reference model (used to extract first Linear weight).
+        calib_data: List of calibration batches (first batch used as activation).
+
+    Returns:
+        ``SmoothQuantTransform`` if a Linear module is found, else
+        ``IdentityTransform()``.
+    """
+    if fp32_model is None:
+        return IdentityTransform()
+    x_sample = calib_data[0]
+    with torch.no_grad():
+        fp32_model.eval()
+        target_weight = None
+        for module in fp32_model.modules():
+            if isinstance(module, nn.Linear):
+                target_weight = module.weight.data
+                break
+        if target_weight is None:
+            return IdentityTransform()
+    return SmoothQuantTransform.from_calibration(
+        X_act=x_sample, W=target_weight, alpha=0.5,
+    )
+
+
+def _build_per_layer_optimal_cfg(
+    variant_results: dict,
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+    fmt_str: str,
+    gran: GranularitySpec,
+    cfg_builder: Callable,
+) -> dict:
+    """Build per-layer OpQuantConfig dict choosing best transform per layer by QSNR.
+
+    For each layer in the model, selects the transform variant (None, SmoothQuant,
+    or Hadamard) that achieves the highest QSNR score from the variant experiments.
+
+    Args:
+        variant_results: Dict mapping ``"None"``, ``"SmoothQuant"``, ``"Hadamard"``
+            to their experiment result dicts (which contain ``qsnr_per_layer``).
+        fp32_model: FP32 reference model (for SmoothQuant calibration data).
+        calib_data: List of calibration batches (for SmoothQuant).
+        fmt_str: Format name string for the config builder.
+        gran: ``GranularitySpec`` for the config builder.
+        cfg_builder: ``make_op_cfg`` or ``make_op_cfg_weight_only``.
+
+    Returns:
+        Dict mapping layer name to ``OpQuantConfig``.
+    """
+    # Determine best transform per layer by QSNR
+    layer_best_tx: dict = {}
+    for tx_name in ["None", "SmoothQuant", "Hadamard"]:
+        for layer, qsnr in variant_results[tx_name]["qsnr_per_layer"].items():
+            if qsnr > layer_best_tx.get(layer, ("", -float("inf")))[1]:
+                layer_best_tx[layer] = (tx_name, qsnr)
+
+    # Create a single SmoothQuantTransform for all SQ-chosen layers
+    sq_transform = _make_smoothquant_transform(fp32_model, calib_data)
+    tx_map = {
+        "None": None,
+        "SmoothQuant": sq_transform,
+        "Hadamard": HadamardTransform(),
+    }
+
+    per_layer_cfg = {}
+    for layer, (tx_name, _) in layer_best_tx.items():
+        per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name])
+
+    return per_layer_cfg
+
+
+def run_part_d_transforms(
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+    eval_loader: DataLoader,
+) -> dict:
+    """Part D: Evaluate SmoothQuant and Hadamard transforms at 4-bit,
+    with per-layer optimal transform selection by QSNR.
+
+    For each 4-bit format (MXINT-4, MXFP-4, INT4-PC, NF4-PC), runs three
+    transform variants (No transform, SmoothQuant, Hadamard), then builds
+    a per-layer optimal configuration that picks the best transform per
+    layer based on QSNR.
+
+    Args:
+        fp32_model: Reference FP32 model.
+        calib_data: List of calibration batches.
+        eval_loader: Evaluation DataLoader.
+
+    Returns:
+        Nested dict mapping format name to dict of variant name to result dict.
+        Each variant entry includes an additional ``PerLayerOpt`` entry with
+        the per-layer optimal transform result.
+    """
+    print("\n### Part D: Transform Study at 4-bit ###")
+    fmt_configs = [
+        ("MXINT-4", "int4", PER_B32, False),
+        ("MXFP-4",  "fp4_e2m1", PER_B32, False),
+        ("INT4-PC", "int4", PER_C0, False),
+        ("NF4-PC",  "nf4", PER_C0, True),
+    ]
+
+    all_results = {}
+
+    for fmt_name, fmt_str, gran, weight_only in fmt_configs:
+        print(f"\n  == Transform study for {fmt_name} ==")
+        builder = make_op_cfg_weight_only if weight_only else make_op_cfg
+
+        # Phase 1: Run each transform variant
+        variant_results = {}
+        transforms_to_try = {
+            "None": None,
+            "SmoothQuant": _make_smoothquant_transform(fp32_model, calib_data),
+            "Hadamard": HadamardTransform(),
+        }
+
+        for tx_name, tx in transforms_to_try.items():
+            label = f"{fmt_name}-{tx_name}"
+            print(f"    Running {label}...")
+            cfg = builder(fmt_str, gran, transform=tx)
+            variant_results[tx_name] = run_experiment(
+                cfg, fp32_model, calib_data, eval_loader,
+            )
+
+        # Phase 2: Per-layer optimal
+        per_layer_optimal_cfg = _build_per_layer_optimal_cfg(
+            variant_results, fp32_model, calib_data, fmt_str, gran, builder,
+        )
+        print(f"    Running {fmt_name}-PerLayerOpt...")
+        opt_result = run_experiment(
+            per_layer_optimal_cfg, fp32_model, calib_data, eval_loader,
+        )
+        variant_results["PerLayerOpt"] = opt_result
+
+        all_results[fmt_name] = variant_results
+
+    return all_results
+
+
 def run_format_study(
     build_model: Callable[[], nn.Module],
     make_calib_data: Callable[..., List[torch.Tensor]],
