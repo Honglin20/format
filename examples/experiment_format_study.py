@@ -554,6 +554,7 @@ def _make_smoothquant_transforms(
 
     activations: Dict[str, torch.Tensor] = {}
     weights: Dict[str, torch.Tensor] = {}
+    channel_axes: Dict[str, int] = {}  # per-module activation channel axis
     hooks = []
 
     def _hook(name):
@@ -564,7 +565,11 @@ def _make_smoothquant_transforms(
         return fn
 
     for name, module in fp32_model.named_modules():
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
+        if isinstance(module, nn.Linear):
+            channel_axes[name] = -1  # activation channel = last dim
+            hooks.append(module.register_forward_hook(_hook(name)))
+        elif isinstance(module, nn.Conv2d):
+            channel_axes[name] = 1   # activation channel = dim 1 (NCHW)
             hooks.append(module.register_forward_hook(_hook(name)))
 
     with torch.no_grad():
@@ -580,6 +585,7 @@ def _make_smoothquant_transforms(
             try:
                 per_layer[name] = SmoothQuantTransform.from_calibration(
                     X_act=activations[name], W=weights[name], alpha=0.5,
+                    act_channel_axis=channel_axes.get(name, -1),
                 )
             except (ValueError, RuntimeError) as e:
                 print(f"  Warning: SmoothQuant for {name}: {e}")
