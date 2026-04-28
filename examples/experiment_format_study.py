@@ -42,7 +42,7 @@ from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.transform.hadamard import HadamardTransform
-from src.transform.smooth_quant import SmoothQuantTransform, SmoothQuantWeightTransform
+from src.transform.smooth_quant import SmoothQuantTransform
 from src.transform.pre_scale import PreScaleTransform
 from src.analysis.observers import (
     QSNRObserver, MSEObserver, HistogramObserver, DistributionObserver,
@@ -255,10 +255,13 @@ def _make_sq_op_cfg(
 
         (X / s) @ (W * s) = X @ W
 
+    The weight compensation ``W * s`` is a ONE-TIME fusion performed during
+    calibration (see ``_fuse_smoothquant_weights``).  After fusion, the weight
+    is quantized with ``IdentityTransform`` — the scale is already baked in.
+
     - **input** role: ``SmoothQuantTransform`` — ``forward(x) = x / s``
-    - **weight** role: ``SmoothQuantWeightTransform`` — ``forward(W) = W * s``
-    - **output** role: ``IdentityTransform`` (no transform; the matmul output
-      is already compensated by the inverse transforms during dequant)
+    - **weight** role: ``IdentityTransform`` (scale already fused into W)
+    - **output** role: ``IdentityTransform``
 
     Args:
         fmt_name: Format name string.
@@ -270,19 +273,16 @@ def _make_sq_op_cfg(
 
     Returns:
         ``OpQuantConfig`` with activation-side SmoothQuant on ``input``,
-        weight-side compensation on ``weight``, and ``IdentityTransform``
-        on ``output``.
+        ``IdentityTransform`` on weight and output.
     """
     fmt = FormatBase.from_str(fmt_name)
-    # Weight compensation: W * s (same scale, inverse operation)
-    w_transform = SmoothQuantWeightTransform(sq_transform.scale)
+    no_tx = IdentityTransform()
     input_scheme = QuantScheme(
         format=fmt, granularity=granularity, transform=sq_transform,
     )
     weight_scheme = QuantScheme(
-        format=fmt, granularity=granularity, transform=w_transform,
+        format=fmt, granularity=granularity, transform=no_tx,
     )
-    no_tx = IdentityTransform()
     if weight_only:
         return OpQuantConfig(input=input_scheme, weight=weight_scheme)
     else:
@@ -580,16 +580,31 @@ def _make_smoothquant_transforms(
         h.remove()
 
     per_layer: Dict[str, TransformBase] = {}
+    module_map = dict(fp32_model.named_modules())
+
     for name in activations:
-        if name in weights:
-            try:
-                per_layer[name] = SmoothQuantTransform.from_calibration(
-                    X_act=activations[name], W=weights[name], alpha=0.5,
-                    act_channel_axis=channel_axes.get(name, -1),
-                )
-            except (ValueError, RuntimeError) as e:
-                print(f"  Warning: SmoothQuant for {name}: {e}")
-                per_layer[name] = IdentityTransform()
+        if name not in weights:
+            continue
+        try:
+            act_axis = channel_axes.get(name, -1)
+            sq_t = SmoothQuantTransform.from_calibration(
+                X_act=activations[name], W=weights[name], alpha=0.5,
+                act_channel_axis=act_axis,
+            )
+            per_layer[name] = sq_t
+
+            # One-time weight fusion: W = W * s (SmoothQuant paper eq. 3).
+            # After this, weight quantize uses IdentityTransform.
+            module = module_map.get(name)
+            if module is not None and hasattr(module, "weight") and module.weight is not None:
+                W = module.weight.data
+                w_axis = 1  # PyTorch standard: dim 1 = input channel
+                shape = [1] * W.ndim
+                shape[w_axis] = -1
+                module.weight.data = W * sq_t.scale.view(*shape)
+        except (ValueError, RuntimeError) as e:
+            print(f"  Warning: SmoothQuant for {name}: {e}")
+            per_layer[name] = IdentityTransform()
 
     return per_layer
 
@@ -682,11 +697,11 @@ def run_part_d_transforms(
         # Phase 1: Run each transform variant
         variant_results = {}
         sq_transforms = _make_smoothquant_transforms(fp32_model, calib_data)
-        # For the SmoothQuant variant, build per-layer configs so each layer
-        # gets its own correctly-shaped companion transform pair:
-        #   activation: x / s → quantize → x_q * s  (SmoothQuantTransform)
-        #   weight:     W * s → quantize → W_q / s  (SmoothQuantWeightTransform)
-        # This preserves mathematical equivalence: (X/s) @ (W*s) = X@W
+        # For the SmoothQuant variant, build per-layer configs. Each layer gets
+        # its own SmoothQuantTransform for the activation side (x / s).
+        # Weight compensation (W * s) is a one-time fusion during calibration,
+        # so weight quantize uses IdentityTransform.
+        # Mathematical equivalence: (X/s) @ (W*s) = X@W
         sq_per_layer_cfg = {}
         for lname, sq_tx in sq_transforms.items():
             sq_per_layer_cfg[lname] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)

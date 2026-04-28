@@ -2,12 +2,16 @@
 SmoothQuantTransform: pre-quantization activation smoothing via per-channel scaling.
 
 SmoothQuant (Xiao et al., 2023) smooths activation outliers by dividing each
-channel of the activation by a per-channel scale factor, then compensating by
-multiplying the corresponding input channel of the weight by the same factor.
-This migrates quantization difficulty from activations to weights.
+channel of the activation by a per-channel scale factor, then permanently
+fusing the inverse compensation (W * s) into the weight tensor at calibration
+time.  This migrates quantization difficulty from activations to weights.
 
 This module implements the ACTIVATION side: forward(x) = x / scale.
-The weight side (W * s) is applied separately by the caller.
+
+The weight-side compensation (W * s) is a ONE-TIME model weight modification
+performed during calibration (see ``_fuse_smoothquant_weights``).  After
+fusion, the weight is quantized with ``IdentityTransform`` — the scale is
+already baked into the weight values, matching the original paper.
 
 Design: immutable scale set at construction time. The ``from_calibration()``
 factory computes scale from activation statistics and weight tensor.
@@ -247,74 +251,3 @@ class SmoothQuantTransform(TransformBase):
         return hash((self._channel_axis, tuple(self._scale.flatten().tolist())))
 
 
-class SmoothQuantWeightTransform(TransformBase):
-    """Weight-side SmoothQuant compensation: ``forward(W) = W * scale``.
-
-    Companion to :class:`SmoothQuantTransform`.  While the activation side
-    divides by the per-channel scale (``x / s``), the weight side multiplies
-    by the same scale (``W * s``) to maintain mathematical equivalence::
-
-        (X / s) @ (W * s) = X @ W
-
-    The scale is the same tensor used in the activation-side transform,
-    obtained via ``sq_transform.scale``.
-
-    The weight's input-channel dimension defaults to **dim 1** (``[OC, IC]``
-    for Linear, ``[OC, IC, H, W]`` for Conv).  The scale broadcasts as
-    ``[1, IC, 1, ...]``.
-
-    Args:
-        scale: 1D tensor of per-channel compensation factors. Cloned internally.
-        channel_axis: Dimension of ``W`` that is the input-channel axis.
-               Default ``1`` (matches both Linear [OC, IC] and
-               Conv [OC, IC, H, W] weight layouts).
-    """
-
-    invertible = True
-
-    def __init__(self, scale: Tensor, channel_axis: int = 1):
-        object.__setattr__(self, "_scale", scale.detach().clone())
-        object.__setattr__(self, "_channel_axis", channel_axis)
-
-    @property
-    def scale(self) -> Tensor:
-        """The per-channel compensation factor (read-only)."""
-        return self._scale
-
-    @property
-    def channel_axis(self) -> int:
-        """The weight input-channel dimension index."""
-        return self._channel_axis
-
-    def _broadcast_scale(self, W: Tensor) -> Tensor:
-        """Reshape ``self._scale`` to broadcast against ``W``.
-
-        Places scale at ``self._channel_axis`` and size-1 everywhere else.
-
-        Raises:
-            ValueError: If ``self._channel_axis`` is out of bounds for ``W``.
-        """
-        if not (-W.ndim <= self._channel_axis < W.ndim):
-            raise ValueError(
-                f"channel_axis={self._channel_axis} is out of bounds for "
-                f"tensor with {W.ndim} dimensions"
-            )
-        shape = [1] * W.ndim
-        shape[self._channel_axis] = -1
-        return self._scale.view(*shape)
-
-    def forward(self, W: Tensor) -> Tensor:
-        return W * self._broadcast_scale(W)
-
-    def inverse(self, W_q: Tensor) -> Tensor:
-        return W_q / self._broadcast_scale(W_q)
-
-    def __eq__(self, other) -> bool:
-        if not isinstance(other, SmoothQuantWeightTransform):
-            return False
-        return (self._channel_axis == other._channel_axis
-                and torch.equal(self._scale, other._scale))
-
-    def __hash__(self) -> int:
-        return hash((self._channel_axis,
-                     tuple(self._scale.flatten().tolist())))
