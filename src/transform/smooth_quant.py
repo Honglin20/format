@@ -73,15 +73,25 @@ def compute_smoothquant_scale(
         # Pre-computed per-channel statistics
         act_amax = X_act.abs()
     else:
+        # Normalize negative axis before comparison
+        act_axis = (
+            act_channel_axis if act_channel_axis >= 0
+            else X_act.ndim + act_channel_axis
+        )
         # Reduce all dims except act_channel_axis
         reduce_dims = tuple(
-            d for d in range(X_act.ndim) if d != act_channel_axis
+            d for d in range(X_act.ndim) if d != act_axis
         )
         act_amax = torch.amax(torch.abs(X_act), dim=reduce_dims)
 
     # --- Weight per-input-channel max ---
+    # Normalize negative axis before comparison
+    w_axis = (
+        w_channel_axis if w_channel_axis >= 0
+        else W.ndim + w_channel_axis
+    )
     # Reduce all dims except w_channel_axis
-    w_reduce_dims = tuple(d for d in range(W.ndim) if d != w_channel_axis)
+    w_reduce_dims = tuple(d for d in range(W.ndim) if d != w_axis)
     w_amax = torch.amax(torch.abs(W), dim=w_reduce_dims)
 
     # --- SmoothQuant scale ---

@@ -175,14 +175,20 @@ class TestComputeSmoothQuantScale:
         assert torch.allclose(scale, expected, atol=1e-6)
 
     def test_act_channel_axis_default(self):
-        """Default act_channel_axis=-1 preserves backward compatibility."""
+        """Default act_channel_axis=-1 preserves backward compatibility (per-channel max)."""
         compute_smoothquant_scale, _ = _try_import()
         torch.manual_seed(42)
-        X = torch.randn(4, 16)
-        W = torch.randn(8, 16)
-        scale_new = compute_smoothquant_scale(X, W, act_channel_axis=-1, w_channel_axis=1)
-        scale_old = compute_smoothquant_scale(X, W)
-        assert torch.equal(scale_new, scale_old)
+        X = torch.randn(4, 16)  # (N, C=16) Linear-style
+        W = torch.randn(8, 16)  # (OC=8, IC=16)
+        scale = compute_smoothquant_scale(X, W)
+        assert scale.shape == (16,)
+
+        # Verify: act_channel_axis=-1 means reduce all except last dim
+        act_amax_expected = torch.amax(torch.abs(X), dim=(0,))
+        w_amax_expected = torch.amax(torch.abs(W), dim=(0,))
+        expected = (act_amax_expected.clamp(min=1e-12).pow(0.5)
+                    / w_amax_expected.clamp(min=1e-12).pow(0.5))
+        assert torch.allclose(scale, expected, atol=1e-6)
 
     def test_w_channel_axis_zero(self):
         """w_channel_axis=0: reduce all except dim 0 (unusual weight layout)."""
@@ -193,6 +199,18 @@ class TestComputeSmoothQuantScale:
         act_stats = torch.randn(4).abs()
         scale = compute_smoothquant_scale(act_stats, W, w_channel_axis=0)
         assert scale.shape == (4,)
+
+    def test_w_channel_axis_negative(self):
+        """w_channel_axis=-1 correctly normalizes to last dim."""
+        compute_smoothquant_scale, _ = _try_import()
+        torch.manual_seed(42)
+        act_stats = torch.randn(8).abs()  # 1D stats for 8 channels
+        W = torch.randn(4, 8)  # (OC=4, IC=8) — input channel at dim 1
+        # w_channel_axis=-1 should normalize to dim 1 (last dim of 2D weight)
+        scale_neg = compute_smoothquant_scale(act_stats, W, w_channel_axis=-1)
+        scale_pos = compute_smoothquant_scale(act_stats, W, w_channel_axis=1)
+        assert torch.equal(scale_neg, scale_pos), \
+            f"w_channel_axis=-1 should normalize to dim 1 for 2D weight"
 
     def test_from_calibration_passes_act_channel_axis(self):
         """from_calibration passes act_channel_axis through to the transform."""
