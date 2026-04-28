@@ -14,7 +14,7 @@ QuantScheme = format × granularity × transform
 |---|---|---|
 | `format` | 数值格式（int8 / fp8 / nf4 / bf16 等） | `FormatBase.from_str("nf4")` |
 | `granularity` | 量化粒度（per_tensor / per_channel / per_block） | `GranularitySpec.per_block(32)` |
-| `transform` | 量化前后变换（Hadamard / SmoothQuant 等） | `HadamardTransform()` |
+| `transform` | 量化前后变换（Hadamard / SmoothQuant / PreScale 等） | `PreScaleTransform(scale, pot=True)` |
 
 算子级配置由 `OpQuantConfig` 描述，每个 tensor 角色接一个 scheme pipeline（forward + QAT backward 共 12 个角色）。
 
@@ -94,6 +94,8 @@ results = compare_sessions({"int8": s1, "fp4": s2, "nf4": s3}, eval_loader)
 | `session.comparator()` | `Comparator` | 手动模式：用户控制循环 + 自定义指标 |
 | `session.export_onnx(path)` | — | 导出 ONNX（自动使用上次推理输入） |
 | `session.clear_scales()` | list | 清除所有 `_output_scale` buffer |
+| `session.initialize_pre_scales(data, init, pot)` | int | 初始化 `_pre_scale` buffer，更新 cfg 为 PreScaleTransform |
+| `session.optimize_scales(opt, data)` | dict | 逐层 LSQ 梯度优化 pre_scale（需 `keep_fp32=True`） |
 
 ---
 
@@ -109,31 +111,31 @@ from src.scheme.op_config import OpQuantConfig
 fmt = FormatBase.from_str("int8")
 scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
 cfg = OpQuantConfig(
-    input=(scheme,),
-    weight=(scheme,),
-    output=(scheme,),
+    input=scheme,
+    weight=scheme,
+    output=scheme,
 )
 
 # ── 方式 B：分层配置（不同层不同精度）────────────────────────
 # 量化模型时用 dict 映射
 cfg_dict = {
-    "encoder.*":  OpQuantConfig(input=(int8,), weight=(int8,), output=(int8,)),
-    "decoder.0":  OpQuantConfig(input=(fp8,), weight=(fp8,), output=(fp8,)),
-    "decoder.*":  OpQuantConfig(input=(int4,), weight=(int4,), output=(int4,)),
+    "encoder.*":  OpQuantConfig(input=int8_scheme, weight=int8_scheme, output=int8_scheme),
+    "decoder.0":  OpQuantConfig(input=fp8_scheme, weight=fp8_scheme, output=fp8_scheme),
+    "decoder.*":  OpQuantConfig(input=int4_scheme, weight=int4_scheme, output=int4_scheme),
 }
 
 # ── 方式 C：MX block-wise 量化 ─────────────────────────────────
 mx_fmt = FormatBase.from_str("fp4_e2m1")
 mx_scheme = QuantScheme(mx_fmt, GranularitySpec.per_block(32))
-mx_cfg = OpQuantConfig(input=(mx_scheme,), weight=(mx_scheme,), output=(mx_scheme,))
+mx_cfg = OpQuantConfig(input=mx_scheme, weight=mx_scheme, output=mx_scheme)
 
 # ── 方式 D：NF4 查找表格式（适合 weight-only）───────────────────
 nf4_fmt = FormatBase.from_str("nf4")  # QLoRA 正态优化 4-bit LUT
 nf4_scheme = QuantScheme(nf4_fmt, GranularitySpec.per_channel(axis=0))
-nf4_cfg = OpQuantConfig(weight=(nf4_scheme,))
+nf4_cfg = OpQuantConfig(weight=nf4_scheme)
 ```
 
-**OpQuantConfig 完整字段**（每个字段是 `tuple[QuantScheme, ...]` 的 pipeline）：
+**OpQuantConfig 完整字段**（每个字段是 `QuantScheme | None`，两阶段模型 — storage + compute）：
 
 | 角色 | 字段 | 说明 |
 |---|---|---|
@@ -309,6 +311,7 @@ Transform 在量化前后对张量做可逆变换，降低量化误差：
 ```python
 from src.transform.hadamard import HadamardTransform
 from src.transform.smooth_quant import SmoothQuantTransform
+from src.transform.pre_scale import PreScaleTransform
 
 # Hadamard 正交旋转：分散 outlier 能量
 scheme = QuantScheme(
@@ -326,7 +329,42 @@ scheme = QuantScheme(
     granularity=GranularitySpec.per_channel(axis=-1),
     transform=scale,  # forward: x/scale, inverse: x*scale
 )
+
+# PreScale：可学习前置 scale（通过 QuantSession.initialize_pre_scales 初始化）
+# 也可直接传入外部 owned tensor（如 nn.Parameter）
+scheme = QuantScheme(
+    format=FormatBase.from_str("int8"),
+    granularity=GranularitySpec.per_tensor(),
+    transform=PreScaleTransform(scale=torch.ones(1), pot=True),
+    # pot=True: scale 投影到 2 的幂次（bit-shift，硬件友好）
+)
 ```
+
+### LSQ 逐层 Scale 优化
+
+```python
+from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+
+# 阶段 1：初始化 pre_scale（为每层创建 _pre_scale buffer）
+session.initialize_pre_scales(calib_data, init="ones", pot=True)
+
+# 阶段 2：逐层 LSQ 优化（梯度下降最小化 MSE vs fp32）
+optimizer = LayerwiseScaleOptimizer(
+    num_steps=100,       # 每层优化步数
+    num_batches=8,       # 校准 batch 数
+    optimizer="adam",    # "adam" 或 "sgd"
+    lr=1e-3,             # 学习率
+    pot=True,            # 投影到 2 的幂次（PoT 约束）
+)
+result = session.optimize_scales(optimizer, calib_data)
+# → 返回 {module_name: optimized_pre_scale, ...}
+```
+
+| Transform | 方法 | 说明 |
+|---|---|---|
+| `PreScaleTransform(scale, pot=False)` | `x * scale` / `x_q / scale` | 可学习前置 scale，pot=True 投影到 2 的幂次 |
+| `HadamardTransform()` | WHT(x) / WHT(x_q) | 正交旋转分散 outlier 能量 |
+| `SmoothQuantTransform(scale)` | `x / scale` / `x_q * scale` | 平滑 activation outlier → weight |
 
 ---
 
@@ -370,8 +408,8 @@ scheme = QuantScheme(format=custom, granularity=GranularitySpec.per_tensor())
 
 ```python
 cfg_qat = OpQuantConfig(
-    input=(scheme,), weight=(scheme,), output=(scheme,),
-    grad_output=(scheme,), grad_input=(scheme,), grad_weight=(scheme,),
+    input=scheme, weight=scheme, output=scheme,
+    grad_output=scheme, grad_input=scheme, grad_weight=scheme,
 )
 linear = QuantizedLinear(768, 768, cfg=cfg_qat)
 # forward + backward 全程量化，与 mx/ bit-exact 等价
@@ -389,8 +427,8 @@ src/
 ├── ops/             # 量化算子（Linear / Conv / Norm / Activation 等）
 ├── analysis/        # 误差分析框架（AnalysisContext / Observer / e2e comparison）
 ├── mapping/         # quantize_model 模型级量化入口
-├── calibration/     # Calibration 管线（ScaleStrategy / CalibrationSession）
-├── transform/       # Hadamard / SmoothQuant 变换
+├── calibration/     # Calibration 管线（ScaleStrategy / CalibrationSession / LSQOptimizer）
+├── transform/       # Hadamard / SmoothQuant / PreScale 变换
 ├── onnx/            # ONNX 导出
 ├── context/         # QuantizeContext（inline op 截获）
 └── session.py       # QuantSession 统一 API
@@ -401,11 +439,11 @@ mx/                  # 原始 microsoft/microxcaling（只读）
 
 ## 示例
 
-`examples/` 目录下有一个**全功能汇总示例**和 6 个专项示例：
+`examples/` 目录下有一个**全功能汇总示例**和 7 个专项示例：
 
 ```bash
-# 全功能汇总（推荐首先运行）— 涵盖所有 11 种格式、3 种粒度、2 种 Transform、
-# 4 种校准策略、4 种 Observer、QAT、自定义格式注册、多 session 对比等
+# 全功能汇总（推荐首先运行）— 涵盖所有 11 种格式、3 种粒度、3 种 Transform、
+# 4 种校准策略、4 种 Observer、QAT、LSQ 优化、自定义格式注册、多 session 对比等
 PYTHONPATH=. python examples/00_comprehensive.py
 
 # 专项示例
@@ -415,6 +453,7 @@ PYTHONPATH=. python examples/03_calibration_analysis.py  # 四种策略对比 + 
 PYTHONPATH=. python examples/04_e2e_comparison.py  # Comparator / compare_models / compare_sessions
 PYTHONPATH=. python examples/05_onnx_export.py   # ONNX 导出（int8/channel/block + auto-input）
 PYTHONPATH=. python examples/06_transforms.py    # Hadamard + SmoothQuant 变换
+PYTHONPATH=. python examples/07_pre_scale.py     # PreScale + LSQ 逐层优化 + PoT 约束
 ```
 
 所有示例独立可运行，输出可验证结果。
@@ -436,7 +475,7 @@ cfg = op_config_from_mx_specs(mx_specs)
 
 ```bash
 pytest src/tests/ -q
-# 1247 passed, 0 xfail
+# 1305 passed, 0 xfail
 ```
 
 所有等价性测试严格使用 `torch.equal`（bit-exact），不允许 atol/rtol 宽松匹配。

@@ -41,7 +41,7 @@ def main():
     # int4 without transform (baseline)
     int4_fmt = FormatBase.from_str("int4")
     int4_scheme = QuantScheme(format=int4_fmt, granularity=GranularitySpec.per_tensor())
-    int4_cfg = OpQuantConfig(input=(int4_scheme,), weight=(int4_scheme,), output=(int4_scheme,))
+    int4_cfg = OpQuantConfig(input=int4_scheme, weight=int4_scheme, output=int4_scheme)
 
     q_int4 = quantize_model(ToyMLP(), cfg=int4_cfg)
     q_int4.load_state_dict(sd, strict=False)
@@ -54,7 +54,7 @@ def main():
         granularity=GranularitySpec.per_channel(axis=-1),
         transform=HadamardTransform(),
     )
-    hadamard_cfg = OpQuantConfig(input=(hadamard_scheme,), weight=(hadamard_scheme,), output=(hadamard_scheme,))
+    hadamard_cfg = OpQuantConfig(input=hadamard_scheme, weight=hadamard_scheme, output=hadamard_scheme)
 
     q_had = quantize_model(ToyMLP(), cfg=hadamard_cfg)
     q_had.load_state_dict(sd, strict=False)
@@ -72,7 +72,7 @@ def main():
     # int8 without transform
     int8_fmt = FormatBase.from_str("int8")
     int8_scheme = QuantScheme(format=int8_fmt, granularity=GranularitySpec.per_tensor())
-    int8_cfg = OpQuantConfig(input=(int8_scheme,), weight=(int8_scheme,), output=(int8_scheme,))
+    int8_cfg = OpQuantConfig(input=int8_scheme, weight=int8_scheme, output=int8_scheme)
 
     q_int8 = quantize_model(ToyMLP(), cfg=int8_cfg)
     q_int8.load_state_dict(sd, strict=False)
@@ -96,15 +96,15 @@ def main():
         granularity=GranularitySpec.per_channel(axis=-1),
         transform=sq_transform,
     )
-    sq_input_cfg = OpQuantConfig(input=(sq_scheme,))  # apply only to fc1 input
+    sq_input_cfg = OpQuantConfig(input=sq_scheme)  # apply only to fc1 input
 
     # Per-layer config: SmoothQuant on fc1 input only, rest is plain int8
     per_layer_cfg = {
         "fc1": OpQuantConfig(
-            input=(sq_scheme,), weight=(int8_scheme,), output=(int8_scheme,),
+            input=sq_scheme, weight=int8_scheme, output=int8_scheme,
         ),
         "fc2": int8_cfg,
-        "ln":  OpQuantConfig(input=(int8_scheme,), output=(int8_scheme,)),
+        "ln":  OpQuantConfig(input=int8_scheme, output=int8_scheme),
     }
 
     q_sq = quantize_model(ToyMLP(), cfg=per_layer_cfg)

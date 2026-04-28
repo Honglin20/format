@@ -25,7 +25,7 @@ def demo_uniform_int8():
     print("A — Uniform int8 (per_tensor)")
     fmt = FormatBase.from_str("int8")
     scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
-    cfg = OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+    cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
     model = ToyMLP()
     qmodel = quantize_model(model, cfg=cfg)
@@ -52,13 +52,13 @@ def demo_per_layer_dict():
         format=FormatBase.from_str("fp8_e4m3"),
         granularity=GranularitySpec.per_tensor(),
     )
-    int8_cfg = OpQuantConfig(input=(int8_scheme,), weight=(int8_scheme,), output=(int8_scheme,))
-    fp8_cfg = OpQuantConfig(input=(fp8_scheme,), weight=(fp8_scheme,), output=(fp8_scheme,))
+    int8_cfg = OpQuantConfig(input=int8_scheme, weight=int8_scheme, output=int8_scheme)
+    fp8_cfg = OpQuantConfig(input=fp8_scheme, weight=fp8_scheme, output=fp8_scheme)
 
     cfg_dict = {
         "fc1": fp8_cfg,      # first layer gets fp8
         "fc2": int8_cfg,     # second layer gets int8
-        "ln":  OpQuantConfig(input=(int8_scheme,), output=(int8_scheme,)),
+        "ln":  OpQuantConfig(input=int8_scheme, output=int8_scheme),
     }
 
     model = ToyMLP()
@@ -80,7 +80,7 @@ def demo_mx_blockwise():
 
     fmt = FormatBase.from_str("fp4_e2m1")
     scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_block(32))
-    cfg = OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+    cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
     model = ToyMLP()
     qmodel = quantize_model(model, cfg=cfg)
@@ -101,7 +101,7 @@ def demo_nf4_weight_only():
 
     nf4_fmt = FormatBase.from_str("nf4")
     nf4_scheme = QuantScheme(nf4_fmt, GranularitySpec.per_channel(axis=0))
-    cfg = OpQuantConfig(weight=(nf4_scheme,))  # only weight is quantized
+    cfg = OpQuantConfig(weight=nf4_scheme)  # only weight is quantized
 
     model = ToyMLP()
     qmodel = quantize_model(model, cfg=cfg)
@@ -124,11 +124,11 @@ def demo_mode_comparison():
         format=FormatBase.from_str("int8"),
         granularity=GranularitySpec.per_tensor(),
     )
-    int8_cfg = OpQuantConfig(input=(int8_scheme,), weight=(int8_scheme,), output=(int8_scheme,))
+    int8_cfg = OpQuantConfig(input=int8_scheme, weight=int8_scheme, output=int8_scheme)
 
     nf4_fmt = FormatBase.from_str("nf4")
     nf4_scheme = QuantScheme(nf4_fmt, GranularitySpec.per_channel(axis=0))
-    nf4_cfg = OpQuantConfig(weight=(nf4_scheme,))
+    nf4_cfg = OpQuantConfig(weight=nf4_scheme)
 
     x = torch.randn(4, 128)
 

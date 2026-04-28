@@ -42,6 +42,8 @@ from src.calibration.strategies import (
 )
 from src.transform.hadamard import HadamardTransform
 from src.transform.smooth_quant import SmoothQuantTransform
+from src.transform.pre_scale import PreScaleTransform
+from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
 
 
 D = 128   # hidden dim
@@ -70,13 +72,13 @@ def fmt(name):
 def scheme(fmt_name, gran, **kw):
     return QuantScheme(format=fmt(fmt_name), granularity=gran, **kw)
 
-def cfg_in(s):   return OpQuantConfig(input=(s,))
-def cfg_w(s):    return OpQuantConfig(weight=(s,))
-def cfg_io(s):   return OpQuantConfig(input=(s,), output=(s,))
-def cfg_iwo(s):  return OpQuantConfig(input=(s,), weight=(s,), output=(s,))
+def cfg_in(s):   return OpQuantConfig(input=s)
+def cfg_w(s):    return OpQuantConfig(weight=s)
+def cfg_io(s):   return OpQuantConfig(input=s, output=s)
+def cfg_iwo(s):  return OpQuantConfig(input=s, weight=s, output=s)
 def cfg_qat(s):  return OpQuantConfig(
-    input=(s,), weight=(s,), output=(s,),
-    grad_output=(s,), grad_input=(s,), grad_weight=(s,),
+    input=s, weight=s, output=s,
+    grad_output=s, grad_input=s, grad_weight=s,
 )
 
 PER_T  = GranularitySpec.per_tensor()
@@ -189,7 +191,7 @@ def section_3():
 
     # Hadamard on input
     had_s = QuantScheme(i4, PER_C, transform=HadamardTransform())
-    had_c = OpQuantConfig(input=(had_s,), weight=(QuantScheme(i4, PER_T),), output=(QuantScheme(i4, PER_T),))
+    had_c = OpQuantConfig(input=had_s, weight=QuantScheme(i4, PER_T), output=QuantScheme(i4, PER_T))
     q_h = quantize_model(ToyMLP(), cfg=had_c)
     q_h.load_state_dict(sd, strict=False); q_h.eval()
     with torch.no_grad():
@@ -218,8 +220,8 @@ def section_3():
 
     sq_cfg = {
         "fc1": OpQuantConfig(
-            input=(QuantScheme(i8, PER_C, transform=sq_t),),
-            weight=(i8_s,), output=(i8_s,),
+            input=QuantScheme(i8, PER_C, transform=sq_t),
+            weight=i8_s, output=i8_s,
         ),
         "fc2": cfg_iwo(i8_s),
         "ln":  cfg_io(i8_s),
@@ -350,13 +352,13 @@ def section_5():
 
     # Per-layer: fc1 gets fp8, fc2 gets int8, ln gets int8 io only
     layer_cfg = {
-        "fc1": OpQuantConfig(input=(fp8_s,), weight=(fp8_s,), output=(fp8_s,)),
-        "fc2": OpQuantConfig(input=(i8_s,), weight=(i8_s,), output=(i8_s,)),
+        "fc1": OpQuantConfig(input=fp8_s, weight=fp8_s, output=fp8_s),
+        "fc2": OpQuantConfig(input=i8_s, weight=i8_s, output=i8_s),
         "ln":  cfg_io(i8_s),
     }
     # Per-op inline: matmul gets no quant, add gets int8
     op_cfgs = {
-        "add": OpQuantConfig(input=(i8_s,), output=(i8_s,)),
+        "add": OpQuantConfig(input=i8_s, output=i8_s),
     }
 
     session = QuantSession(ToyMLP(), cfg=layer_cfg, op_cfgs=op_cfgs)
@@ -405,10 +407,10 @@ def section_6():
     print(f"  loss:     {loss.item():.6f}")
     print(f"  backward: OK (grad flowed through quantized path)")
 
-    # Check that grad_* fields are populated (cfg has shape implies pipeline active)
-    print(f"  grad_output schemes: {len(qat_cfg.grad_output)}")
-    print(f"  grad_input schemes:  {len(qat_cfg.grad_input)}")
-    print(f"  grad_weight schemes: {len(qat_cfg.grad_weight)}")
+    # Check that grad_* fields are populated (non-None = pipeline active)
+    print(f"  grad_output: {qat_cfg.grad_output is not None}")
+    print(f"  grad_input:  {qat_cfg.grad_input is not None}")
+    print(f"  grad_weight: {qat_cfg.grad_weight is not None}")
     print()
 
 
@@ -610,6 +612,65 @@ def section_11():
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Section 12 — Pre-Scale + LSQ Optimization
+# ══════════════════════════════════════════════════════════════════════
+
+def section_12():
+    print("=" * 60)
+    print("12. PRE-SCALE + LSQ OPTIMIZATION (PoT)")
+    print("=" * 60)
+
+    # Initialize QuantSession with int8 config
+    sess = QuantSession(ToyMLP(), cfg=cfg_iwo(scheme("int8", PER_T)))
+    sess.eval()
+
+    calib_data = [torch.randn(8, D) for _ in range(4)]
+
+    # 12a. Initialize pre-scales (ones → identity)
+    print("  12a. Initializing pre-scales (init='ones', pot=True) ...")
+    count = sess.initialize_pre_scales(calib_data, init="ones", pot=True)
+    print(f"       {count} modules received _pre_scale buffers")
+
+    # 12b. Run LSQ optimizer
+    print("  12b. Running LSQ optimizer (10 steps, 2 batches) ...")
+    opt = LayerwiseScaleOptimizer(
+        num_steps=10, num_batches=2,
+        optimizer="adam", lr=1e-3,
+        pot=True,
+    )
+    result = sess.optimize_scales(opt, calib_data)
+    print(f"       {len(result)} modules optimized:")
+    for name, scale in sorted(result.items()):
+        print(f"         {name}: shape={tuple(scale.shape)} "
+              f"values={[f'{v:.4f}' for v in scale.tolist()]}")
+
+    # 12c. Verify pre_scale is registered as buffer
+    print("  12c. Verifying _pre_scale buffers ...")
+    buffers = [(n, m._pre_scale) for n, m in sess.qmodel.named_modules()
+               if hasattr(m, "_pre_scale")]
+    print(f"       {len(buffers)} _pre_scale buffers found")
+    for n, s in buffers[:3]:
+        print(f"         {n}: {tuple(s.shape)}")
+
+    # 12d. Forward pass with optimized pre-scales
+    print("  12d. Forward pass with optimized pre-scales ...")
+    x = make_data(4)
+    with torch.no_grad():
+        y = sess(x)
+    print(f"       output shape: {y.shape}")
+
+    # 12e. verify_fp32
+    print("  12e. Verify fp32 baseline ...")
+    fp32 = sess.fp32_model
+    with torch.no_grad():
+        y_fp32 = fp32(x)
+        y_q = sess(x)
+    mse = (y_fp32 - y_q).pow(2).mean().item()
+    print(f"       MSE(quant vs fp32): {mse:.6e}")
+    print()
+
+
+# ══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     section_1()
@@ -623,6 +684,7 @@ if __name__ == "__main__":
     section_9()
     section_10()
     section_11()
+    section_12()
     print("=" * 60)
     print("ALL SECTIONS PASSED — comprehensive coverage complete.")
     print("=" * 60)

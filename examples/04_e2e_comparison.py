@@ -20,7 +20,7 @@ from src.mapping.quantize_model import quantize_model
 def make_cfg():
     fmt = FormatBase.from_str("int8")
     scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
-    return OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+    return OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
 
 def make_eval_loader(n_samples=64, batch_size=8, n_classes=3):
@@ -86,7 +86,7 @@ def main():
     # fp8 session
     fp8_fmt = FormatBase.from_str("fp8_e4m3")
     fp8_scheme = QuantScheme(format=fp8_fmt, granularity=GranularitySpec.per_tensor())
-    fp8_cfg = OpQuantConfig(input=(fp8_scheme,), weight=(fp8_scheme,), output=(fp8_scheme,))
+    fp8_cfg = OpQuantConfig(input=fp8_scheme, weight=fp8_scheme, output=fp8_scheme)
     s_fp8 = QuantSession(ToyMLP(), fp8_cfg)
     s_fp8.eval()
     s_fp8.qmodel.load_state_dict(base_model.state_dict(), strict=False)
@@ -94,7 +94,7 @@ def main():
     # nf4 session
     nf4_fmt = FormatBase.from_str("nf4")
     nf4_scheme = QuantScheme(nf4_fmt, GranularitySpec.per_channel(axis=0))
-    nf4_cfg = OpQuantConfig(weight=(nf4_scheme,))
+    nf4_cfg = OpQuantConfig(weight=nf4_scheme)
     s_nf4 = QuantSession(ToyMLP(), nf4_cfg)
     s_nf4.eval()
     s_nf4.qmodel.load_state_dict(base_model.state_dict(), strict=False)

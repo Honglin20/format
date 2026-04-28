@@ -30,7 +30,7 @@ from src.analysis.observers import (
 def make_cfg():
     fmt = FormatBase.from_str("int8")
     scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_channel(axis=-1))
-    return OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+    return OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
 
 def make_data(n_samples=32):

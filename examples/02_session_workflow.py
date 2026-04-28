@@ -19,7 +19,7 @@ from src.analysis.observers import QSNRObserver, MSEObserver
 def make_cfg():
     fmt = FormatBase.from_str("int8")
     scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
-    return OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+    return OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
 
 def make_calib_loader(n_batches=8, batch_size=4):

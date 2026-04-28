@@ -48,7 +48,7 @@ def main():
         format=FormatBase.from_str("int8"),
         granularity=GranularitySpec.per_tensor(),
     )
-    cfg = OpQuantConfig(input=(scheme,), weight=(scheme,), output=(scheme,))
+    cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
     s_int8 = QuantSession(ToyMLP(), cfg)
     s_int8.eval()
     export_and_check(s_int8, "int8", x)
@@ -59,7 +59,7 @@ def main():
         format=FormatBase.from_str("int8"),
         granularity=GranularitySpec.per_channel(axis=-1),
     )
-    cfg2 = OpQuantConfig(input=(scheme2,), weight=(scheme2,), output=(scheme2,))
+    cfg2 = OpQuantConfig(input=scheme2, weight=scheme2, output=scheme2)
     s_int8_ch = QuantSession(ToyMLP(), cfg2)
     s_int8_ch.eval()
     export_and_check(s_int8_ch, "int8_ch", x)
@@ -70,7 +70,7 @@ def main():
         format=FormatBase.from_str("fp4_e2m1"),
         granularity=GranularitySpec.per_block(32),
     )
-    cfg3 = OpQuantConfig(input=(scheme3,), weight=(scheme3,), output=(scheme3,))
+    cfg3 = OpQuantConfig(input=scheme3, weight=scheme3, output=scheme3)
     s_fp4 = QuantSession(ToyMLP(), cfg3)
     s_fp4.eval()
     export_and_check(s_fp4, "fp4_mx", x)
