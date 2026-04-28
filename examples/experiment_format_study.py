@@ -567,6 +567,249 @@ def run_part_d_transforms(
     return all_results
 
 
+# ---------------------------------------------------------------------------
+# Task 7: Table Generation (6 tables)
+# ---------------------------------------------------------------------------
+
+def _accuracy_table(results: dict, title: str, output_dir: str, filename: str) -> str:
+    """Generic: format accuracy + avg QSNR/MSE table from a results dict."""
+    rows = []
+    for name, data in results.items():
+        acc = data.get("accuracy", {})
+        if isinstance(acc, dict):
+            acc_str = ", ".join(f"{k}: {v:.4f}" for k, v in acc.items())
+        else:
+            acc_str = f"{acc:.4f}" if isinstance(acc, (int, float)) else str(acc)
+        qsnr_dict = data.get("qsnr_per_layer", {})
+        mse_dict = data.get("mse_per_layer", {})
+        avg_qsnr = sum(qsnr_dict.values()) / max(len(qsnr_dict), 1)
+        avg_mse = sum(mse_dict.values()) / max(len(mse_dict), 1)
+        rows.append((name, acc_str, avg_qsnr, avg_mse))
+
+    header = f"\n{'='*70}\n{title}\n{'='*70}\n"
+    header += f"{'Config':<20} {'Accuracy':<20} {'Avg QSNR (dB)':<15} {'Avg MSE':<15}\n"
+    header += "-" * 70 + "\n"
+    for row in rows:
+        header += f"{row[0]:<20} {row[1]:<20} {row[2]:<15.2f} {row[3]:<15.6f}\n"
+
+    os.makedirs(os.path.dirname(csv_path := f"{output_dir}/tables/{filename}"), exist_ok=True)
+    with open(csv_path, "w") as f:
+        f.write("Config,Accuracy,Avg_QSNR_dB,Avg_MSE\n")
+        for row in rows:
+            f.write(f"{row[0]},{row[1]},{row[2]:.4f},{row[3]:.6f}\n")
+
+    return header
+
+
+def generate_table_1(part_a: dict, output_dir: str) -> str:
+    """Table 1: 8-bit Format Comparison."""
+    return _accuracy_table(
+        part_a, "Table 1: 8-bit Format Comparison", output_dir, "table1_8bit.csv",
+    )
+
+
+def generate_table_2(part_b: dict, output_dir: str) -> str:
+    """Table 2: 4-bit Format Comparison."""
+    return _accuracy_table(
+        part_b, "Table 2: 4-bit Format Comparison", output_dir, "table2_4bit.csv",
+    )
+
+
+def generate_table_3(part_c: dict, output_dir: str) -> str:
+    """Table 3: FP32 vs PoT accuracy delta.
+
+    Shows each config's accuracy, delta from FP32 baseline, avg QSNR and MSE.
+    """
+    # Find baseline
+    baseline_acc = 0.0
+    for name, data in part_c.items():
+        if "baseline" in name.lower():
+            acc = data.get("accuracy", {})
+            if isinstance(acc, dict):
+                baseline_acc = float(acc.get("accuracy", 0.0))
+            elif isinstance(acc, (int, float)):
+                baseline_acc = float(acc)
+            break
+
+    rows = []
+    for name, data in part_c.items():
+        if "baseline" in name.lower():
+            continue
+        acc = data.get("accuracy", {})
+        if isinstance(acc, dict):
+            acc_val = float(acc.get("accuracy", 0.0))
+            acc_str = ", ".join(f"{k}: {v:.4f}" for k, v in acc.items())
+        else:
+            acc_val = float(acc) if isinstance(acc, (int, float)) else 0.0
+            acc_str = f"{acc_val:.4f}"
+
+        delta = acc_val - baseline_acc
+        qsnr_dict = data.get("qsnr_per_layer", {})
+        mse_dict = data.get("mse_per_layer", {})
+        avg_qsnr = sum(qsnr_dict.values()) / max(len(qsnr_dict), 1)
+        avg_mse = sum(mse_dict.values()) / max(len(mse_dict), 1)
+        rows.append((name, acc_str, delta, avg_qsnr, avg_mse))
+
+    lines = [f"\n{'='*85}", "Table 3: FP32 vs PoT Scaling", '=' * 85]
+    lines.append(f"{'Config':<20} {'Accuracy':<20} {'Delta':<12} "
+                 f"{'Avg QSNR (dB)':<15} {'Avg MSE':<15}")
+    lines.append("-" * 85)
+    for row in rows:
+        lines.append(f"{row[0]:<20} {row[1]:<20} {row[2]:<+12.4f} "
+                     f"{row[3]:<15.2f} {row[4]:<15.6f}")
+    result = "\n".join(lines)
+
+    os.makedirs(f"{output_dir}/tables", exist_ok=True)
+    with open(f"{output_dir}/tables/table3_pot.csv", "w") as f:
+        f.write("Config,Accuracy,Delta,Avg_QSNR_dB,Avg_MSE\n")
+        for row in rows:
+            f.write(f"{row[0]},{row[1]},{row[2]:.6f},{row[3]:.4f},{row[4]:.6f}\n")
+    return result
+
+
+def generate_table_4(part_d: dict, output_dir: str) -> str:
+    """Table 4: Format x Transform accuracy matrix."""
+    fmt_names = sorted(part_d.keys())
+    tx_variants = sorted({tx for fmt_data in part_d.values() for tx in fmt_data})
+
+    def _get_acc(fmt_data: dict, tx: str) -> float:
+        if tx not in fmt_data:
+            return float("nan")
+        acc = fmt_data[tx].get("accuracy", {})
+        if isinstance(acc, dict):
+            return float(acc.get("accuracy", 0.0))
+        return float(acc) if isinstance(acc, (int, float)) else float("nan")
+
+    lines = [f"\n{'='*80}", "Table 4: Format x Transform Accuracy Matrix", '=' * 80]
+    header = f"{'Format':<16}"
+    for tx in tx_variants:
+        header += f" {tx:<20}"
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    for fmt_name in fmt_names:
+        row_str = f"{fmt_name:<16}"
+        fmt_data = part_d[fmt_name]
+        for tx in tx_variants:
+            val = _get_acc(fmt_data, tx)
+            if math.isnan(val):
+                row_str += f" {'N/A':<20}"
+            else:
+                row_str += f" {val:<20.4f}"
+        lines.append(row_str)
+    result = "\n".join(lines)
+
+    os.makedirs(f"{output_dir}/tables", exist_ok=True)
+    with open(f"{output_dir}/tables/table4_format_x_transform.csv", "w") as f:
+        f.write("Format," + ",".join(tx_variants) + "\n")
+        for fmt_name in fmt_names:
+            vals = []
+            for tx in tx_variants:
+                val = _get_acc(part_d[fmt_name], tx)
+                vals.append(f"{val:.6f}" if not math.isnan(val) else "N/A")
+            f.write(f"{fmt_name}," + ",".join(vals) + "\n")
+    return result
+
+
+def generate_table_5(part_d: dict, output_dir: str) -> str:
+    """Table 5: Per-layer optimal transform distribution.
+
+    Counts how many layers picked each transform as the best by QSNR.
+    """
+    distribution: Dict[str, Dict[str, int]] = {}
+    all_tx_set: set = set()
+
+    for fmt_name, fmt_data in part_d.items():
+        variant_qsnr: Dict[str, Dict[str, float]] = {}
+        for tx_name in ("None", "SmoothQuant", "Hadamard"):
+            if tx_name in fmt_data and "qsnr_per_layer" in fmt_data[tx_name]:
+                variant_qsnr[tx_name] = fmt_data[tx_name]["qsnr_per_layer"]
+
+        all_layers: set = set()
+        for qsnr_dict in variant_qsnr.values():
+            all_layers.update(qsnr_dict.keys())
+
+        tx_counts: Dict[str, int] = defaultdict(int)
+        for layer in all_layers:
+            best_tx = max(
+                variant_qsnr.keys(),
+                key=lambda tx, l=layer: variant_qsnr[tx].get(l, -float("inf")),
+            )
+            tx_counts[best_tx] += 1
+
+        distribution[fmt_name] = dict(tx_counts)
+        all_tx_set.update(tx_counts.keys())
+
+    all_tx = sorted(all_tx_set)
+    lines = [f"\n{'='*80}", "Table 5: Per-Layer Optimal Transform Distribution", '=' * 80]
+    hdr = f"{'Format':<16}"
+    for tx in all_tx:
+        hdr += f" {tx:<18}"
+    hdr += " Total"
+    lines.append(hdr)
+    lines.append("-" * len(hdr))
+
+    for fmt_name in sorted(distribution.keys()):
+        r = f"{fmt_name:<16}"
+        total = 0
+        for tx in all_tx:
+            cnt = distribution[fmt_name].get(tx, 0)
+            r += f" {cnt:<18}"
+            total += cnt
+        r += f" {total}"
+        lines.append(r)
+    result = "\n".join(lines)
+
+    os.makedirs(f"{output_dir}/tables", exist_ok=True)
+    with open(f"{output_dir}/tables/table5_transform_distribution.csv", "w") as f:
+        f.write("Format," + ",".join(all_tx) + ",Total\n")
+        for fmt_name in sorted(distribution.keys()):
+            vals = [str(distribution[fmt_name].get(tx, 0)) for tx in all_tx]
+            vals.append(str(sum(distribution[fmt_name].values())))
+            f.write(f"{fmt_name}," + ",".join(vals) + "\n")
+    return result
+
+
+def generate_table_6(all_results: dict, output_dir: str) -> str:
+    """Table 6: Layer sensitivity top-10 across all experiments."""
+    layer_metrics: Dict[str, Dict[str, list]] = defaultdict(lambda: {"mse": [], "qsnr": []})
+
+    for part_name, part_data in all_results.items():
+        if not part_name.startswith("part_") or not isinstance(part_data, dict):
+            continue
+        for config_name, config_data in part_data.items():
+            if not isinstance(config_data, dict):
+                continue
+            for key in ("qsnr_per_layer", "mse_per_layer"):
+                if key not in config_data:
+                    continue
+                metric = "qsnr" if "qsnr" in key else "mse"
+                for layer, val in config_data[key].items():
+                    layer_metrics[layer][metric].append(val)
+
+    ranking = []
+    for layer, metrics in layer_metrics.items():
+        avg_mse = sum(metrics["mse"]) / max(len(metrics["mse"]), 1) if metrics["mse"] else 0.0
+        avg_qsnr = sum(metrics["qsnr"]) / max(len(metrics["qsnr"]), 1) if metrics["qsnr"] else 0.0
+        ranking.append((layer, avg_mse, avg_qsnr))
+    ranking.sort(key=lambda x: x[1], reverse=True)
+    top10 = ranking[:10]
+
+    lines = [f"\n{'='*80}", "Table 6: Top-10 Most Sensitive Layers", '=' * 80]
+    lines.append(f"{'#':<4} {'Layer':<28} {'Avg MSE':<18} {'Avg QSNR (dB)':<15}")
+    lines.append("-" * 80)
+    for i, (layer, mse, qsnr) in enumerate(top10, 1):
+        lines.append(f"{i:<4} {layer:<28} {mse:<18.6e} {qsnr:<15.2f}")
+    result = "\n".join(lines)
+
+    os.makedirs(f"{output_dir}/tables", exist_ok=True)
+    with open(f"{output_dir}/tables/table6_sensitivity.csv", "w") as f:
+        f.write("Rank,Layer,Avg_MSE,Avg_QSNR_dB\n")
+        for i, (layer, mse, qsnr) in enumerate(top10, 1):
+            f.write(f"{i},{layer},{mse:.6e},{qsnr:.4f}\n")
+    return result
+
+
 def run_format_study(
     build_model: Callable[[], nn.Module],
     make_calib_data: Callable[..., List[torch.Tensor]],
