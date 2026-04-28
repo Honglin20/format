@@ -70,6 +70,21 @@ def build_model() -> nn.Module:
     return ToyMLP()
 
 
+def build_conv_model() -> nn.Module:
+    """Return a fresh instance of the Conv2d reference model for Part D.
+
+    Default: ToyConvNet from ``examples/_model.py`` — contains Conv2d
+    (channel_axis=1 in NCHW), BatchNorm2d, ReLU, and a Linear head.
+    Accepts the same ``(B, 128)`` input as ToyMLP.
+
+    Used in Part D to exercise the ``channel_axis=1`` code path in
+    ``_make_smoothquant_transforms`` (Conv2d branches).  Replace with
+    your own CNN architecture for custom experiments.
+    """
+    from examples._model import ToyConvNet
+    return ToyConvNet()
+
+
 def make_calib_data(
     num_samples: int = 256,
     batch_size: int = 16,
@@ -535,14 +550,18 @@ def _make_smoothquant_transforms(
     fp32_model: nn.Module,
     calib_data: List[torch.Tensor],
 ) -> Dict[str, TransformBase]:
-    """Create per-layer SmoothQuantTransform dict.
+    """Create per-layer SmoothQuantTransform dict from a single calibration pass.
 
     Runs one forward pass through the FP32 model to capture each layer's
     activation and weight, then creates a per-layer SmoothQuantTransform
     with correctly-shaped per-channel scales.
 
+    This function is PURE — it does NOT mutate ``fp32_model``.  Weight fusion
+    (``W = W * s``) must be performed separately via
+    :func:`_fuse_smoothquant_weights`.
+
     Args:
-        fp32_model: FP32 reference model.
+        fp32_model: FP32 reference model (not mutated).
         calib_data: List of calibration batches (first batch used).
 
     Returns:
@@ -554,14 +573,14 @@ def _make_smoothquant_transforms(
 
     activations: Dict[str, torch.Tensor] = {}
     weights: Dict[str, torch.Tensor] = {}
-    channel_axes: Dict[str, int] = {}  # per-module activation channel axis
+    channel_axes: Dict[str, int] = {}
     hooks = []
 
     def _hook(name):
         def fn(module, _input, _output):
             activations[name] = _input[0].detach()
             if hasattr(module, "weight") and module.weight is not None:
-                weights[name] = module.weight.data
+                weights[name] = module.weight.data.clone()
         return fn
 
     for name, module in fp32_model.named_modules():
@@ -580,7 +599,6 @@ def _make_smoothquant_transforms(
         h.remove()
 
     per_layer: Dict[str, TransformBase] = {}
-    module_map = dict(fp32_model.named_modules())
 
     for name in activations:
         if name not in weights:
@@ -592,21 +610,54 @@ def _make_smoothquant_transforms(
                 act_channel_axis=act_axis,
             )
             per_layer[name] = sq_t
-
-            # One-time weight fusion: W = W * s (SmoothQuant paper eq. 3).
-            # After this, weight quantize uses IdentityTransform.
-            module = module_map.get(name)
-            if module is not None and hasattr(module, "weight") and module.weight is not None:
-                W = module.weight.data
-                w_axis = 1  # PyTorch standard: dim 1 = input channel
-                shape = [1] * W.ndim
-                shape[w_axis] = -1
-                module.weight.data = W * sq_t.scale.view(*shape)
         except (ValueError, RuntimeError) as e:
             print(f"  Warning: SmoothQuant for {name}: {e}")
             per_layer[name] = IdentityTransform()
 
     return per_layer
+
+
+def _fuse_smoothquant_weights(
+    fp32_model: nn.Module,
+    sq_transforms: Dict[str, TransformBase],
+    *,
+    layer_names: Optional[set] = None,
+) -> nn.Module:
+    """Return a deep copy of ``fp32_model`` with SmoothQuant weight fusion applied.
+
+    For each layer in ``sq_transforms`` (filtered by ``layer_names`` if given),
+    applies ``W = W * s`` — the one-time calibration-time weight compensation
+    from SmoothQuant (Xiao et al. 2023, eq. 3).  The original ``fp32_model``
+    is NOT mutated.
+
+    Args:
+        fp32_model: Reference FP32 model (not mutated).
+        sq_transforms: Per-layer SmoothQuantTransform dict.
+        layer_names: If given, only fuse weights for layers in this set.
+                     ``None`` fuses all layers present in ``sq_transforms``.
+
+    Returns:
+        Deep copy of ``fp32_model`` with fused weights for the selected layers.
+    """
+    fused_model = copy.deepcopy(fp32_model)
+    module_map = dict(fused_model.named_modules())
+
+    for name, sq_t in sq_transforms.items():
+        if layer_names is not None and name not in layer_names:
+            continue
+        if not isinstance(sq_t, SmoothQuantTransform):
+            continue
+        module = module_map.get(name)
+        if module is None or not hasattr(module, "weight") or module.weight is None:
+            continue
+        W = module.weight.data
+        # w_axis=1: PyTorch standard input-channel axis for both Linear
+        # (out, in) and Conv2d (out, in, kH, kW).
+        shape = [1] * W.ndim
+        shape[1] = -1
+        module.weight.data = W * sq_t.scale.view(*shape)
+
+    return fused_model
 
 
 def _build_per_layer_optimal_cfg(
@@ -688,21 +739,26 @@ def run_part_d_transforms(
         ("NF4-PC",  "nf4", PER_C0, True),
     ]
 
+    # Compute SmoothQuant transforms ONCE before the format loop using the
+    # original fp32_model (pure, no mutation).  Build a single weight-fused
+    # copy for all SmoothQuant variants — this avoids the compounding error
+    # that would occur if _make_smoothquant_transforms were called once per
+    # format and mutated the shared fp32_model each time.
+    print("  Computing SmoothQuant scales...")
+    sq_transforms = _make_smoothquant_transforms(fp32_model, calib_data)
+    sq_fp32_model = _fuse_smoothquant_weights(fp32_model, sq_transforms)
+
     all_results = {}
 
     for fmt_name, fmt_str, gran, weight_only in fmt_configs:
         print(f"\n  == Transform study for {fmt_name} ==")
         builder = make_op_cfg_weight_only if weight_only else make_op_cfg
 
-        # Phase 1: Run each transform variant
-        variant_results = {}
-        sq_transforms = _make_smoothquant_transforms(fp32_model, calib_data)
-        # For the SmoothQuant variant, build per-layer configs. Each layer gets
-        # its own SmoothQuantTransform for the activation side (x / s).
-        # Weight compensation (W * s) is a one-time fusion during calibration,
-        # so weight quantize uses IdentityTransform.
+        # Build per-layer SmoothQuant configs for this format.
+        # Activation transform (x / s) lives in the config; weight fusion
+        # (W * s) was applied once to sq_fp32_model above.
         # Mathematical equivalence: (X/s) @ (W*s) = X@W
-        sq_per_layer_cfg = {}
+        sq_per_layer_cfg: Dict[str, OpQuantConfig] = {}
         for lname, sq_tx in sq_transforms.items():
             sq_per_layer_cfg[lname] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
 
@@ -715,7 +771,9 @@ def run_part_d_transforms(
             if mname and mname not in sq_per_layer_cfg:
                 sq_per_layer_cfg[mname] = fallback_cfg
 
-        # Single-transform variants: build a single OpQuantConfig
+        # Phase 1 — single-transform variants.
+        # None / Hadamard: use the original fp32_model (clean, unfused weights).
+        variant_results: Dict[str, dict] = {}
         single_tx = {
             "None": None,
             "Hadamard": HadamardTransform(),
@@ -728,19 +786,31 @@ def run_part_d_transforms(
                 cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
             )
 
-        # SmoothQuant: each layer has its own correctly-shaped transform
+        # SmoothQuant: use the weight-fused model (sq_fp32_model) so that
+        # (X/s) @ (W*s) = X@W holds.  Using fp32_model here would break
+        # the mathematical equivalence because weights would not carry s.
         print(f"    Running {fmt_name}-SmoothQuant...")
         variant_results["SmoothQuant"] = run_experiment(
-            sq_per_layer_cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+            sq_per_layer_cfg, sq_fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
 
-        # Phase 2: Per-layer optimal
+        # Phase 2 — per-layer optimal.
+        # Determine which transform wins per layer, then build a model that
+        # has weights fused only for layers where SmoothQuant wins.  Layers
+        # that prefer None/Hadamard keep their original (unfused) weights.
+        variant_qsnr = {k: v["qsnr_per_layer"] for k, v in variant_results.items()}
+        layer_best_tx = _compute_best_transform_per_layer(variant_qsnr)
+        sq_winning = {n for n, tx_name in layer_best_tx.items() if tx_name == "SmoothQuant"}
+        opt_fp32_model = _fuse_smoothquant_weights(
+            fp32_model, sq_transforms, layer_names=sq_winning,
+        )
+
         per_layer_optimal_cfg = _build_per_layer_optimal_cfg(
             variant_results, sq_transforms, fmt_str, gran, builder, weight_only,
         )
         print(f"    Running {fmt_name}-PerLayerOpt...")
         opt_result = run_experiment(
-            per_layer_optimal_cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+            per_layer_optimal_cfg, opt_fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
         variant_results["PerLayerOpt"] = opt_result
 
@@ -855,8 +925,15 @@ def generate_table_3(part_c: dict, output_dir: str) -> str:
     return result
 
 
-def generate_table_4(part_d: dict, output_dir: str) -> str:
-    """Table 4: Format x Transform accuracy matrix."""
+def generate_table_4(part_d: dict, output_dir: str, *, suffix: str = "") -> str:
+    """Table 4: Format x Transform accuracy matrix.
+
+    Args:
+        part_d: Results dict from :func:`run_part_d_transforms`.
+        output_dir: Directory for CSV output.
+        suffix: Appended to the CSV filename stem (e.g. ``"_conv"`` →
+            ``table4_format_x_transform_conv.csv``).
+    """
     fmt_names = sorted(part_d.keys())
     tx_variants = sorted({tx for fmt_data in part_d.values() for tx in fmt_data})
 
@@ -888,7 +965,8 @@ def generate_table_4(part_d: dict, output_dir: str) -> str:
     result = "\n".join(lines)
 
     os.makedirs(f"{output_dir}/tables", exist_ok=True)
-    with open(f"{output_dir}/tables/table4_format_x_transform.csv", "w") as f:
+    fname = f"table4_format_x_transform{suffix}.csv"
+    with open(f"{output_dir}/tables/{fname}", "w") as f:
         f.write("Format," + ",".join(tx_variants) + "\n")
         for fmt_name in fmt_names:
             vals = []
@@ -1560,19 +1638,27 @@ def run_format_study(
     make_eval_loader: Callable[..., DataLoader],
     eval_fn: Callable[[nn.Module, DataLoader], Dict[str, float]],
     *,
+    build_conv_model: Optional[Callable[[], nn.Module]] = None,
     output_dir: Optional[str] = None,
     skip_parts: Optional[Dict[str, bool]] = None,
 ) -> Dict[str, dict]:
-    """Main entry point: run all 27 experiments and produce tables/figures.
+    """Main entry point: run all experiments and produce tables/figures.
 
     Executes Parts A/B/C/D of the study, saving results to a timestamped
     directory under ``output_dir`` (default: ``results/``).
+
+    When ``build_conv_model`` is provided (default: :func:`build_conv_model`
+    returning :class:`ToyConvNet`), Part D is also run on the Conv2d model
+    and stored as ``part_d_conv``.  This validates the ``channel_axis=1``
+    code path in SmoothQuant that is not exercised by the MLP-only default.
 
     Args:
         build_model: Callable that returns a fresh FP32 model.
         make_calib_data: Callable for calibration data.
         make_eval_loader: Callable for evaluation DataLoader.
         eval_fn: Evaluation function (model, dataloader) -> metric dict.
+        build_conv_model: Callable that returns a Conv2d model for Part D
+            Conv validation.  ``None`` skips the Conv2d Part D run.
         output_dir: Output directory.  ``None`` uses ``"results"``.
         skip_parts: Dict mapping part name (``"A"``, ``"B"``, ``"C"``,
             ``"D"``) to ``True`` to skip that part.  ``None`` runs all.
@@ -1635,13 +1721,29 @@ def run_format_study(
 
     if not skip_parts.get("D"):
         print("\n" + "=" * 60)
-        print("PART D: Transform Study")
+        print("PART D: Transform Study (MLP)")
         print("=" * 60)
         all_results["part_d"] = run_part_d_transforms(
             fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
         print(generate_table_4(all_results["part_d"], output_dir))
         print(generate_table_5(all_results["part_d"], output_dir))
+
+        # Part D — Conv2d variant: validates channel_axis=1 code path in
+        # SmoothQuant (Conv2d NCHW layout, different from Linear's last-dim).
+        # Uses the same calib_data / eval_loader since ToyConvNet accepts
+        # (B, 128) input identical to ToyMLP.
+        if build_conv_model is not None and not skip_parts.get("D_conv"):
+            print("\n" + "=" * 60)
+            print("PART D (Conv): Transform Study on Conv2d Model")
+            print("=" * 60)
+            conv_model = build_conv_model()
+            conv_model.eval()
+            all_results["part_d_conv"] = run_part_d_transforms(
+                conv_model, calib_data, eval_loader, eval_fn=eval_fn,
+            )
+            print(generate_table_4(all_results["part_d_conv"],
+                                   output_dir, suffix="_conv"))
     else:
         print("\n### PART D: SKIPPED ###")
 
@@ -1860,19 +1962,23 @@ Examples:
     )
     parser.add_argument(
         "--skip-part-a", action="store_true",
-        help="Skip Part A: Basic quantization",
+        help="Skip Part A: 8-bit Format Comparison",
     )
     parser.add_argument(
         "--skip-part-b", action="store_true",
-        help="Skip Part B: Scaling comparison (FP32 vs PoT)",
+        help="Skip Part B: 4-bit Format Comparison",
     )
     parser.add_argument(
         "--skip-part-c", action="store_true",
-        help="Skip Part C: Quantize-Quantize comparison",
+        help="Skip Part C: FP32 vs PoT Scaling",
     )
     parser.add_argument(
         "--skip-part-d", action="store_true",
-        help="Skip Part D: Transform evaluation",
+        help="Skip Part D: Transform evaluation (MLP + Conv2d)",
+    )
+    parser.add_argument(
+        "--skip-part-d-conv", action="store_true",
+        help="Skip Part D Conv2d variant (channel_axis=1 validation)",
     )
     parser.add_argument(
         "--plot-from", default=None, metavar="RESULTS_JSON",
@@ -1895,12 +2001,15 @@ Examples:
             skip_parts["C"] = True
         if args.skip_part_d:
             skip_parts["D"] = True
+        if args.skip_part_d_conv:
+            skip_parts["D_conv"] = True
 
         results = run_format_study(
             build_model,
             lambda: make_calib_data(args.calib_samples, args.batch_size),
             lambda: make_eval_loader(args.eval_samples, args.batch_size),
             eval_fn,
+            build_conv_model=build_conv_model,
             output_dir=args.output_dir,
             skip_parts=skip_parts or None,
         )
