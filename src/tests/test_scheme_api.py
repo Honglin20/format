@@ -72,6 +72,24 @@ class TestQuantizeMxScheme:
         scheme_out = quantize_mx(A.clone(), scheme=scheme, axes=[-1])
         assert torch.equal(old_out, scheme_out)
 
+    def test_quantize_mx_delegates_to_quantize_with_transform(self):
+        """quantize_mx with non-Identity transform delegates to quantize()."""
+        from src.quantize.mx_quantize import quantize_mx
+        from src.quantize.elemwise import quantize
+        from src.transform.pre_scale import PreScaleTransform
+
+        torch.manual_seed(42)
+        A = torch.randn(4, 64)
+        scale = torch.ones(1) * 2.0
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_block(32),
+            transform=PreScaleTransform(scale=scale),
+        )
+        out_mx = quantize_mx(A.clone(), scheme=scheme)
+        out_q = quantize(A.clone(), scheme)
+        assert torch.equal(out_mx, out_q)
+
 
 # ---------------------------------------------------------------------------
 # quantize_bfloat(x, scheme)

@@ -212,34 +212,27 @@ def quantize_mx(
     shared_exp_method="max",
     flush_fp32_subnorms=False,
 ):
-    """Quantize tensor A using a QuantScheme (MX block quantization).
+    """Quantize tensor A using MX block quantization.
 
-    Specialized API for shared-exponent block quantization that does NOT
-    follow the ADR-001 three-step flow (transform.forward → format.quantize
-    → transform.inverse). Instead, it handles MX-specific parameters
-    (scale_bits, shared_exp_method, flush_fp32_subnorms) directly.
+    When *scheme.transform* is not IdentityTransform, delegates to the
+    standard three-step :func:`quantize` flow (ADR-001 compliant).
 
-    For the standard three-step flow, use quantize(x, scheme) instead.
+    When *scheme.transform* is IdentityTransform, uses the direct MX
+    path (``_quantize_mx``) as a fast path.
 
     Args:
         A: Input tensor.
-        scheme: QuantScheme specifying format, granularity, and round_mode.
-            block_size is taken from scheme.granularity.block_size.
-            granularity.mode must be PER_BLOCK or PER_TENSOR.
-            scheme.transform must be IdentityTransform (MX quantization
-            does not apply transforms).
-            If None, input is returned unchanged.
-        axes: Axes along which to compute shared exponents. Default: None.
+        scheme: QuantScheme. granularity.mode must be PER_BLOCK or PER_TENSOR.
+        axes: Axes for shared exponent computation.
         scale_bits: Bits for shared scale (sign + magnitude). Default: 8.
         shared_exp_method: "max" or "none". Default: "max".
-        flush_fp32_subnorms: Flush subnormal FP32 blocks to zero. Default: False.
+        flush_fp32_subnorms: Flush subnormal FP32 blocks to zero.
 
     Returns:
         Quantized tensor with same shape as A.
 
     Raises:
         ValueError: If scheme.granularity is PER_CHANNEL.
-        ValueError: If scheme.transform is not IdentityTransform.
     """
     if scheme is None:
         return A
@@ -248,10 +241,9 @@ def quantize_mx(
     from src.scheme.transform import IdentityTransform
 
     if not isinstance(scheme.transform, IdentityTransform):
-        raise ValueError(
-            "quantize_mx does not support transforms. "
-            "Use quantize(x, scheme) for the three-step flow with transforms."
-        )
+        from src.quantize.elemwise import quantize
+
+        return quantize(A, scheme)
     if scheme.granularity.mode == GranularityMode.PER_CHANNEL:
         raise ValueError(
             "quantize_mx does not support PER_CHANNEL granularity. "
