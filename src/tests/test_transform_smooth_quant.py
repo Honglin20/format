@@ -442,3 +442,12 @@ class TestSmoothQuantQuantScheme:
         t1 = SmoothQuantTransform(scale, channel_axis=-1)
         t2 = SmoothQuantTransform(scale, channel_axis=1)
         assert hash(t1) != hash(t2)
+
+    def test_channel_axis_out_of_bounds_raises(self):
+        """Out-of-bounds channel_axis raises ValueError with clear message."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([2.0, 4.0])
+        t = SmoothQuantTransform(scale, channel_axis=5)  # 5 > ndim=2
+        x = torch.randn(4, 2)
+        with pytest.raises(ValueError, match="out of bounds"):
+            t.forward(x)

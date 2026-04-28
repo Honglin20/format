@@ -144,7 +144,15 @@ class SmoothQuantTransform(TransformBase):
         ``x`` has channel dim at ``self._channel_axis``.
         ``scale`` is ``[C]``, so the view is ``[1, ..., C, ..., 1]`` with
         ``C`` placed at the channel axis position.
+
+        Raises:
+            ValueError: If ``self._channel_axis`` is out of bounds for ``x``.
         """
+        if not (-x.ndim <= self._channel_axis < x.ndim):
+            raise ValueError(
+                f"channel_axis={self._channel_axis} is out of bounds for "
+                f"tensor with {x.ndim} dimensions"
+            )
         shape = [1] * x.ndim
         shape[self._channel_axis] = -1
         return self._scale.view(*shape)
@@ -153,8 +161,8 @@ class SmoothQuantTransform(TransformBase):
         """Apply SmoothQuant: ``x / scale``.
 
         Args:
-            x: Input activation tensor. The channel dimension must be the
-               last dim: ``[..., C]``.
+            x: Input activation tensor. The channel dimension is
+               ``self.channel_axis``.
 
         Returns:
             Smoothed activation (same shape as ``x``).
@@ -166,7 +174,7 @@ class SmoothQuantTransform(TransformBase):
 
         Args:
             x_q: Quantized (or post-quantization) tensor with channel dim
-                 as the last dim.
+                 at ``self.channel_axis``.
 
         Returns:
             Scale-restored tensor (same shape as ``x_q``).
