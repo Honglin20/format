@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # Project imports
 from src.formats.base import FormatBase
-from src.scheme import IdentityTransform
+from src.scheme.transform import IdentityTransform, TransformBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
@@ -142,7 +142,7 @@ def make_op_cfg(
     fmt_name: str,
     granularity: GranularitySpec,
     *,
-    transform: Optional[object] = None,
+    transform: Optional[TransformBase] = None,
 ) -> OpQuantConfig:
     """Create inference-only OpQuantConfig where input, weight, and output
     all use the same scheme.
@@ -175,7 +175,7 @@ def make_op_cfg_weight_only(
     fmt_name: str,
     granularity: GranularitySpec,
     *,
-    transform: Optional[object] = None,
+    transform: Optional[TransformBase] = None,
 ) -> OpQuantConfig:
     """Create weight-only OpQuantConfig (useful for NF4).
 
