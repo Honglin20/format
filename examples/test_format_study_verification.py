@@ -38,14 +38,14 @@ x = torch.tensor([[0.5, -0.25], [1.0, 0.75]], dtype=torch.float32)
 #      = [2.5, 6.0, 9.5] + [0.1,0.2,0.3] = [2.6, 6.2, 9.8]
 fp32_y = torch.tensor([[0.1, 0.7, 1.3], [2.6, 6.2, 9.8]], dtype=torch.float32)
 
+# 预定义的 format 实例
+int8_fmt = IntFormat(bits=8)
+int4_fmt = IntFormat(bits=4)
+
 # 预定义的 granularity spec
 PER_T = GranularitySpec.per_tensor()
 PER_C0 = GranularitySpec.per_channel(axis=0)
 PER_Cm1 = GranularitySpec.per_channel(axis=-1)
-
-# 预定义的 format 实例
-int8_fmt = IntFormat(bits=8)
-int4_fmt = IntFormat(bits=4)
 
 # ---------------------------------------------------------------------------
 # Layer 1: 核心量化验证
@@ -108,6 +108,65 @@ def test_int8_per_channel():
         dtype=torch.float32,
     )
     actual_w = int8_fmt.quantize(W, gran)
+    assert torch.equal(actual_w, expected_w), (
+        f"W mismatch:\n  actual:\n{actual_w}\n  expected:\n{expected_w}"
+    )
+
+
+def test_int4_per_tensor():
+    """验证 int4 per_tensor 量化。
+
+    推导: docs/verification/003-int4-per-tensor.md
+
+    量化公式: x*4 → round → /4 → clamp(±1.75)
+    步长 0.25, 共 15 个离散等级。
+    """
+    gran = PER_T
+
+    # --- x 量化 ---
+    # 所有输入值恰好是 0.25 的整数倍 → 无损
+    expected_x = torch.tensor([[0.5, -0.25], [1.0, 0.75]], dtype=torch.float32)
+    actual_x = int4_fmt.quantize(x, gran)
+    assert torch.equal(actual_x, expected_x), (
+        f"x mismatch:\n  actual: {actual_x}\n  expected: {expected_x}"
+    )
+
+    # --- W 量化 ---
+    # 1.0→OK; 2.0,3.0,4.0,5.0,6.0 全部超出 max_norm=1.75 → 截断为 1.75
+    expected_w = torch.tensor(
+        [[1.0, 1.75], [1.75, 1.75], [1.75, 1.75]], dtype=torch.float32,
+    )
+    actual_w = int4_fmt.quantize(W, gran)
+    assert torch.equal(actual_w, expected_w), (
+        f"W mismatch:\n  actual:\n{actual_w}\n  expected:\n{expected_w}"
+    )
+
+
+def test_int4_per_channel():
+    """验证 int4 per_channel(axis=0) 量化。
+
+    推导: docs/verification/004-int4-per-channel.md
+
+    每列独立 scale → int4 elemwise → rescale。
+    """
+    gran = PER_C0
+
+    # --- x 量化 ---
+    # col0 amax=1.0, col1 amax=0.75
+    expected_x = torch.tensor(
+        [[0.5, -0.1875], [1.0, 0.75]], dtype=torch.float32,
+    )
+    actual_x = int4_fmt.quantize(x, gran)
+    assert torch.equal(actual_x, expected_x), (
+        f"x mismatch:\n  actual:\n{actual_x}\n  expected:\n{expected_x}"
+    )
+
+    # --- W 量化 ---
+    # col0 amax=5.0, col1 amax=6.0
+    expected_w = torch.tensor(
+        [[1.25, 1.5], [2.5, 4.5], [5.0, 6.0]], dtype=torch.float32,
+    )
+    actual_w = int4_fmt.quantize(W, gran)
     assert torch.equal(actual_w, expected_w), (
         f"W mismatch:\n  actual:\n{actual_w}\n  expected:\n{expected_w}"
     )
