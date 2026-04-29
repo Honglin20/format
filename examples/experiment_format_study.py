@@ -54,6 +54,25 @@ from src.session import QuantSession
 from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
 from src.calibration.strategies import MSEScaleStrategy
 
+# Refactored imports — viz module (tables, figures, theme, save)
+from src.viz.theme import FORMAT_COLORS, TRANSFORM_COLORS, HIST_COLORS, FALLBACK_CYCLE
+from src.viz.save import save_figure
+from src.viz.figures import (
+    qsnr_bar_chart,
+    mse_box_plot,
+    pot_delta_bar,
+    histogram_overlay,
+    transform_heatmap,
+    transform_pie,
+    transform_delta,
+    error_vs_distribution,
+    layer_type_qsnr,
+    _compute_best_transform_per_layer,
+    _get_acc_val,
+)
+from src.viz.tables import accuracy_table, format_comparison_table
+from src.pipeline.runner import _extract_metric_per_layer
+
 
 # ---------------------------------------------------------------------------
 # User customization: override these functions for your own model
@@ -155,41 +174,6 @@ PER_T   = GranularitySpec.per_tensor()
 PER_C0  = GranularitySpec.per_channel(axis=0)
 PER_Cm1 = GranularitySpec.per_channel(axis=-1)
 PER_B32 = GranularitySpec.per_block(size=32, axis=-1)
-
-
-# ---------------------------------------------------------------------------
-# Unified color palette
-# ---------------------------------------------------------------------------
-
-# Format-family colours — colourblind-friendly (Wong 2011), distinguishable
-# under deuteranopia, protanopia, and tritanopia.
-FORMAT_COLORS = {
-    "MXINT-8":  "#0072B2",   # blue
-    "MXFP-8":   "#D55E00",   # vermillion
-    "INT8-PC":  "#009E73",   # bluish green
-    "MXINT-4":  "#56B4E9",   # sky blue (same family as MXINT-8)
-    "MXFP-4":   "#E69F00",   # orange (same family as MXFP-8)
-    "INT4-PC":  "#F0E442",   # yellow
-    "NF4-PC":   "#CC79A7",   # reddish purple
-}
-
-# Transform variant colours — colourblind-friendly
-TRANSFORM_COLORS = {
-    "None":        "#0072B2",   # blue
-    "SmoothQuant": "#D55E00",   # vermillion
-    "Hadamard":    "#009E73",   # bluish green
-}
-
-# Histogram channel colours — colourblind-friendly
-HIST_COLORS = {
-    "fp32_hist":  "#0072B2",   # blue
-    "quant_hist": "#D55E00",   # vermillion
-    "err_hist":   "#999999",   # grey
-}
-
-# Fallback cycle — colourblind-friendly Wong (2011) palette
-FALLBACK_CYCLE = ["#0072B2", "#D55E00", "#009E73", "#F0E442", "#CC79A7",
-                  "#56B4E9", "#E69F00", "#999999", "#000000", "#E5C494"]
 
 
 # ---------------------------------------------------------------------------
@@ -384,10 +368,13 @@ def run_experiment(
     report = ctx.report()
 
     # 4. E2E accuracy
-    if eval_fn is not None:
-        result = session.compare(eval_loader, eval_fn=eval_fn)
-    else:
-        result = session.compare(eval_loader)
+    # NOTE: session.compare() uses its own _default_accuracy(logits, labels)
+    # which computes accuracy via argmax -- this matches what the study's
+    # eval_fn(model, DataLoader) does internally.  The study's eval_fn is
+    # kept for the user-customization API but is NOT forwarded to
+    # session.compare because their call signatures are different
+    # (session.compare expects (logits, labels), not (model, DataLoader)).
+    result = session.compare(eval_loader)
 
     # 5. Extract per-layer QSNR/MSE summaries
     qsnr_per_layer = _extract_metric_per_layer(report, "qsnr_db")
@@ -402,30 +389,6 @@ def run_experiment(
         "qsnr_per_layer": qsnr_per_layer,
         "mse_per_layer": mse_per_layer,
     }
-
-
-def _extract_metric_per_layer(report: Report, metric: str) -> Dict[str, float]:
-    """Extract per-layer average of a metric from Report.
-
-    Args:
-        report: ``Report`` instance.
-        metric: Metric name to extract (e.g. ``"qsnr_db"``, ``"mse"``).
-
-    Returns:
-        Dict mapping layer name to average metric value.
-    """
-    df = report.to_dataframe()
-    if isinstance(df, list):
-        result = {}
-        for row in df:
-            name = row.get("layer", "unknown")
-            val = row.get(metric)
-            if val is not None:
-                result.setdefault(name, []).append(val)
-        return {k: sum(v) / len(v) for k, v in result.items()}
-    else:
-        grouped = df.groupby("layer")[metric].mean()
-        return grouped.to_dict()
 
 
 def run_part_a_8bit(
@@ -820,57 +783,14 @@ def run_part_d_transforms(
 
 
 # ---------------------------------------------------------------------------
-# Task 7: Table Generation (6 tables)
+# Table Generation (6 tables)
+#
+# Tables 1-2: replaced by accuracy_table() from src.viz.tables
+# Tables 3-6: keep inline until ported to tables.py
 # ---------------------------------------------------------------------------
 
-def _accuracy_table(results: dict, title: str, output_dir: str, filename: str) -> str:
-    """Generic: format accuracy + avg QSNR/MSE table from a results dict."""
-    rows = []
-    for name, data in results.items():
-        acc = data.get("accuracy", {})
-        if isinstance(acc, dict) and len(acc) == 1:
-            # Single-metric: extract the raw value for clean CSV
-            acc_val = list(acc.values())[0]
-            acc_str = f"{acc_val:.4f}"
-        elif isinstance(acc, dict):
-            acc_str = ", ".join(f"{k}: {v:.4f}" for k, v in acc.items())
-        elif isinstance(acc, (int, float)):
-            acc_str = f"{acc:.4f}"
-        else:
-            acc_str = str(acc)
-        qsnr_dict = data.get("qsnr_per_layer", {})
-        mse_dict = data.get("mse_per_layer", {})
-        avg_qsnr = sum(qsnr_dict.values()) / max(len(qsnr_dict), 1)
-        avg_mse = sum(mse_dict.values()) / max(len(mse_dict), 1)
-        rows.append((name, acc_str, avg_qsnr, avg_mse))
-
-    header = f"\n{'='*70}\n{title}\n{'='*70}\n"
-    header += f"{'Config':<20} {'Accuracy':<20} {'Avg QSNR (dB)':<15} {'Avg MSE':<15}\n"
-    header += "-" * 70 + "\n"
-    for row in rows:
-        header += f"{row[0]:<20} {row[1]:<20} {row[2]:<15.2f} {row[3]:<15.6f}\n"
-
-    os.makedirs(os.path.dirname(csv_path := f"{output_dir}/tables/{filename}"), exist_ok=True)
-    with open(csv_path, "w") as f:
-        f.write("Config,Accuracy,Avg_QSNR_dB,Avg_MSE\n")
-        for row in rows:
-            f.write(f"{row[0]},{row[1]},{row[2]:.4f},{row[3]:.6f}\n")
-
-    return header
-
-
-def generate_table_1(part_a: dict, output_dir: str) -> str:
-    """Table 1: 8-bit Format Comparison."""
-    return _accuracy_table(
-        part_a, "Table 1: 8-bit Format Comparison", output_dir, "table1_8bit.csv",
-    )
-
-
-def generate_table_2(part_b: dict, output_dir: str) -> str:
-    """Table 2: 4-bit Format Comparison."""
-    return _accuracy_table(
-        part_b, "Table 2: 4-bit Format Comparison", output_dir, "table2_4bit.csv",
-    )
+# TODO: Port generate_table_3 through generate_table_6 to src/viz/tables.py
+#       once the viz module supports special-format tables.
 
 
 def generate_table_3(part_c: dict, output_dir: str) -> str:
@@ -1071,565 +991,8 @@ def generate_table_6(all_results: dict, output_dir: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Task 8: Figure Generation (11 figures)
+# Main entry point
 # ---------------------------------------------------------------------------
-
-def _save_figure(fig, output_dir: str, name: str):
-    """Save figure as PNG and PDF."""
-    os.makedirs(f"{output_dir}/figures", exist_ok=True)
-    for ext in ("png", "pdf"):
-        fig.savefig(f"{output_dir}/figures/{name}.{ext}", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _compute_best_transform_per_layer(
-    variant_qsnr: Dict[str, Dict[str, float]],
-) -> Dict[str, str]:
-    """Return ``{layer_name: best_transform_name}`` by QSNR.
-
-    For each layer, picks the transform variant (one of the dict keys in
-    ``variant_qsnr``) that maximizes per-layer QSNR.  Ties go to the
-    first transform encountered in dict insertion order.
-    """
-    all_layers: set = set()
-    for qsnr_dict in variant_qsnr.values():
-        all_layers.update(qsnr_dict.keys())
-    result: Dict[str, str] = {}
-    tx_names = list(variant_qsnr.keys())
-    for layer in all_layers:
-        result[layer] = max(
-            tx_names,
-            key=lambda tx: variant_qsnr[tx].get(layer, -float("inf")),
-        )
-    return result
-
-
-def _get_acc_val(data) -> float:
-    """Extract scalar accuracy value from a result dict entry.
-
-    Returns ``float("nan")`` when the entry is missing or empty, so that
-    tables and heatmaps can visually distinguish missing data from zero.
-    """
-    if not isinstance(data, dict) or not data:
-        return float("nan")
-    acc = data.get("accuracy", {})
-    if isinstance(acc, dict):
-        return float(acc.get("accuracy", float("nan")))
-    if isinstance(acc, (int, float)):
-        return float(acc)
-    return float("nan")
-
-
-def plot_fig1_qsnr_8bit(part_a: dict, output_dir: str):
-    """Fig 1: 8-bit per-layer QSNR line chart (3 lines)."""
-    fig, ax = plt.subplots(figsize=(12, 6))
-    for name, data in part_a.items():
-        if "baseline" in name.lower() or "qsnr_per_layer" not in data:
-            continue
-        layers = sorted(data["qsnr_per_layer"].keys())
-        values = [data["qsnr_per_layer"][l] for l in layers]
-        color = FORMAT_COLORS.get(name, FALLBACK_CYCLE[0])
-        ax.plot(range(len(layers)), values, marker="o", label=name, linewidth=2,
-                color=color)
-    ax.set_xlabel("Layer Index")
-    ax.set_ylabel("QSNR (dB)")
-    ax.set_title("Fig 1: Per-Layer QSNR — 8-bit Formats")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    _save_figure(fig, output_dir, "fig1_qsnr_8bit")
-
-
-def plot_fig2_qsnr_4bit(part_b: dict, output_dir: str):
-    """Fig 2: 4-bit per-layer QSNR line chart (4 lines)."""
-    fig, ax = plt.subplots(figsize=(12, 6))
-    for name, data in part_b.items():
-        if "baseline" in name.lower() or "qsnr_per_layer" not in data:
-            continue
-        layers = sorted(data["qsnr_per_layer"].keys())
-        values = [data["qsnr_per_layer"][l] for l in layers]
-        color = FORMAT_COLORS.get(name, FALLBACK_CYCLE[0])
-        ax.plot(range(len(layers)), values, marker="o", label=name, linewidth=2,
-                color=color)
-    ax.set_xlabel("Layer Index")
-    ax.set_ylabel("QSNR (dB)")
-    ax.set_title("Fig 2: Per-Layer QSNR — 4-bit Formats")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    _save_figure(fig, output_dir, "fig2_qsnr_4bit")
-
-
-def plot_fig3_mse_box_8bit(part_a: dict, output_dir: str):
-    """Fig 3: 8-bit per-layer MSE boxplot."""
-    fig, ax = plt.subplots(figsize=(10, 6))
-    data_to_plot, labels = [], []
-    colors = []
-    for name, data in part_a.items():
-        if "baseline" in name.lower() or "mse_per_layer" not in data:
-            continue
-        mse_vals = list(data["mse_per_layer"].values())
-        if mse_vals:
-            data_to_plot.append(mse_vals)
-            labels.append(name)
-            colors.append(FORMAT_COLORS.get(name, FALLBACK_CYCLE[0]))
-    if data_to_plot:
-        bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
-        for patch, c in zip(bp["boxes"], colors):
-            patch.set_facecolor(c)
-            patch.set_alpha(0.6)
-    ax.set_ylabel("MSE")
-    ax.set_title("Fig 3: Per-Layer MSE Distribution — 8-bit Formats")
-    ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
-    _save_figure(fig, output_dir, "fig3_mse_8bit")
-
-
-def plot_fig4_mse_box_4bit(part_b: dict, output_dir: str):
-    """Fig 4: 4-bit per-layer MSE boxplot."""
-    fig, ax = plt.subplots(figsize=(10, 6))
-    data_to_plot, labels, colors = [], [], []
-    for name, data in part_b.items():
-        if "baseline" in name.lower() or "mse_per_layer" not in data:
-            continue
-        mse_vals = list(data["mse_per_layer"].values())
-        if mse_vals:
-            data_to_plot.append(mse_vals)
-            labels.append(name)
-            colors.append(FORMAT_COLORS.get(name, FALLBACK_CYCLE[0]))
-    if data_to_plot:
-        bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
-        for patch, c in zip(bp["boxes"], colors):
-            patch.set_facecolor(c)
-            patch.set_alpha(0.6)
-    ax.set_ylabel("MSE")
-    ax.set_title("Fig 4: Per-Layer MSE Distribution — 4-bit Formats")
-    ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
-    _save_figure(fig, output_dir, "fig4_mse_4bit")
-
-
-def plot_fig5_pot_delta(part_c: dict, output_dir: str):
-    """Fig 5: FP32 vs PoT per-layer QSNR delta bar chart."""
-    # Group by format base (INT8-PC, INT4-PC)
-    formats: Dict[str, dict] = {}
-    for name, data in part_c.items():
-        if "baseline" in name.lower():
-            continue
-        base = name.rsplit("-", 1)[0]
-        is_pot = "PoT" in name
-        formats.setdefault(base, {})[is_pot] = data
-
-    n_groups = len(formats)
-    fig, axes = plt.subplots(1, n_groups, figsize=(7 * n_groups, 5),
-                             squeeze=False)
-    for idx, (fmt_name, fmt_data) in enumerate(sorted(formats.items())):
-        ax = axes[0, idx]
-        fp32_qsnr = fmt_data.get(False, {}).get("qsnr_per_layer", {})
-        pot_qsnr = fmt_data.get(True, {}).get("qsnr_per_layer", {})
-
-        all_layers = sorted(set(list(fp32_qsnr.keys()) + list(pot_qsnr.keys())))
-        deltas = [pot_qsnr.get(l, 0) - fp32_qsnr.get(l, 0) for l in all_layers]
-        layer_names = [l.replace("module.", "").replace("Quantized", "")
-                       for l in all_layers]
-
-        colors = ["#2ecc71" if d >= 0 else "#e74c3c" for d in deltas]
-        ax.bar(range(len(deltas)), deltas, color=colors, alpha=0.7)
-        ax.set_xticks(range(len(deltas)))
-        ax.set_xticklabels(layer_names, rotation=45, ha="right", fontsize=8)
-        ax.set_ylabel("QSNR Delta (PoT – FP32) [dB]")
-        ax.set_title(f"{fmt_name}")
-        ax.axhline(y=0, color="black", linewidth=0.5)
-        ax.grid(True, alpha=0.3)
-
-    fig.suptitle("Fig 5: PoT Scaling vs FP32 Scaling — Per-Layer QSNR Delta",
-                 fontsize=13)
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "fig5_pot_delta")
-
-
-def plot_fig6_histogram_overlay(all_results: dict, output_dir: str):
-    """Fig 6: Three-channel histogram overlay (fp32 / quant / error).
-
-    Extracts histogram data from ``HistogramObserver`` (keys: ``fp32_hist``,
-    ``quant_hist``, ``err_hist`` — torch.histc counts) and renders the most
-    sensitive layers as overlaid semi-transparent bar charts.
-    """
-    # Collect histogram data: {layer: {"fp32_hist": ..., "quant_hist": ..., "err_hist": ...}}
-    layer_hists: Dict[str, dict] = {}
-    for part_name, part_data in all_results.items():
-        if not part_name.startswith("part_") or not isinstance(part_data, dict):
-            continue
-        for config_name, config_data in part_data.items():
-            if not isinstance(config_data, dict) or "report" not in config_data:
-                continue
-            report = config_data["report"]
-            if not hasattr(report, "_raw"):
-                continue
-            for layer, roles in report._raw.items():
-                if layer in layer_hists:
-                    continue
-                for role, stages in roles.items():
-                    for stage, slices in stages.items():
-                        for metrics in slices.values():
-                            if "fp32_hist" in metrics and "quant_hist" in metrics:
-                                layer_hists[layer] = {
-                                    k: metrics[k].cpu() if hasattr(metrics.get(k, None), "cpu")
-                                    else metrics.get(k) for k in
-                                    ("fp32_hist", "quant_hist", "err_hist")
-                                }
-                                break
-                    if layer in layer_hists:
-                        break
-
-    if not layer_hists:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5, "Histogram data not available\n"
-                "(Add HistogramObserver to observers in run_experiment)",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Fig 6: Activation Histograms (No Data)")
-        _save_figure(fig, output_dir, "fig6_histogram")
-        return
-
-    # Pick top 3–5 layers with the richest histogram data
-    top_layers = sorted(layer_hists.items(),
-                        key=lambda x: x[1].get("fp32_hist",
-                         torch.tensor(0)).sum().item(), reverse=True)[:5]
-    if not top_layers:
-        return
-
-    n = len(top_layers)
-    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
-
-    for ax, (layer, hist_data) in zip(axes[0], top_layers):
-        n_bins = 128
-        for channel, color, label in [
-            ("fp32_hist", "#3498db", "fp32"),
-            ("quant_hist", "#e74c3c", "quant"),
-            ("err_hist", "#95a5a6", "error"),
-        ]:
-            counts = hist_data.get(channel)
-            if counts is None or not isinstance(counts, (torch.Tensor, np.ndarray)):
-                continue
-            if isinstance(counts, torch.Tensor):
-                counts = counts.float().numpy()
-            # torch.histc returns counts for equal-width bins; use index as
-            # approximate x-axis (the relative shape matters more than absolute
-            # values for visual comparison across channels)
-            bin_centers = np.arange(len(counts))
-            ax.fill_between(bin_centers, counts, alpha=0.35, color=color,
-                            label=label, step="mid")
-            ax.plot(bin_centers, counts, color=color, linewidth=0.8)
-        ax.set_title(layer, fontsize=9)
-        ax.set_xlabel("Bin")
-        ax.set_ylabel("Count")
-        ax.legend(fontsize=7, loc="upper right")
-        ax.grid(True, alpha=0.3)
-
-    fig.suptitle("Fig 6: Activation Histograms (fp32 / quant / error) — "
-                 "Most Sensitive Layers", fontsize=13)
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "fig6_histogram")
-
-
-def plot_fig7_transform_heatmap(part_d: dict, output_dir: str):
-    """Fig 7: Format x Transform heatmap."""
-    fmt_names = sorted(part_d.keys())
-    tx_variants = sorted({tx for fmt_data in part_d.values()
-                          for tx in fmt_data})
-
-    matrix = []
-    for fmt_name in fmt_names:
-        row = []
-        for tx in tx_variants:
-            row.append(_get_acc_val(part_d[fmt_name].get(tx, {})))
-        matrix.append(row)
-
-    arr = np.array(matrix)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    valid = arr[~np.isnan(arr)]
-    if len(valid) > 0:
-        vmin, vmax = valid.min(), valid.max()
-    else:
-        vmin, vmax = 0.0, 1.0
-    cmap = plt.cm.RdYlGn.copy()
-    cmap.set_bad(color="#d3d3d3")  # gray for missing variants
-    im = ax.imshow(arr, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
-
-    ax.set_xticks(range(len(tx_variants)))
-    ax.set_xticklabels(tx_variants, rotation=45, ha="right")
-    ax.set_yticks(range(len(fmt_names)))
-    ax.set_yticklabels(fmt_names)
-
-    for i in range(len(fmt_names)):
-        for j in range(len(tx_variants)):
-            val = matrix[i][j]
-            if not math.isnan(val):
-                mid = (vmin + vmax) / 2
-                text_color = "white" if val < mid else "black"
-                ax.text(j, i, f"{val:.3f}", ha="center", va="center",
-                        color=text_color, fontsize=9)
-
-    cbar = fig.colorbar(im, ax=ax, label="Accuracy")
-    ax.set_title("Fig 7: Format x Transform Accuracy Matrix")
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "fig7_transform_heatmap")
-
-
-def plot_fig8_transform_pie(part_d: dict, output_dir: str):
-    """Fig 8: Per-layer optimal transform distribution pie chart."""
-    n_fmts = len(part_d)
-    fig, axes = plt.subplots(1, max(n_fmts, 1),
-                             figsize=(5 * max(n_fmts, 1), 5),
-                             subplot_kw={"aspect": "equal"})
-    if n_fmts == 1:
-        axes = [axes]
-
-    pie_colors = TRANSFORM_COLORS
-
-    for ax, (fmt_name, fmt_data) in zip(axes, sorted(part_d.items())):
-        if "PerLayerOpt" not in fmt_data:
-            ax.text(0.5, 0.5, "No PerLayerOpt data",
-                    ha="center", va="center", transform=ax.transAxes)
-            continue
-
-        variant_qsnr: Dict[str, Dict[str, float]] = {}
-        for tx_name in ("None", "SmoothQuant", "Hadamard"):
-            if tx_name in fmt_data and "qsnr_per_layer" in fmt_data[tx_name]:
-                variant_qsnr[tx_name] = fmt_data[tx_name]["qsnr_per_layer"]
-
-        layer_best_tx = _compute_best_transform_per_layer(variant_qsnr)
-
-        tx_counts: Dict[str, int] = defaultdict(int)
-        for best_tx in layer_best_tx.values():
-            tx_counts[best_tx] += 1
-
-        labels = list(tx_counts.keys())
-        sizes = list(tx_counts.values())
-        colors = [pie_colors.get(l, "#95a5a6") for l in labels]
-        wedges, texts, autotexts = ax.pie(
-            sizes, labels=labels, autopct="%1.0f%%",
-            colors=colors, startangle=90,
-            textprops={"fontsize": 9},
-        )
-        total = sum(sizes)
-        ax.set_title(f"{fmt_name} (n={total})", fontsize=10)
-
-    fig.suptitle("Fig 8: Per-Layer Optimal Transform Distribution", fontsize=13)
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "fig8_transform_pie")
-
-
-def plot_fig9_transform_delta(part_d: dict, output_dir: str):
-    """Fig 9: Transform delta QSNR vs baseline, one subplot per format.
-
-    Each format gets its own subplot so that formats with different layer
-    counts (e.g. ToyMLP vs transformer) do not produce overlapping bars.
-    """
-    fmt_names = sorted(part_d.keys())
-    n_fmts = len(fmt_names)
-    fig, axes = plt.subplots(n_fmts, 1, figsize=(14, 4 * n_fmts), sharex=False)
-    if n_fmts == 1:
-        axes = [axes]
-    colors_tx = TRANSFORM_COLORS
-
-    for ax, fmt_name in zip(axes, fmt_names):
-        fmt_data = part_d[fmt_name]
-        if "None" not in fmt_data:
-            ax.text(0.5, 0.5, "No baseline data", ha="center", va="center",
-                    transform=ax.transAxes)
-            continue
-        baseline_qsnr = fmt_data["None"].get("qsnr_per_layer", {})
-
-        x_pos = 0
-        tick_positions, tick_labels = [], []
-        for tx_name in ("SmoothQuant", "Hadamard"):
-            if tx_name not in fmt_data or "qsnr_per_layer" not in fmt_data[tx_name]:
-                continue
-            tx_qsnr = fmt_data[tx_name]["qsnr_per_layer"]
-            all_layers = sorted(set(baseline_qsnr.keys()) | set(tx_qsnr.keys()))
-            deltas = [tx_qsnr.get(l, 0) - baseline_qsnr.get(l, 0) for l in all_layers]
-
-            bar_positions = list(range(x_pos, x_pos + len(all_layers)))
-            color = colors_tx.get(tx_name, "#95a5a6")
-            ax.bar(bar_positions, deltas, color=color, alpha=0.6,
-                   label=tx_name)
-            tick_positions.append((bar_positions[0] + bar_positions[-1]) / 2
-                                  if bar_positions else x_pos)
-            tick_labels.append(tx_name)
-            x_pos += len(all_layers) + 2
-            if len(all_layers) <= 20:
-                for i, layer in enumerate(all_layers):
-                    ax.text(bar_positions[i], deltas[i],
-                            layer.split(".")[-1] if "." in layer else layer,
-                            ha="center", va="bottom" if deltas[i] >= 0 else "top",
-                            fontsize=4, rotation=90)
-
-        ax.axhline(y=0, color="black", linewidth=0.5)
-        if tick_positions:
-            ax.set_xticks(tick_positions)
-            ax.set_xticklabels(tick_labels, fontsize=9)
-        ax.set_ylabel("QSNR Delta (dB)")
-        ax.set_title(f"{fmt_name}", fontsize=11)
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8)
-
-    fig.suptitle("Fig 9: Transform Impact on Per-Layer QSNR", fontsize=13)
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "fig9_transform_delta")
-
-
-def plot_fig10_error_vs_distribution(all_results: dict, output_dir: str):
-    """Fig 10: QSNR vs distribution features scatter (4-panel)."""
-    data_points: list = []
-
-    for part_name, part_data in all_results.items():
-        if not part_name.startswith("part_") or not isinstance(part_data, dict):
-            continue
-        for config_name, config_data in part_data.items():
-            if not isinstance(config_data, dict) or "report" not in config_data:
-                continue
-            report = config_data["report"]
-            if not hasattr(report, "_raw"):
-                continue
-            for layer, roles in report._raw.items():
-                for role, stages in roles.items():
-                    for stage, slices in stages.items():
-                        for metrics in slices.values():
-                            if "qsnr_db" not in metrics or "dynamic_range_bits" not in metrics:
-                                continue
-                            data_points.append({
-                                "qsnr": metrics["qsnr_db"],
-                                "dynamic_range": metrics["dynamic_range_bits"],
-                                "skewness": metrics.get("skewness", 0),
-                                "kurtosis": metrics.get("kurtosis", 0),
-                                "sparse_ratio": metrics.get("sparse_ratio", 0),
-                                "layer": layer,
-                                "role": role,
-                                "mse": metrics.get("mse", 1e-10),
-                            })
-
-    if not data_points:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5,
-                "Distribution data not available\n"
-                "(No DistributionObserver in reports)",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Fig 10: QSNR vs Distribution Features")
-        _save_figure(fig, output_dir, "fig10_error_vs_dist")
-        return
-
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-
-    # Panel 1: QSNR vs Dynamic Range (color = sparse_ratio)
-    ax = axes[0, 0]
-    dr_vals = [d["dynamic_range"] for d in data_points]
-    qsnr_vals = [d["qsnr"] for d in data_points]
-    sparse_vals = [d["sparse_ratio"] for d in data_points]
-    sc = ax.scatter(dr_vals, qsnr_vals, c=sparse_vals,
-                    cmap="viridis", alpha=0.6, s=30)
-    ax.set_xlabel("Dynamic Range (bits)")
-    ax.set_ylabel("QSNR (dB)")
-    ax.set_title("QSNR vs Dynamic Range\n(color = sparse ratio)")
-    fig.colorbar(sc, ax=ax)
-    ax.grid(True, alpha=0.3)
-
-    # Panel 2: QSNR vs Skewness (color = kurtosis)
-    ax = axes[0, 1]
-    skew_vals = [d["skewness"] for d in data_points]
-    kurt_vals = [d["kurtosis"] for d in data_points]
-    sc = ax.scatter(skew_vals, qsnr_vals, c=kurt_vals,
-                    cmap="plasma", alpha=0.6, s=30)
-    ax.set_xlabel("Skewness")
-    ax.set_ylabel("QSNR (dB)")
-    ax.set_title("QSNR vs Skewness\n(color = kurtosis)")
-    fig.colorbar(sc, ax=ax)
-    ax.grid(True, alpha=0.3)
-
-    # Panel 3: MSE (dB) vs Dynamic Range
-    ax = axes[1, 0]
-    mse_db = [10 * math.log10(max(d["mse"], 1e-20)) for d in data_points]
-    ax.scatter(dr_vals, mse_db, alpha=0.6, s=30, c="#e74c3c")
-    ax.set_xlabel("Dynamic Range (bits)")
-    ax.set_ylabel("MSE (dB)")
-    ax.set_title("MSE vs Dynamic Range")
-    ax.grid(True, alpha=0.3)
-
-    # Panel 4: Sparsity histogram
-    ax = axes[1, 1]
-    ax.hist(sparse_vals, bins=20, alpha=0.7, color=FALLBACK_CYCLE[0],
-            edgecolor="white")
-    ax.set_xlabel("Sparse Ratio")
-    ax.set_ylabel("Count")
-    ax.set_title("Sparsity Across Layers")
-    ax.grid(True, alpha=0.3)
-
-    fig.suptitle("Fig 10: Quantization Error vs Distribution Features", fontsize=14)
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "fig10_error_vs_dist")
-
-
-def plot_fig11_layer_type_qsnr(all_results: dict, output_dir: str):
-    """Fig 11: Layer-type grouped QSNR comparison using LayerSensitivity.
-
-    Note:
-        This figure degrades for models with sparse layer-type diversity
-        (e.g. ToyMLP / MLP-only architectures) because the ``by_layer_type``
-        grouping collapses to a single category (``"Linear"``), producing
-        boxplots with only one box per panel.
-    """
-    ltype_qsnr: Dict[str, list] = defaultdict(list)
-    ltype_mse: Dict[str, list] = defaultdict(list)
-
-    for part_name, part_data in all_results.items():
-        if not part_name.startswith("part_") or not isinstance(part_data, dict):
-            continue
-        for config_name, config_data in part_data.items():
-            if not isinstance(config_data, dict) or "report" not in config_data:
-                continue
-            report = config_data["report"]
-            ls = LayerSensitivity(report)
-            by_type = ls.by_layer_type()
-            for lt, stats in by_type.items():
-                ltype_qsnr[lt].append(stats["avg_qsnr_db"])
-                ltype_mse[lt].append(stats["avg_mse"])
-
-    if not ltype_qsnr:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5, "Layer type data not available",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Fig 11: Layer-Type Grouped Quantization Error")
-        _save_figure(fig, output_dir, "fig11_layer_type_qsnr")
-        return
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    colors_cycle = FALLBACK_CYCLE
-    labels = list(ltype_qsnr.keys())
-
-    # QSNR boxplot
-    ax = axes[0]
-    qsnr_data = [ltype_qsnr[lt] for lt in labels]
-    bp = ax.boxplot(qsnr_data, tick_labels=labels, patch_artist=True)
-    for i, patch in enumerate(bp["boxes"]):
-        patch.set_facecolor(colors_cycle[i % len(colors_cycle)])
-        patch.set_alpha(0.6)
-    ax.set_ylabel("QSNR (dB)")
-    ax.set_title("Avg QSNR by Layer Type")
-    ax.grid(True, alpha=0.3)
-
-    # MSE boxplot (log scale)
-    ax = axes[1]
-    mse_data = [ltype_mse[lt] for lt in labels]
-    bp2 = ax.boxplot(mse_data, tick_labels=labels, patch_artist=True)
-    for i, patch in enumerate(bp2["boxes"]):
-        patch.set_facecolor(colors_cycle[i % len(colors_cycle)])
-        patch.set_alpha(0.6)
-    ax.set_ylabel("MSE")
-    ax.set_title("Avg MSE by Layer Type")
-    ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
-
-    fig.suptitle("Fig 11: Layer-Type Grouped Quantization Error", fontsize=14)
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "fig11_layer_type_qsnr")
 
 
 def run_format_study(
@@ -1693,7 +1056,11 @@ def run_format_study(
         all_results["part_a"] = run_part_a_8bit(
             fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
-        print(generate_table_1(all_results["part_a"], output_dir))
+        print(accuracy_table(
+            all_results["part_a"],
+            title="Table 1: 8-bit Format Comparison",
+            output_dir=output_dir, filename="table1_8bit.csv",
+        ))
     else:
         print("\n### PART A: SKIPPED ###")
 
@@ -1704,7 +1071,11 @@ def run_format_study(
         all_results["part_b"] = run_part_b_4bit(
             fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
-        print(generate_table_2(all_results["part_b"], output_dir))
+        print(accuracy_table(
+            all_results["part_b"],
+            title="Table 2: 4-bit Format Comparison",
+            output_dir=output_dir, filename="table2_4bit.csv",
+        ))
     else:
         print("\n### PART B: SKIPPED ###")
 
@@ -1761,17 +1132,17 @@ def run_format_study(
     # Figures
     print("\n### Generating Figures ###")
     plot_tasks = [
-        (plot_fig1_qsnr_8bit, "part_a", "fig1_qsnr_8bit"),
-        (plot_fig2_qsnr_4bit, "part_b", "fig2_qsnr_4bit"),
-        (plot_fig3_mse_box_8bit, "part_a", "fig3_mse_8bit"),
-        (plot_fig4_mse_box_4bit, "part_b", "fig4_mse_4bit"),
-        (plot_fig5_pot_delta, "part_c", "fig5_pot_delta"),
-        (plot_fig6_histogram_overlay, None, "fig6_histogram"),
-        (plot_fig7_transform_heatmap, "part_d", "fig7_transform_heatmap"),
-        (plot_fig8_transform_pie, "part_d", "fig8_transform_pie"),
-        (plot_fig9_transform_delta, "part_d", "fig9_transform_delta"),
-        (plot_fig10_error_vs_distribution, None, "fig10_error_vs_dist"),
-        (plot_fig11_layer_type_qsnr, None, "fig11_layer_type_qsnr"),
+        (lambda data, od: qsnr_bar_chart(data, title="Fig 1: Per-Layer QSNR — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig1_qsnr_8bit"),
+        (lambda data, od: qsnr_bar_chart(data, title="Fig 2: Per-Layer QSNR — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig2_qsnr_4bit"),
+        (lambda data, od: mse_box_plot(data, title="Fig 3: Per-Layer MSE Distribution — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig3_mse_8bit"),
+        (lambda data, od: mse_box_plot(data, title="Fig 4: Per-Layer MSE Distribution — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig4_mse_4bit"),
+        (lambda data, od: pot_delta_bar(data, output_dir=od), "part_c", "fig5_pot_delta"),
+        (lambda data, od: histogram_overlay(data, output_dir=od), None, "fig6_histogram"),
+        (lambda data, od: transform_heatmap(data, colors=FORMAT_COLORS, output_dir=od), "part_d", "fig7_transform_heatmap"),
+        (lambda data, od: transform_pie(data, colors=TRANSFORM_COLORS, output_dir=od), "part_d", "fig8_transform_pie"),
+        (lambda data, od: transform_delta(data, colors=TRANSFORM_COLORS, output_dir=od), "part_d", "fig9_transform_delta"),
+        (lambda data, od: error_vs_distribution(data, output_dir=od), None, "fig10_error_vs_dist"),
+        (lambda data, od: layer_type_qsnr(data, output_dir=od), None, "fig11_layer_type_qsnr"),
     ]
     for fn, part_key, name in plot_tasks:
         if part_key is not None and part_key not in all_results:
@@ -1882,11 +1253,19 @@ def plot_from_results(results_path: str, output_dir: Optional[str] = None):
     # Tables
     skipped_parts = set()
     if "part_a" in all_results:
-        print(generate_table_1(all_results["part_a"], output_dir))
+        print(accuracy_table(
+            all_results["part_a"],
+            title="Table 1: 8-bit Format Comparison",
+            output_dir=output_dir, filename="table1_8bit.csv",
+        ))
     else:
         skipped_parts.add("a")
     if "part_b" in all_results:
-        print(generate_table_2(all_results["part_b"], output_dir))
+        print(accuracy_table(
+            all_results["part_b"],
+            title="Table 2: 4-bit Format Comparison",
+            output_dir=output_dir, filename="table2_4bit.csv",
+        ))
     else:
         skipped_parts.add("b")
     if "part_c" in all_results:
@@ -1903,17 +1282,17 @@ def plot_from_results(results_path: str, output_dir: Optional[str] = None):
     # Figures
     print("\n### Generating Figures ###")
     plot_tasks = [
-        (plot_fig1_qsnr_8bit, "part_a", "fig1_qsnr_8bit"),
-        (plot_fig2_qsnr_4bit, "part_b", "fig2_qsnr_4bit"),
-        (plot_fig3_mse_box_8bit, "part_a", "fig3_mse_8bit"),
-        (plot_fig4_mse_box_4bit, "part_b", "fig4_mse_4bit"),
-        (plot_fig5_pot_delta, "part_c", "fig5_pot_delta"),
-        (plot_fig6_histogram_overlay, None, "fig6_histogram"),
-        (plot_fig7_transform_heatmap, "part_d", "fig7_transform_heatmap"),
-        (plot_fig8_transform_pie, "part_d", "fig8_transform_pie"),
-        (plot_fig9_transform_delta, "part_d", "fig9_transform_delta"),
-        (plot_fig10_error_vs_distribution, None, "fig10_error_vs_dist"),
-        (plot_fig11_layer_type_qsnr, None, "fig11_layer_type_qsnr"),
+        (lambda data, od: qsnr_bar_chart(data, title="Fig 1: Per-Layer QSNR — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig1_qsnr_8bit"),
+        (lambda data, od: qsnr_bar_chart(data, title="Fig 2: Per-Layer QSNR — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig2_qsnr_4bit"),
+        (lambda data, od: mse_box_plot(data, title="Fig 3: Per-Layer MSE Distribution — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig3_mse_8bit"),
+        (lambda data, od: mse_box_plot(data, title="Fig 4: Per-Layer MSE Distribution — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig4_mse_4bit"),
+        (lambda data, od: pot_delta_bar(data, output_dir=od), "part_c", "fig5_pot_delta"),
+        (lambda data, od: histogram_overlay(data, output_dir=od), None, "fig6_histogram"),
+        (lambda data, od: transform_heatmap(data, colors=FORMAT_COLORS, output_dir=od), "part_d", "fig7_transform_heatmap"),
+        (lambda data, od: transform_pie(data, colors=TRANSFORM_COLORS, output_dir=od), "part_d", "fig8_transform_pie"),
+        (lambda data, od: transform_delta(data, colors=TRANSFORM_COLORS, output_dir=od), "part_d", "fig9_transform_delta"),
+        (lambda data, od: error_vs_distribution(data, output_dir=od), None, "fig10_error_vs_dist"),
+        (lambda data, od: layer_type_qsnr(data, output_dir=od), None, "fig11_layer_type_qsnr"),
     ]
     for fn, part_key, name in plot_tasks:
         if part_key is not None and part_key not in all_results:
