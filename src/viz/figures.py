@@ -19,10 +19,7 @@ import numpy as np
 from src.viz.save import save_figure
 from src.viz.theme import FALLBACK_CYCLE
 
-try:
-    import torch
-except ImportError:
-    torch = None  # type: ignore[assignment]
+import torch
 
 import matplotlib.pyplot as plt
 
@@ -73,7 +70,7 @@ def _get_acc_val(data) -> float:
 # Figure 1 & 2 — Per-layer QSNR line chart  (merged)
 # ---------------------------------------------------------------------------
 
-def qsnr_bar_chart(
+def qsnr_line_chart(
     results: dict,
     *,
     title: str,
@@ -233,8 +230,9 @@ def histogram_overlay(
 
     Args:
         all_results: Nested dict of ``{part: {config: {"report": ...}}}``.
-            Reports are expected to have a ``_raw`` attribute containing
-            histogram metrics.
+            Reports are expected to have a ``_raw`` attribute (private
+            Report API; if Report's internal format changes this function
+            must be updated) containing histogram metrics.
         output_dir: Output root directory.
 
     Returns:
@@ -326,7 +324,7 @@ def histogram_overlay(
 def transform_heatmap(
     part_d: dict,
     *,
-    colors: dict,
+    colors: dict | None = None,
     output_dir: str,
 ) -> plt.Figure:
     """Format x Transform accuracy heatmap.
@@ -334,14 +332,14 @@ def transform_heatmap(
     Args:
         part_d: Nested dict ``{format: {transform: data}}`` where data
             contains ``accuracy.accuracy``.
-        colors: Colour mapping (used for future extension; currently the
-            heatmap uses a ``RdYlGn`` colormap).
+        colors: Optional colour mapping (reserved for future extension;
+            currently the heatmap uses a ``RdYlGn`` colormap).
         output_dir: Output root directory.
 
     Returns:
         matplotlib Figure.
     """
-    _ = colors  # kept for API consistency; heatmap uses RdYlGn colormap
+    _ = colors  # reserved for future extension; heatmap uses RdYlGn colormap
     fmt_names = sorted(part_d.keys())
     tx_variants = sorted({tx for fmt_data in part_d.values()
                           for tx in fmt_data})
@@ -565,8 +563,10 @@ def error_vs_distribution(
 
     Args:
         all_results: Nested dict ``{part: {config: {"report": ...}}}``.
-            Reports are expected to have a ``_raw`` attribute with per-slice
-            metrics (``qsnr_db``, ``dynamic_range_bits``, etc.).
+            Reports are expected to have a ``_raw`` attribute (private
+            Report API; if Report's internal format changes this function
+            must be updated) with per-slice metrics (``qsnr_db``,
+            ``dynamic_range_bits``, etc.).
         output_dir: Output root directory.
 
     Returns:
@@ -752,7 +752,7 @@ def layer_type_qsnr(
 
 def _to_numpy(value):
     """Convert torch.Tensor to numpy array; pass through numpy arrays."""
-    if torch is not None and isinstance(value, torch.Tensor):
+    if isinstance(value, torch.Tensor):
         return value.cpu().float().numpy()
     if isinstance(value, np.ndarray):
         return value

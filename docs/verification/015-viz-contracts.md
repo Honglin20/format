@@ -14,7 +14,7 @@ src/viz/
   __init__.py    # re-export public API
   theme.py       # color palette constants
   save.py        # file I/O utility
-  tables.py      # 4 table generators (+ 2 shared helpers)
+  tables.py      # 2 table generators
   figures.py     # 9 figure generators (+ 2 shared helpers)
 ```
 
@@ -150,103 +150,12 @@ def format_comparison_table(results, *, title, output_dir, filename) -> str:
     return accuracy_table(results, title=title, output_dir=output_dir, filename=filename)
 ```
 
-#### `pot_scaling_table(results, *, output_dir) -> str`
-
-FP32 vs PoT scaling 对比表 (Table 3)。从 results 中提取 baseline 精度，对每个非 baseline 配置计算 delta（量化精度 − baseline），展示 accuracy、delta、avg QSNR、avg MSE。
-
-```python
-def pot_scaling_table(
-    results: Dict[str, Dict[str, Any]],
-    *,
-    output_dir: str,
-) -> str:
-    ...
-```
-
-**输入参数**:
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `results` | `Dict[str, dict]` | 是 | Part C results。含一个键含 `"baseline"` 的 entry（如 `"FP32 (baseline)"`） |
-| `output_dir` | `str` (keyword-only) | 是 | CSV 输出根目录 |
-
-**输出文件**: `<output_dir>/tables/table3_pot.csv` (CSV 格式: `Config,Accuracy,Delta,Avg_QSNR_dB,Avg_MSE`)
-
-**Baseline 查找规则**: 从 `results` 中寻找键含 `"baseline"`（大小写不敏感）的 entry，取其 accuracy 值作为基准。无 baseline 时 delta 为 `0.0`。
-
-#### `transform_matrix_table(results, *, output_dir, filename) -> str`
-
-Format x Transform accuracy 矩阵表 (Table 4)。行 = format 名，列 = transform 变体，单元格 = accuracy 值。
-
-```python
-def transform_matrix_table(
-    results: Dict[str, Dict[str, Dict[str, Any]]],
-    *,
-    output_dir: str,
-    filename: str,
-) -> str:
-    ...
-```
-
-**输入参数**:
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `results` | `Dict[str, dict]` | 是 | 嵌套 dict：format 名 → transform 名 → 结果 dict |
-| `output_dir` | `str` (keyword-only) | 是 | CSV 输出根目录 |
-| `filename` | `str` (keyword-only) | 是 | CSV 文件名（如 `"table4_format_x_transform.csv"`） |
-
-**输出文件**: `<output_dir>/tables/<filename>` (CSV 格式: `Format,<sorted transform names>`)
-
-**缺失值处理**: 当某个 format+transform 组合在 results 中不存在时，显示为 `"N/A"`（文本表格中）和 `"N/A"`（CSV 中）。`_get_acc_val` 的 `nan` 返回值在此处被识别。
-
-#### `transform_distribution_table(results, *, output_dir) -> str`
-
-逐层最优 transform 选择分布表 (Table 5)。对每个 format，统计各 transform 被选为逐层最优的层数。
-
-```python
-def transform_distribution_table(
-    results: Dict[str, Dict[str, Dict[str, Any]]],
-    *,
-    output_dir: str,
-) -> str:
-    ...
-```
-
-**输入参数**:
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `results` | `Dict[str, dict]` | 是 | Part D results（format → transform → result） |
-| `output_dir` | `str` (keyword-only) | 是 | CSV 输出根目录 |
-
-**算法**: 对每个 format，通过 `_compute_best_transform_per_layer` 确定每层的最佳 transform（基于 `qsnr_per_layer`），然后统计各 transform 被选中的层数。
-
-**输出文件**: `<output_dir>/tables/table5_transform_distribution.csv` (`Format,<sorted tx names>,Total`)
-
-#### `layer_sensitivity_table(results, *, output_dir) -> str`
-
-全实验中最敏感的 Top-10 层排名 (Table 6)。聚合所有 part 中的全部 QSNR/MSE 数据，按平均 MSE 降序排列取 Top 10。
-
-```python
-def layer_sensitivity_table(
-    all_results: Dict[str, Dict[str, Any]],
-    *,
-    output_dir: str,
-) -> str:
-    ...
-```
-
-**输入参数**:
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `all_results` | `Dict[str, dict]` | 是 | 完整 results dict（含 `part_a`, `part_b`, 等顶层键） |
-| `output_dir` | `str` (keyword-only) | 是 | CSV 输出根目录 |
-
-**数据聚合规则**: 仅处理键以 `"part_"` 开头的顶层 entry。对每个 part 内的每个 config entry，提取 `mse_per_layer` 和 `qsnr_per_layer`，按层名聚合均值。非 `part_*` 的 entry（如 `"FP32 (baseline)"`, `"block_sweep"`）为兼容性考虑不应引发错误，但不会进入聚合。
-
-**输出文件**: `<output_dir>/tables/table6_sensitivity.csv` (CSV 格式: `Rank,Layer,Avg_MSE,Avg_QSNR_dB`)
+> **Tables 3-6 (pot_scaling, transform_matrix, transform_distribution, layer_sensitivity)**
+> remain inline in `examples/experiment_format_study.py` as `generate_table_3` through
+> `generate_table_6`. They depend on experiment-specific result structures (Part C Pot
+> scaling, Part D nested format×transform, layer sensitivity aggregation) that are not
+> yet generalised into a stable viz API. These will be ported to `src/viz/tables.py`
+> once the result formats are finalised and common across multiple studies.
 
 ---
 
@@ -301,12 +210,12 @@ def _compute_best_transform_per_layer(
 
 #### 图函数列表
 
-##### `qsnr_bar_chart(results, *, title, colors, output_dir) -> Figure`
+##### `qsnr_line_chart(results, *, title, colors, output_dir) -> Figure`
 
 Per-layer QSNR 折线图。对每个非 baseline 配置绘制一条线：x = 层索引（按层名排序），y = QSNR (dB)。
 
 ```python
-def qsnr_bar_chart(
+def qsnr_line_chart(
     results: Dict[str, Dict[str, Any]],
     *,
     title: str,
@@ -556,8 +465,8 @@ part_a = {
     "FP32 (baseline)": {"accuracy": {"accuracy": 0.85}},
 }
 
-# qsnr_bar_chart: 3 条折线 (baseline 跳过)，颜色来自 FORMAT_COLORS
-qsnr_bar_chart(part_a, title="Fig 1: Per-Layer QSNR — 8-bit Formats",
+# qsnr_line_chart: 3 条折线 (baseline 跳过)，颜色来自 FORMAT_COLORS
+qsnr_line_chart(part_a, title="Fig 1: Per-Layer QSNR — 8-bit Formats",
                colors=FORMAT_COLORS, output_dir="/tmp/viz_test")
 
 # accuracy_table: 4 rows (含 baseline), CSV + 文本
@@ -584,7 +493,7 @@ part_d = {
 
 # _compute_best_transform_per_layer: 每层最优 transform
 # transform_heatmap: 4 rows × 4 columns (含 PerLayerOpt)
-# transform_distribution_table: 各 transform 被选中层数
+# generate_table_5: 各 transform 被选中层数
 # transform_pie: 1 pie chart per format
 # transform_delta: 1 subplot per format
 ```
@@ -620,7 +529,7 @@ histogram_overlay({"part_a": {}}, output_dir="/tmp/viz_test")
 - 无 `KeyError` 或 `AttributeError`
 - 图片文件正常保存
 
-### 场景 5: Part C results → pot_scaling_table + pot_delta_bar
+### 场景 5: Part C results → generate_table_3 + pot_delta_bar
 
 ```python
 part_c = {
@@ -652,7 +561,7 @@ part_c = {
 | `output_dir` 为 `None` | `save_figure` 中 `os.path.join` 抛出 `TypeError` |
 | `colors` dict 缺失某些配置名 | 使用 `FALLBACK_CYCLE[0]` 作为默认颜色 |
 | `results` 中某个 entry 不是 dict | `_get_acc_val` 返回 `float("nan")`，table 显示处理 |
-| `all_results` 中无 `part_*` 键 | `layer_sensitivity_table` 返回空排名（Top-0），无错误 |
+| `all_results` 中无 `part_*` 键 | `generate_table_6` 返回空排名（Top-0），无错误 |
 | `transform_pie` 中某个 format 无 `PerLayerOpt` | 显示 "No PerLayerOpt data" 占位文本 |
 | `histogram_overlay` 中所有层均无直方图数据 | 显示 "Histogram data not available" 占位文本 |
 | `error_vs_distribution` 中无分布数据 | 显示 "Distribution data not available" 占位文本 |

@@ -1,5 +1,5 @@
 from src.viz.figures import (
-    qsnr_bar_chart,
+    qsnr_line_chart,
     mse_box_plot,
     pot_delta_bar,
     histogram_overlay,
@@ -19,7 +19,7 @@ __all__ = [
     "FORMAT_COLORS", "TRANSFORM_COLORS", "HIST_COLORS", "FALLBACK_CYCLE",
     "save_figure",
     "accuracy_table", "format_comparison_table",
-    "qsnr_bar_chart",
+    "qsnr_line_chart",
     "mse_box_plot",
     "pot_delta_bar",
     "histogram_overlay",

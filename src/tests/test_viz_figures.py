@@ -4,7 +4,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 from src.viz.figures import (
-    qsnr_bar_chart,
+    qsnr_line_chart,
     mse_box_plot,
     pot_delta_bar,
     histogram_overlay,
@@ -50,7 +50,7 @@ class TestQSNRBarChart:
         }
         colors = {"MXINT-8": "#0072B2", "MXFP-8": "#D55E00"}
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = qsnr_bar_chart(results, title="Test QSNR", colors=colors, output_dir=tmpdir)
+            fig = qsnr_line_chart(results, title="Test QSNR", colors=colors, output_dir=tmpdir)
             assert fig is not None
             assert len(fig.axes) > 0
 
@@ -61,13 +61,13 @@ class TestQSNRBarChart:
         }
         colors = {"MXINT-8": "#0072B2"}
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = qsnr_bar_chart(results, title="Skip Baseline", colors=colors, output_dir=tmpdir)
+            fig = qsnr_line_chart(results, title="Skip Baseline", colors=colors, output_dir=tmpdir)
             assert fig is not None
             # Should only have one line (baseline skipped)
 
     def test_empty_results(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = qsnr_bar_chart({}, title="Empty", colors={}, output_dir=tmpdir)
+            fig = qsnr_line_chart({}, title="Empty", colors={}, output_dir=tmpdir)
             assert fig is not None
             assert len(fig.axes) > 0
 

@@ -165,5 +165,8 @@ cython_debug/
 # Git worktrees
 .worktrees/
 
+# Experiment results
+results/
+
 # Golden reference files (large binary .pt files)
 src/tests/golden/

@@ -11,11 +11,11 @@ def save_figure(fig, output_dir: str, name: str) -> str:
         name: Base filename without extension.
 
     Returns:
-        Path to the saved PNG file.
+        Path to the saved PNG file. The caller is responsible for closing
+        the figure via ``plt.close(fig)`` when done.
     """
     fig_dir = os.path.join(output_dir, "figures")
     os.makedirs(fig_dir, exist_ok=True)
     for ext in ("png", "pdf"):
         fig.savefig(os.path.join(fig_dir, f"{name}.{ext}"), dpi=300, bbox_inches="tight")
-    plt.close(fig)
     return os.path.join(fig_dir, f"{name}.png")

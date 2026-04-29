@@ -130,7 +130,7 @@ src/viz/
   tables.py      # accuracy_table, format_comparison_table, pot_scaling_table,
                  # transform_matrix_table, transform_distribution_table,
                  # layer_sensitivity_table
-  figures.py     # qsnr_bar_chart, mse_box_plot, pot_delta_bar, histogram_overlay,
+  figures.py     # qsnr_line_chart, mse_box_plot, pot_delta_bar, histogram_overlay,
                  # transform_heatmap, transform_pie, transform_delta,
                  # error_vs_distribution, layer_type_qsnr
 ```
@@ -226,7 +226,7 @@ assert "part_a" in FORMAT_STUDY
 ```python
 # examples/experiment_format_study.py
 from src.pipeline import ExperimentRunner, run_part_a_8bit, ...
-from src.viz import accuracy_table, qsnr_bar_chart, ...
+from src.viz import accuracy_table, qsnr_line_chart, ...
 from src.studies.format_study import FORMAT_STUDY
 
 # CLI entry point, no experiment logic, no visualization logic

@@ -29,6 +29,12 @@ Merge claude/pipeline-refactor into feature/refactor-src, then return to Phase 8
 4. `examples/experiment_format_study.py`（全文，重构后 ~1300 行）
 5. `docs/plans/2026-04-29-pipeline-refactor.md`（全文）
 
+## 已知预存在测试失败
+
+`pytest src/tests/` 有 26 个预存在失败（非本分支引入）：
+- `test_golden_equiv.py` — 26 tests FileNotFoundError（golden data `.pt` 文件未 staging）
+- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`
+
 ## 关键经验记录
 
 1. **EvalFn IoC 模式验证通过**：单回调驱动 calibrate/analyze/evaluate 三阶段，模型交互完全由用户控制

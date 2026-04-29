@@ -11,11 +11,15 @@ from src.calibration.strategies import MSEScaleStrategy
 from src.analysis.observers import QSNRObserver, MSEObserver
 
 
-def _extract_metric_per_layer(report, metric: str) -> Dict[str, float]:
-    """Extract per-layer average of a metric from Report."""
+def extract_metric_per_layer(report, metric: str) -> Dict[str, float]:
+    """Extract per-layer average of a metric from Report.
+
+    Handles both list-of-dicts (pandas not installed) and DataFrame
+    (pandas available) return types from ``report.to_dataframe()``.
+    """
     df = report.to_dataframe()
     if isinstance(df, list):
-        result = {}
+        result: Dict[str, list] = {}
         for row in df:
             name = row.get("layer", "unknown")
             val = row.get(metric)
@@ -23,6 +27,7 @@ def _extract_metric_per_layer(report, metric: str) -> Dict[str, float]:
                 result.setdefault(name, []).append(val)
         return {k: sum(v) / len(v) for k, v in result.items()}
     else:
+        # DataFrame — use groupby for proper aggregation
         grouped = df.groupby("layer")[metric].mean()
         return grouped.to_dict()
 
@@ -65,6 +70,7 @@ class ExperimentRunner:
             analyze_data: Data passed to eval_fn for analysis forward passes.
                 Defaults to calib_data if both are needed. None skips analysis.
             eval_data: Data passed to eval_fn for fp32 vs quant metric comparison.
+                None skips evaluation (fp32/quant/delta set to None).
             observers: Observer instances for analysis. Default: QSNR + MSE.
 
         Returns:
@@ -115,21 +121,26 @@ class ExperimentRunner:
                     report = ctx.report()
 
                 # Phase 3: Evaluate
-                fp32_model_copy = copy.deepcopy(fp32_model)
-                fp32_metrics = eval_fn(fp32_model_copy, eval_data)
-                quant_metrics = eval_fn(session, eval_data)
-                delta = {k: quant_metrics.get(k, 0.0) - fp32_metrics.get(k, 0.0)
-                         for k in fp32_metrics}
+                if eval_data is not None:
+                    fp32_model_copy = copy.deepcopy(fp32_model)
+                    fp32_metrics = eval_fn(fp32_model_copy, eval_data)
+                    quant_metrics = eval_fn(session, eval_data)
+                    delta = {k: quant_metrics.get(k, 0.0) - fp32_metrics.get(k, 0.0)
+                             for k in fp32_metrics}
+                else:
+                    fp32_metrics = None
+                    quant_metrics = None
+                    delta = None
 
                 entry = {
                     "fp32": fp32_metrics,
                     "quant": quant_metrics,
                     "delta": delta,
-                    "report": report,
                 }
                 if report is not None:
-                    entry["qsnr_per_layer"] = _extract_metric_per_layer(report, "qsnr_db")
-                    entry["mse_per_layer"] = _extract_metric_per_layer(report, "mse")
+                    entry["report"] = report
+                    entry["qsnr_per_layer"] = extract_metric_per_layer(report, "qsnr_db")
+                    entry["mse_per_layer"] = extract_metric_per_layer(report, "mse")
 
                 results[full_name] = entry
 

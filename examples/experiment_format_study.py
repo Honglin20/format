@@ -58,7 +58,7 @@ from src.calibration.strategies import MSEScaleStrategy
 from src.viz.theme import FORMAT_COLORS, TRANSFORM_COLORS, HIST_COLORS, FALLBACK_CYCLE
 from src.viz.save import save_figure
 from src.viz.figures import (
-    qsnr_bar_chart,
+    qsnr_line_chart,
     mse_box_plot,
     pot_delta_bar,
     histogram_overlay,
@@ -71,7 +71,7 @@ from src.viz.figures import (
     _get_acc_val,
 )
 from src.viz.tables import accuracy_table, format_comparison_table
-from src.pipeline.runner import _extract_metric_per_layer
+from src.pipeline.runner import extract_metric_per_layer
 
 
 # ---------------------------------------------------------------------------
@@ -377,8 +377,8 @@ def run_experiment(
     result = session.compare(eval_loader)
 
     # 5. Extract per-layer QSNR/MSE summaries
-    qsnr_per_layer = _extract_metric_per_layer(report, "qsnr_db")
-    mse_per_layer = _extract_metric_per_layer(report, "mse")
+    qsnr_per_layer = extract_metric_per_layer(report, "qsnr_db")
+    mse_per_layer = extract_metric_per_layer(report, "mse")
 
     return {
         "accuracy": result["quant"],
@@ -789,8 +789,11 @@ def run_part_d_transforms(
 # Tables 3-6: keep inline until ported to tables.py
 # ---------------------------------------------------------------------------
 
-# TODO: Port generate_table_3 through generate_table_6 to src/viz/tables.py
-#       once the viz module supports special-format tables.
+# Tables 3-6 remain inline in this example because they depend on
+# experiment-specific result structures (part_c Pot scaling, part_d nested
+# format×transform, layer sensitivity aggregation) that are not yet
+# generalised into a stable viz API.  Port them to src/viz/tables.py once
+# the result formats are finalised and common across multiple studies.
 
 
 def generate_table_3(part_c: dict, output_dir: str) -> str:
@@ -1132,8 +1135,8 @@ def run_format_study(
     # Figures
     print("\n### Generating Figures ###")
     plot_tasks = [
-        (lambda data, od: qsnr_bar_chart(data, title="Fig 1: Per-Layer QSNR — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig1_qsnr_8bit"),
-        (lambda data, od: qsnr_bar_chart(data, title="Fig 2: Per-Layer QSNR — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig2_qsnr_4bit"),
+        (lambda data, od: qsnr_line_chart(data, title="Fig 1: Per-Layer QSNR — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig1_qsnr_8bit"),
+        (lambda data, od: qsnr_line_chart(data, title="Fig 2: Per-Layer QSNR — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig2_qsnr_4bit"),
         (lambda data, od: mse_box_plot(data, title="Fig 3: Per-Layer MSE Distribution — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig3_mse_8bit"),
         (lambda data, od: mse_box_plot(data, title="Fig 4: Per-Layer MSE Distribution — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig4_mse_4bit"),
         (lambda data, od: pot_delta_bar(data, output_dir=od), "part_c", "fig5_pot_delta"),
@@ -1282,8 +1285,8 @@ def plot_from_results(results_path: str, output_dir: Optional[str] = None):
     # Figures
     print("\n### Generating Figures ###")
     plot_tasks = [
-        (lambda data, od: qsnr_bar_chart(data, title="Fig 1: Per-Layer QSNR — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig1_qsnr_8bit"),
-        (lambda data, od: qsnr_bar_chart(data, title="Fig 2: Per-Layer QSNR — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig2_qsnr_4bit"),
+        (lambda data, od: qsnr_line_chart(data, title="Fig 1: Per-Layer QSNR — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig1_qsnr_8bit"),
+        (lambda data, od: qsnr_line_chart(data, title="Fig 2: Per-Layer QSNR — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig2_qsnr_4bit"),
         (lambda data, od: mse_box_plot(data, title="Fig 3: Per-Layer MSE Distribution — 8-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_a", "fig3_mse_8bit"),
         (lambda data, od: mse_box_plot(data, title="Fig 4: Per-Layer MSE Distribution — 4-bit Formats", colors=FORMAT_COLORS, output_dir=od), "part_b", "fig4_mse_4bit"),
         (lambda data, od: pot_delta_bar(data, output_dir=od), "part_c", "fig5_pot_delta"),

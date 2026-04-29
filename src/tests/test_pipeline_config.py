@@ -71,3 +71,31 @@ class TestResolveConfig:
     def test_missing_format_raises(self):
         with pytest.raises(ValueError, match="must contain 'format' key"):
             resolve_config({"granularity": "per_tensor"})
+
+    def test_missing_granularity_raises(self):
+        with pytest.raises(ValueError, match="must contain 'granularity' key"):
+            resolve_config({"format": "int8"})
+
+    def test_format_must_be_string(self):
+        with pytest.raises(TypeError, match="'format' must be a string"):
+            resolve_config({"format": 42, "granularity": "per_tensor"})
+
+    def test_granularity_must_be_string(self):
+        with pytest.raises(TypeError, match="'granularity' must be a string"):
+            resolve_config({"format": "int8", "granularity": 42})
+
+    def test_axis_must_be_int(self):
+        with pytest.raises(TypeError, match="'axis' must be an int"):
+            resolve_config({"format": "int8", "granularity": "per_channel", "axis": "-1"})
+
+    def test_block_size_must_be_int(self):
+        with pytest.raises(TypeError, match="'block_size' must be an int"):
+            resolve_config({"format": "int8", "granularity": "per_block", "block_size": "32"})
+
+    def test_weight_only_must_be_bool(self):
+        with pytest.raises(TypeError, match="'weight_only' must be a bool"):
+            resolve_config({"format": "int8", "granularity": "per_tensor", "weight_only": "yes"})
+
+    def test_transform_type_error(self):
+        with pytest.raises(TypeError, match="'transform' must be a string"):
+            resolve_config({"format": "int8", "granularity": "per_tensor", "transform": 42})
