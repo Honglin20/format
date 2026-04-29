@@ -70,6 +70,6 @@ x @ W^T = [[0, 0.5, 1.0], [2.5, 6.0, 9.5]]
 
 ## 验证结果
 
-- [ ] 运行日期:
-- [ ] 结果: PASS / FAIL
-- [ ] 说明:
+- [x] 运行日期: 2026-04-29
+- [x] 结果: PASS
+- [x] 说明: scale/x_smooth/w_fused bit-exact；等价性 (x/s)@(W*s)^T == x@W^T 用 allclose(atol=1e-7) 通过；inverse 恢复 allclose 通过

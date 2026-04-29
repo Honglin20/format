@@ -71,6 +71,6 @@ expected_x = torch.tensor([
 
 ## 验证结果
 
-- [ ] 运行日期:
-- [ ] 结果: PASS / FAIL
-- [ ] 说明:
+- [x] 运行日期: 2026-04-29
+- [x] 结果: PASS
+- [x] 说明: NF4 LUT 查表 + rescale，bit-exact 通过。注意期望值 y[0,1]=-0.21333104372024536（float32 乘积），与文中双精度近似 -0.21333103... 有末位 ULP 差异，测试以 torch 预计算的 float32 值为准

@@ -56,12 +56,12 @@ axis = 0  # per_channel along columns
 
 ### 结果
 
-`expected_scale = [[1.625], [1.21875]]` (shape (2, 1), keepdim along axis=0)
+`expected_scale = [[1.625, 1.21875]]` (shape (1, 2), keepdim=True along axis=0)
 
 ## 期望值
 
 ```python
-expected_scale = torch.tensor([[1.625], [1.21875]], dtype=torch.float32)
+expected_scale = torch.tensor([[1.625, 1.21875]], dtype=torch.float32)  # shape (1, 2)
 ```
 
 ## 验证结果
