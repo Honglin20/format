@@ -71,3 +71,39 @@ def test_session_estimate_cost_quantized_no_fp32_ok(int8_cfg):
 
     cost = session.estimate_cost()  # fp32=False (default)
     assert cost.total_latency_us > 0
+
+
+# ── ExperimentRunner cost integration ────────────────────────────
+
+def _dummy_eval_fn(model, data):
+    return {"accuracy": 0.9}
+
+
+def test_runner_attaches_cost_keys(int8_cfg):
+    from src.pipeline.runner import ExperimentRunner
+
+    search_space = {"test_part": {"configs": {"cfg1": int8_cfg}}}
+    runner = ExperimentRunner(search_space)
+    model = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 10))
+
+    results = runner.run(model, eval_fn=_dummy_eval_fn)
+    entry = results["test_part/cfg1"]
+    assert "cost" in entry
+    assert "cost_fp32" in entry
+    assert entry["cost"].total_latency_us > 0
+    assert entry["cost_fp32"].total_latency_us > 0
+
+
+def test_runner_cost_keys_present_even_without_analysis(int8_cfg):
+    """cost and cost_fp32 are present even when analysis is skipped."""
+    from src.pipeline.runner import ExperimentRunner
+
+    search_space = {"test_part": {"configs": {"cfg1": int8_cfg}}}
+    runner = ExperimentRunner(search_space)
+    model = nn.Sequential(nn.Linear(64, 32))
+
+    results = runner.run(model, eval_fn=_dummy_eval_fn)
+    entry = results["test_part/cfg1"]
+    assert "cost" in entry
+    assert "cost_fp32" in entry
+    assert entry["cost"].total_latency_us > 0

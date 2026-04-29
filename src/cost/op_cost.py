@@ -302,7 +302,7 @@ def _norm_cost(m: nn.Module, shapes: dict, device: DeviceSpec, op_type: str) -> 
             (weight_elem, cfg.storage),
             (bias_elem, cfg.storage),
             (input_elem, cfg.input),
-            (weight_elem, cfg.weight if hasattr(cfg, "weight") else None),
+            (weight_elem, cfg.weight),
             (input_elem, cfg.storage),   # normed intermediate
             (output_elem, cfg.storage),  # out0
             (output_elem, cfg.storage),  # out1
@@ -317,7 +317,7 @@ def _norm_cost(m: nn.Module, shapes: dict, device: DeviceSpec, op_type: str) -> 
     bytes_r += q_r
     bytes_w += q_w
 
-    weight_scheme = cfg.weight if (cfg and hasattr(cfg, "weight")) else None
+    weight_scheme = cfg.weight if cfg else None
     input_scheme = cfg.input if cfg else None
     output_scheme = cfg.output if cfg else None
 
@@ -419,34 +419,6 @@ def _pool_cost(m: nn.Module, shapes: dict, device: DeviceSpec) -> OpCost:
     )
 
 
-_KNOWN_LEAF_TYPES = None
-
-
-def _get_known_leaf_types():
-    global _KNOWN_LEAF_TYPES
-    if _KNOWN_LEAF_TYPES is not None:
-        return _KNOWN_LEAF_TYPES
-    types = set()
-    for mod_path, cls_name in [
-        ("src.ops.linear", "QuantizedLinear"),
-        ("src.ops.conv", "QuantizedConv2d"),
-        ("src.ops.norm", "QuantizedLayerNorm"),
-        ("src.ops.norm", "QuantizedRMSNorm"),
-        ("src.ops.norm", "QuantizedBatchNorm2d"),
-        ("src.ops.activations", "QuantizedActivation"),
-        ("src.ops.softmax", "QuantizedSoftmax"),
-        ("src.ops.pooling", "QuantizedAdaptiveAvgPool2d"),
-    ]:
-        try:
-            import importlib
-            mod = importlib.import_module(mod_path)
-            types.add(getattr(mod, cls_name))
-        except (ImportError, AttributeError):
-            pass
-    _KNOWN_LEAF_TYPES = tuple(types)
-    return _KNOWN_LEAF_TYPES
-
-
 def _dispatch_op_cost(m: nn.Module, shapes: dict, device: DeviceSpec) -> Optional[OpCost]:
     """Dispatch to the correct cost function for a given module."""
     from src.ops.linear import QuantizedLinear
@@ -462,16 +434,26 @@ def _dispatch_op_cost(m: nn.Module, shapes: dict, device: DeviceSpec) -> Optiona
 
     # Norm
     try:
-        from src.ops.norm import QuantizedLayerNorm, QuantizedRMSNorm
-        if isinstance(m, (nn.LayerNorm, QuantizedLayerNorm)):
-            return _norm_cost(m, shapes, device, "layer_norm")
+        from src.ops.norm import (
+            QuantizedLayerNorm, QuantizedRMSNorm,
+            QuantizedBatchNorm2d, QuantizedGroupNorm,
+        )
         if isinstance(m, QuantizedRMSNorm):
             return _norm_cost(m, shapes, device, "rms_norm")
+        if isinstance(m, (nn.LayerNorm, QuantizedLayerNorm)):
+            return _norm_cost(m, shapes, device, "layer_norm")
+        if isinstance(m, QuantizedBatchNorm2d):
+            return _norm_cost(m, shapes, device, "batch_norm")
+        if isinstance(m, QuantizedGroupNorm):
+            return _norm_cost(m, shapes, device, "group_norm")
     except ImportError:
         pass
 
     if isinstance(m, nn.BatchNorm2d):
         return _norm_cost(m, shapes, device, "batch_norm")
+
+    if isinstance(m, nn.GroupNorm):
+        return _norm_cost(m, shapes, device, "group_norm")
 
     # Activation
     act_map = {

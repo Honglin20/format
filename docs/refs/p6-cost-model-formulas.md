@@ -139,10 +139,10 @@ step_quant_flops = num_elem × per_elem_ops + granularity_additional
 |---|---|---|
 | Linear | 9 | storage(in, w, b, out0, bias_add, out1) + compute(in, w, out) |
 | Conv2d | 9 | 同上 |
-| BatchNorm | 9 | storage(in, w, b, out) + compute(in, w, b, out) + storage(out) |
-| LayerNorm | 10 | storage(in, w, b, out0, normed, out1) + compute(in, w, b, out) + storage(out) |
-| RMSNorm | 7 | storage(in, w, out) + compute(in, w, out) + storage(out) |
-| GroupNorm | 10 | 同 LayerNorm |
+| BatchNorm | 9 | 同上 |
+| LayerNorm | 9 | storage(in, w, b, normed, out0, out1) + compute(in, w, out) |
+| RMSNorm | 7 | storage(in, w, b, normed, out0) + compute(in, w) |
+| GroupNorm | 9 | 同 LayerNorm |
 | Softmax | 5 | storage(in, out0, out1) + compute(in, out) |
 | GELU / SiLU / ReLU | 5 | storage(in, out0) + compute(in, out) + storage(out) |
 | AdaptiveAvgPool2d | 3 | storage(in, out) + compute(in) |

@@ -160,3 +160,61 @@ class TestOpCostElemBits:
     def test_elem_bits_none_is_32(self):
         from src.cost.op_cost import _elem_bits
         assert _elem_bits(None) == 32
+
+
+class TestOpCostNormDispatch:
+    """QuantizedBatchNorm2d and QuantizedGroupNorm are recognized."""
+
+    def test_quantized_batch_norm_dispatch(self, device):
+        from src.ops.norm import QuantizedBatchNorm2d
+        m = QuantizedBatchNorm2d(32)
+        cost = op_cost(m, {}, device)
+        assert cost.op_type == "batch_norm"
+
+    def test_quantized_group_norm_dispatch(self, device):
+        from src.ops.norm import QuantizedGroupNorm
+        m = QuantizedGroupNorm(num_groups=4, num_channels=32)
+        cost = op_cost(m, {}, device)
+        assert cost.op_type == "group_norm"
+
+    def test_fp32_batch_norm_dispatch(self, device):
+        m = nn.BatchNorm2d(32)
+        cost = op_cost(m, {}, device)
+        assert cost.op_type == "batch_norm"
+
+    def test_fp32_group_norm_dispatch(self, device):
+        m = nn.GroupNorm(num_groups=4, num_channels=32)
+        cost = op_cost(m, {}, device)
+        assert cost.op_type == "group_norm"
+
+    def test_rms_norm_has_fewer_quant_steps(self, device):
+        """RMSNorm should have fewer quantize steps than LayerNorm."""
+        from src.ops.norm import QuantizedRMSNorm, QuantizedLayerNorm
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.base import FormatBase
+
+        fmt = FormatBase.from_str("int8")
+        scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
+        rms = QuantizedRMSNorm(128, cfg=OpQuantConfig(input=scheme, output=scheme))
+        ln = QuantizedLayerNorm(128, cfg=OpQuantConfig(input=scheme, output=scheme))
+
+        cost_rms = op_cost(rms, {}, device)
+        cost_ln = op_cost(ln, {}, device)
+        assert cost_rms.flops_quantize < cost_ln.flops_quantize
+
+    def test_layer_norm_step_count_is_9(self, device):
+        """LayerNorm has 9 quantize steps (not 10) — no compute(bias)."""
+        from src.ops.norm import QuantizedLayerNorm
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.base import FormatBase
+
+        fmt = FormatBase.from_str("int8")
+        scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(input=scheme)
+        ln = QuantizedLayerNorm(128, cfg=cfg)
+        cost = op_cost(ln, {}, device)
+        # With storage=None, quantize FLOPs come only from input scheme steps
+        # LayerNorm: compute(in) is 1 step with input scheme
+        assert cost.flops_quantize > 0

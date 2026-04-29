@@ -132,10 +132,16 @@ class ExperimentRunner:
                     quant_metrics = None
                     delta = None
 
+                # Cost estimation (P6)
+                cost = session.estimate_cost()
+                cost_fp32 = session.estimate_cost(fp32=True)
+
                 entry = {
                     "fp32": fp32_metrics,
                     "quant": quant_metrics,
                     "delta": delta,
+                    "cost": cost,
+                    "cost_fp32": cost_fp32,
                 }
                 if report is not None:
                     entry["report"] = report
