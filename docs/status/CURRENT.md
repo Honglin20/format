@@ -1,8 +1,7 @@
 # Current Task
 
-**Task ID**: Phase 8 — P6 Coarse Model
-**Plan**: `docs/plans/YYYY-MM-DD-p6-cost-model.md`（待创建）
-**Design Ref**: `docs/architecture/007-p6-cost-model.md`（公式权威来源）
+**Task ID**: Phase 8 — P7 Auto Format Search（未开始）
+**Plan**: 待创建
 **Branch**: feature/refactor-src
 
 ## Progress
@@ -35,39 +34,46 @@
 
 - [x] `src/pipeline/` + `src/viz/`（52 新测试，分支 `claude/pipeline-refactor` 已合入）
 
-### P1 收尾项（全局最低优先级，P6-P9 完成后再关注）
+### P6 — Coarse Model 性能估算 ✅
+
+- [x] `src/cost/` 包（defaults, device, op_cost, model_cost, report）
+- [x] 39 新测试（test_cost_op_cost, test_cost_report, test_cost_model_cost, test_cost_integration）
+- [x] `QuantSession.estimate_cost()` — 无 forward pass，同步返回
+- [x] `run_experiment()` 返回 dict 附加 `cost` / `cost_fp32` 键
+- [x] 修复计划中 `_elem_bits` 公式错误（`ebits==0` 时取 `mbits`，否则 `ebits+mbits-1`）
+- [x] 全量测试：1387 passed（无 regression）
+
+### P1 收尾项（全局最低优先级，P7-P9 完成后再关注）
 
 - [ ] Bias Correction
 - [ ] Cross-Layer Equalization (CLE)
 - [ ] Transform 组合与注册
 
-### 剩余（P6-P9，未开始）
+### 剩余（P7-P9，未开始）
 
-- [ ] P6 — Coarse Model 性能估算
 - [ ] P7 — 自动格式搜索
 - [ ] P8 — 融合 Kernel
 - [ ] P9 — ONNX custom op（ORT 可推理）
 
 ## 待讨论设计决策
 
-> 无活跃决策。P6-P9 推进顺序待用户选定。
+> 无活跃决策。P7-P9 推进顺序待用户选定。
 
 ## 下一步
 
-从 P6/P7/P8/P9 中选定一个方向，创建实现计划并开始。
+从 P7/P8/P9 中选定一个方向，创建实现计划并开始。
 
 ## 断点续传必读文件
 
-1. `docs/architecture/007-p6-cost-model.md`（P6 Cost Model 公式 + 架构，权威来源）
+1. `docs/architecture/007-p6-cost-model.md`（P6 Cost Model 已完成，可参考作为下个 phase 的模板）
 2. `~/.claude/projects/.../memory/format-research-roadmap.md`（优先级全貌）
-3. `src/session.py`（1-372 行，了解 session 架构以集成 cost 方法）
-4. `src/ops/` 目录下算子文件（forward 量化步骤数需从此提取）
+3. `src/cost/` 目录（P6 实现，共 5 个文件）
 
 ## 已知预存在测试失败
 
 `pytest src/tests/` 有 26 个预存在失败（非本分支引入）：
 - `test_golden_equiv.py` — 26 tests FileNotFoundError（golden data `.pt` 文件未 staging）
-- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,348 passed
+- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,387 passed
 
 ## 关键经验记录
 
@@ -75,3 +81,5 @@
 2. **Pipeline Refactor IoC 模式验证通过**：单回调驱动 calibrate/analyze/evaluate 三阶段，模型交互完全由用户控制。
 3. **Module boundary 强制执行**：viz 模块不含 pipeline/session import（AST 静态检查通过）。
 4. **Type guards 是 CLAUDE.md §5.1 硬性要求**：每个公共 API 参数的类型守卫必须配一条 pytest.raises + match= 测试。
+5. **quantize_model 不替换根模块**：向 QuantSession 传入裸 `nn.Linear` 时，该 Linear 本身是 root（name=""）不会被 quantize_model 替换。测试需用 wrapper 模型。
+6. **_elem_bits 公式**：IntFormat/LookupFormat（ebits=0）：取 `mbits`；FPFormat/BFloat16Format（ebits>0）：取 `ebits+mbits-1`（mbits 包含 sign + implicit bit）。
