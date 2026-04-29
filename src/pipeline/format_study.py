@@ -176,6 +176,11 @@ def run_experiment(
     report = ctx.report()
 
     result = session.compare(eval_loader)
+
+    # Cost estimation (P6)
+    cost = session.estimate_cost()
+    cost_fp32 = session.estimate_cost(fp32=True)
+
     return {
         "accuracy": result["quant"],
         "fp32_accuracy": result["fp32"],
@@ -184,6 +189,8 @@ def run_experiment(
         "session": session,
         "qsnr_per_layer": extract_metric_per_layer(report, "qsnr_db"),
         "mse_per_layer": extract_metric_per_layer(report, "mse"),
+        "cost": cost,
+        "cost_fp32": cost_fp32,
     }
 
 
