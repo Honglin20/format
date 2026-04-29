@@ -79,6 +79,9 @@ expected = torch.tensor([...])
 | Layer 1 | 核心量化：Format.quantize() 逐元素正确性 | 001-006 |
 | Layer 2 | 算子 + Transform：Linear 配合 SmoothQuant/Hadamard | 007-009 |
 | Layer 3 | 完整 Pipeline：QuantSession calibrate → analyze → compare | 010-012 |
+| Layer 4 | Pipeline + Viz：ExperimentRunner / resolve_config / viz contracts | 013-016 |
+
+> **Note**: Layer 4 derivation docs are API contract documents, not numerical derivations. They describe the protocol, config, runner, and visualization interfaces and verify them through integration tests.
 
 ## 已知限制
 
