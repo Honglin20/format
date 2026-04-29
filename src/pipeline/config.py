@@ -17,7 +17,9 @@ def _resolve_granularity(desc: Dict[str, Any]) -> GranularitySpec:
         axis = desc.get("axis", -1)
         return GranularitySpec.per_channel(axis=axis)
     elif mode == "per_block":
-        block_size = desc["block_size"]
+        block_size = desc.get("block_size")
+        if block_size is None:
+            raise ValueError("per_block granularity requires 'block_size' in descriptor")
         axis = desc.get("axis", -1)
         return GranularitySpec.per_block(size=block_size, axis=axis)
     else:
@@ -52,7 +54,10 @@ def resolve_config(desc: Dict[str, Any]) -> OpQuantConfig:
         OpQuantConfig with input, weight, output set
         (or just weight if weight_only).
     """
-    fmt = FormatBase.from_str(desc["format"])
+    fmt_name = desc.get("format")
+    if fmt_name is None:
+        raise ValueError("descriptor must contain 'format' key")
+    fmt = FormatBase.from_str(fmt_name)
     granularity = _resolve_granularity(desc)
     transform = _resolve_transform(desc)
     scheme = QuantScheme(format=fmt, granularity=granularity, transform=transform)
