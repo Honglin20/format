@@ -80,3 +80,34 @@ def test_int8_per_tensor():
     assert torch.equal(actual_w, expected_w), (
         f"W mismatch:\n  actual:\n{actual_w}\n  expected:\n{expected_w}"
     )
+
+
+def test_int8_per_channel():
+    """验证 int8 per_channel(axis=0) 量化。
+
+    推导: docs/verification/002-int8-per-channel.md
+
+    每列独立: amax→norm→quantize_elemwise→rescale。
+    """
+    gran = PER_C0
+
+    # --- x 量化 ---
+    # col0 amax=1.0, col1 amax=0.75
+    expected_x = torch.tensor(
+        [[0.5, -0.24609375], [1.0, 0.75]], dtype=torch.float32,
+    )
+    actual_x = int8_fmt.quantize(x, gran)
+    assert torch.equal(actual_x, expected_x), (
+        f"x mismatch:\n  actual:\n{actual_x}\n  expected:\n{expected_x}"
+    )
+
+    # --- W 量化 ---
+    # col0 amax=5.0, col1 amax=6.0
+    expected_w = torch.tensor(
+        [[1.015625, 1.96875], [2.96875, 4.03125], [5.0, 6.0]],
+        dtype=torch.float32,
+    )
+    actual_w = int8_fmt.quantize(W, gran)
+    assert torch.equal(actual_w, expected_w), (
+        f"W mismatch:\n  actual:\n{actual_w}\n  expected:\n{expected_w}"
+    )
