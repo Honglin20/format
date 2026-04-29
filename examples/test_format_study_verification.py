@@ -170,3 +170,57 @@ def test_int4_per_channel():
     assert torch.equal(actual_w, expected_w), (
         f"W mismatch:\n  actual:\n{actual_w}\n  expected:\n{expected_w}"
     )
+
+
+def test_fp8_e4m3_per_tensor():
+    """验证 fp8_e4m3 per_tensor 量化。
+
+    推导: docs/verification/005-fp8-e4m3-per-tensor.md
+
+    ebits=4, mbits=5, max_norm=448.0. 浮点格式: 提取指数→scale→round→rescale.
+    """
+    gran = PER_T
+    fp8_fmt = FPFormat(name="fp8_e4m3", ebits=4, mbits=5, max_norm_override=448.0)
+
+    # --- x 量化 ---
+    # 所有值在 e4m3 下精确可表示 (3-bit mantissa, exponent range [-6, 8])
+    expected_x = torch.tensor([[0.5, -0.25], [1.0, 0.75]], dtype=torch.float32)
+    actual_x = fp8_fmt.quantize(x, gran)
+    assert torch.equal(actual_x, expected_x), (
+        f"x mismatch:\n  actual: {actual_x}\n  expected: {expected_x}"
+    )
+
+    # --- W 量化 ---
+    # 全部在 max_norm=448.0 以内，且精确可表示
+    expected_w = torch.tensor(
+        [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=torch.float32,
+    )
+    actual_w = fp8_fmt.quantize(W, gran)
+    assert torch.equal(actual_w, expected_w), (
+        f"W mismatch:\n  actual:\n{actual_w}\n  expected:\n{expected_w}"
+    )
+
+
+def test_nf4_per_channel():
+    """验证 nf4 per_channel(axis=0) 量化。
+
+    推导: docs/verification/006-nf4-per-channel.md
+
+    NF4 16-level LUT, per_channel: normalize → nearest-neighbor → rescale.
+    """
+    from src.formats.lookup_formats import NF4Format
+    gran = PER_C0
+    nf4_fmt = NF4Format()
+
+    # --- x 量化 ---
+    # col0 amax=1.0, col1 amax=0.75
+    # normalized: [0.5, 1.0] → nf4 LUT → [0.44071, 1.0] → * amax
+    # normalized: [-0.3333, 1.0] → nf4 LUT → [-0.28444, 1.0] → * amax
+    expected_x = torch.tensor(
+        [[0.44070982933044434, -0.21333104372024536], [1.0, 0.75]],
+        dtype=torch.float32,
+    )
+    actual_x = nf4_fmt.quantize(x, gran)
+    assert torch.equal(actual_x, expected_x), (
+        f"x mismatch:\n  actual: {actual_x}\n  expected: {expected_x}"
+    )
