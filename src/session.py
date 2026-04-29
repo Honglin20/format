@@ -245,6 +245,39 @@ class QuantSession:
         self.qmodel.export_onnx(inp, output_path, opset_version=opset_version)
 
     # ------------------------------------------------------------------
+    # Cost estimation (P6)
+    # ------------------------------------------------------------------
+
+    def estimate_cost(self, fp32: bool = False) -> "CostReport":
+        """Estimate latency and memory for the current model.
+
+        Does not require a forward pass — inspects model graph structure
+        and quantization configs directly.
+
+        Args:
+            fp32: If True, estimate the fp32 baseline; otherwise the
+                quantized model.
+
+        Returns:
+            CostReport with per-layer and total estimates.
+
+        Raises:
+            RuntimeError: If fp32=True but keep_fp32=False was set.
+        """
+        from src.cost.model_cost import analyze_model_cost
+
+        if fp32:
+            if self.fp32_model is None:
+                raise RuntimeError(
+                    "fp32_model not available (keep_fp32=False). "
+                    "Cannot estimate fp32 cost."
+                )
+            model = self.fp32_model
+        else:
+            model = self.qmodel
+        return analyze_model_cost(model)
+
+    # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
 
