@@ -154,6 +154,77 @@ class TestComputeSmoothQuantScale:
         assert not torch.isinf(scale).any(), "Inf in scale"
 
 
+    def test_act_channel_axis_conv2d(self):
+        """act_channel_axis=1 reduces over all dims except dim=1 for Conv2d-style activation."""
+        compute_smoothquant_scale, _ = _try_import()
+        torch.manual_seed(42)
+        # Conv2d activation: (N=2, C=3, H=4, W=5) — channel at dim=1
+        X = torch.randn(2, 3, 4, 5)
+        W = torch.randn(8, 3, 3, 3)  # Conv weight (OC=8, IC=3, KH=3, KW=3)
+
+        scale = compute_smoothquant_scale(X, W, alpha=0.5,
+                                           act_channel_axis=1, w_channel_axis=1)
+
+        assert scale.shape == (3,), f"Expected (3,), got {scale.shape}"
+
+        # Verify act_channel_axis=1 gives same result as manually computing per-channel
+        act_amax_manual = torch.amax(torch.abs(X), dim=(0, 2, 3))  # reduce all except dim 1
+        w_amax_manual = torch.amax(torch.abs(W), dim=(0, 2, 3))    # reduce all except dim 1
+        expected = (act_amax_manual.clamp(min=1e-12).pow(0.5)
+                    / w_amax_manual.clamp(min=1e-12).pow(0.5))
+        assert torch.allclose(scale, expected, atol=1e-6)
+
+    def test_act_channel_axis_default(self):
+        """Default act_channel_axis=-1 preserves backward compatibility (per-channel max)."""
+        compute_smoothquant_scale, _ = _try_import()
+        torch.manual_seed(42)
+        X = torch.randn(4, 16)  # (N, C=16) Linear-style
+        W = torch.randn(8, 16)  # (OC=8, IC=16)
+        scale = compute_smoothquant_scale(X, W)
+        assert scale.shape == (16,)
+
+        # Verify: act_channel_axis=-1 means reduce all except last dim
+        act_amax_expected = torch.amax(torch.abs(X), dim=(0,))
+        w_amax_expected = torch.amax(torch.abs(W), dim=(0,))
+        expected = (act_amax_expected.clamp(min=1e-12).pow(0.5)
+                    / w_amax_expected.clamp(min=1e-12).pow(0.5))
+        assert torch.allclose(scale, expected, atol=1e-6)
+
+    def test_w_channel_axis_zero(self):
+        """w_channel_axis=0: reduce all except dim 0 (unusual weight layout)."""
+        compute_smoothquant_scale, _ = _try_import()
+        torch.manual_seed(42)
+        # Unusual weight: [IC=4, OC=8] (transposed)
+        W = torch.randn(4, 8)  # [IC, OC] — input channel at dim 0
+        act_stats = torch.randn(4).abs()
+        scale = compute_smoothquant_scale(act_stats, W, w_channel_axis=0)
+        assert scale.shape == (4,)
+
+    def test_w_channel_axis_negative(self):
+        """w_channel_axis=-1 correctly normalizes to last dim."""
+        compute_smoothquant_scale, _ = _try_import()
+        torch.manual_seed(42)
+        act_stats = torch.randn(8).abs()  # 1D stats for 8 channels
+        W = torch.randn(4, 8)  # (OC=4, IC=8) — input channel at dim 1
+        # w_channel_axis=-1 should normalize to dim 1 (last dim of 2D weight)
+        scale_neg = compute_smoothquant_scale(act_stats, W, w_channel_axis=-1)
+        scale_pos = compute_smoothquant_scale(act_stats, W, w_channel_axis=1)
+        assert torch.equal(scale_neg, scale_pos), \
+            f"w_channel_axis=-1 should normalize to dim 1 for 2D weight"
+
+    def test_from_calibration_passes_act_channel_axis(self):
+        """from_calibration passes act_channel_axis through to the transform."""
+        _, SmoothQuantTransform = _try_import()
+        torch.manual_seed(42)
+        X = torch.randn(2, 3, 4, 5)  # Conv2d-style: channel at dim=1
+        W = torch.randn(8, 3, 3, 3)
+        t = SmoothQuantTransform.from_calibration(
+            X, W, act_channel_axis=1
+        )
+        assert t.channel_axis == 1
+        assert t.scale.shape == (3,)
+
+
 # ============================================================================
 # 2. SmoothQuantTransform class tests
 # ============================================================================
@@ -323,6 +394,60 @@ class TestSmoothQuantTransform:
         assert t_sq != t_h
         assert hash(t_sq) != hash(t_h)
 
+    def test_channel_axis_conv2d_activation(self):
+        """channel_axis=1: scale broadcasts to dim=1 for Conv2d-style input (N, C, H, W)."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([2.0, 4.0, 1.0])  # 3 channels
+        t = SmoothQuantTransform(scale, channel_axis=1)
+        # Conv2d-style input: (N=2, C=3, H=2, W=2)
+        x = torch.full((2, 3, 2, 2), 1.0)  # all ones so division result is just 1/s
+        result = t.forward(x)
+        # Channel 0 divided by 2.0, channel 1 by 4.0, channel 2 by 1.0
+        assert torch.equal(result[:, 0:1], x[:, 0:1] / 2.0)
+        assert torch.equal(result[:, 1:2], x[:, 1:2] / 4.0)
+        assert torch.equal(result[:, 2:3], x[:, 2:3] / 1.0)
+
+    def test_channel_axis_default_is_minus_one(self):
+        """Default channel_axis=-1 preserves backward compatibility."""
+        _, SmoothQuantTransform = _try_import()
+        t1 = SmoothQuantTransform(torch.tensor([2.0, 4.0]))
+        t2 = SmoothQuantTransform(torch.tensor([2.0, 4.0]), channel_axis=-1)
+        assert t1 == t2
+
+    def test_channel_axis_roundtrip_conv2d(self):
+        """Roundtrip with channel_axis=1 recovers original (Conv2d layout)."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([0.5, 2.0, 1.0, 4.0])
+        t = SmoothQuantTransform(scale, channel_axis=1)
+        x = torch.randn(2, 4, 4, 4)  # (N=2, C=4, H=4, W=4)
+        xr = t.inverse(t.forward(x))
+        assert torch.equal(xr, x), f"Roundtrip failed with channel_axis=1"
+
+    def test_eq_different_channel_axis(self):
+        """Transforms with same scale but different channel_axis are not equal."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([0.5, 2.0, 1.0])
+        t1 = SmoothQuantTransform(scale, channel_axis=-1)
+        t2 = SmoothQuantTransform(scale, channel_axis=1)
+        assert t1 != t2
+
+    def test_hash_different_channel_axis(self):
+        """Transforms with same scale but different channel_axis have different hash."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([0.5, 2.0, 1.0])
+        t1 = SmoothQuantTransform(scale, channel_axis=-1)
+        t2 = SmoothQuantTransform(scale, channel_axis=1)
+        assert hash(t1) != hash(t2)
+
+    def test_channel_axis_out_of_bounds_raises(self):
+        """Out-of-bounds channel_axis raises ValueError with clear message."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([2.0, 4.0])
+        t = SmoothQuantTransform(scale, channel_axis=5)  # 5 > ndim=2
+        x = torch.randn(4, 2)
+        with pytest.raises(ValueError, match="out of bounds"):
+            t.forward(x)
+
 
 # ============================================================================
 # 3. QuantScheme integration tests
@@ -397,3 +522,57 @@ class TestSmoothQuantQuantScheme:
         t = SmoothQuantTransform(scale)
         assert hasattr(t, 'scale'), "SmoothQuantTransform should expose .scale"
         assert torch.equal(t.scale, scale), f"scale property mismatch"
+
+    def test_channel_axis_conv2d_activation(self):
+        """channel_axis=1: scale broadcasts to dim=1 for Conv2d-style input (N, C, H, W)."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([2.0, 4.0, 1.0])  # 3 channels
+        t = SmoothQuantTransform(scale, channel_axis=1)
+        # Conv2d-style input: (N=2, C=3, H=2, W=2)
+        x = torch.full((2, 3, 2, 2), 1.0)  # all ones so division result is just 1/s
+        result = t.forward(x)
+        # Channel 0 divided by 2.0, channel 1 by 4.0, channel 2 by 1.0
+        assert torch.equal(result[:, 0:1], x[:, 0:1] / 2.0)
+        assert torch.equal(result[:, 1:2], x[:, 1:2] / 4.0)
+        assert torch.equal(result[:, 2:3], x[:, 2:3] / 1.0)
+
+    def test_channel_axis_default_is_minus_one(self):
+        """Default channel_axis=-1 preserves backward compatibility."""
+        _, SmoothQuantTransform = _try_import()
+        t1 = SmoothQuantTransform(torch.tensor([2.0, 4.0]))
+        t2 = SmoothQuantTransform(torch.tensor([2.0, 4.0]), channel_axis=-1)
+        assert t1 == t2
+
+    def test_channel_axis_roundtrip_conv2d(self):
+        """Roundtrip with channel_axis=1 recovers original (Conv2d layout)."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([0.5, 2.0, 1.0, 4.0])
+        t = SmoothQuantTransform(scale, channel_axis=1)
+        x = torch.randn(2, 4, 4, 4)  # (N=2, C=4, H=4, W=4)
+        xr = t.inverse(t.forward(x))
+        assert torch.equal(xr, x), f"Roundtrip failed with channel_axis=1"
+
+    def test_eq_different_channel_axis(self):
+        """Transforms with same scale but different channel_axis are not equal."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([0.5, 2.0, 1.0])
+        t1 = SmoothQuantTransform(scale, channel_axis=-1)
+        t2 = SmoothQuantTransform(scale, channel_axis=1)
+        assert t1 != t2
+
+    def test_hash_different_channel_axis(self):
+        """Transforms with same scale but different channel_axis have different hash."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([0.5, 2.0, 1.0])
+        t1 = SmoothQuantTransform(scale, channel_axis=-1)
+        t2 = SmoothQuantTransform(scale, channel_axis=1)
+        assert hash(t1) != hash(t2)
+
+    def test_channel_axis_out_of_bounds_raises(self):
+        """Out-of-bounds channel_axis raises ValueError with clear message."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([2.0, 4.0])
+        t = SmoothQuantTransform(scale, channel_axis=5)  # 5 > ndim=2
+        x = torch.randn(4, 2)
+        with pytest.raises(ValueError, match="out of bounds"):
+            t.forward(x)

@@ -1,0 +1,101 @@
+import pytest
+
+from src.pipeline.config import resolve_config, _resolve_granularity
+from src.scheme.granularity import GranularityMode, GranularitySpec
+from src.scheme.op_config import OpQuantConfig
+from src.transform.hadamard import HadamardTransform
+
+
+class TestResolveGranularity:
+    def test_per_tensor(self):
+        spec = _resolve_granularity({"granularity": "per_tensor"})
+        assert spec.mode == GranularityMode.PER_TENSOR
+
+    def test_per_channel_with_axis(self):
+        spec = _resolve_granularity({"granularity": "per_channel", "axis": 0})
+        assert spec.mode == GranularityMode.PER_CHANNEL
+        assert spec.channel_axis == 0
+
+    def test_per_channel_default_axis(self):
+        spec = _resolve_granularity({"granularity": "per_channel"})
+        assert spec.mode == GranularityMode.PER_CHANNEL
+        assert spec.channel_axis == -1
+
+    def test_per_block_with_size_and_axis(self):
+        spec = _resolve_granularity({"granularity": "per_block", "block_size": 32, "axis": -1})
+        assert spec.mode == GranularityMode.PER_BLOCK
+        assert spec.block_size == 32
+        assert spec.block_axis == -1
+
+    def test_per_block_default_axis(self):
+        spec = _resolve_granularity({"granularity": "per_block", "block_size": 64})
+        assert spec.mode == GranularityMode.PER_BLOCK
+        assert spec.block_size == 64
+        assert spec.block_axis == -1
+
+    def test_unknown_granularity_raises(self):
+        with pytest.raises(ValueError, match="Unknown granularity"):
+            _resolve_granularity({"granularity": "per_group"})
+
+    def test_per_block_missing_size_raises(self):
+        with pytest.raises(ValueError, match="requires 'block_size'"):
+            _resolve_granularity({"granularity": "per_block"})
+
+
+class TestResolveConfig:
+    def test_basic_int8_per_tensor(self):
+        cfg = resolve_config({"format": "int8", "granularity": "per_tensor"})
+        assert isinstance(cfg, OpQuantConfig)
+        assert cfg.input is not None
+        assert cfg.weight is not None
+        assert cfg.output is not None
+
+    def test_weight_only(self):
+        cfg = resolve_config({"format": "nf4", "granularity": "per_channel", "axis": 0, "weight_only": True})
+        assert cfg.input is None
+        assert cfg.weight is not None
+        assert cfg.output is None
+
+    def test_with_hadamard_transform(self):
+        cfg = resolve_config({"format": "int4", "granularity": "per_tensor", "transform": "hadamard"})
+        assert isinstance(cfg.input.transform, HadamardTransform)
+
+    def test_unknown_format_raises(self):
+        with pytest.raises(ValueError, match="Unknown format"):
+            resolve_config({"format": "unknown_fmt", "granularity": "per_tensor"})
+
+    def test_unknown_transform_raises(self):
+        with pytest.raises(ValueError, match="Unknown transform"):
+            resolve_config({"format": "int8", "granularity": "per_tensor", "transform": "no_such_transform"})
+
+    def test_missing_format_raises(self):
+        with pytest.raises(ValueError, match="must contain 'format' key"):
+            resolve_config({"granularity": "per_tensor"})
+
+    def test_missing_granularity_raises(self):
+        with pytest.raises(ValueError, match="must contain 'granularity' key"):
+            resolve_config({"format": "int8"})
+
+    def test_format_must_be_string(self):
+        with pytest.raises(TypeError, match="'format' must be a string"):
+            resolve_config({"format": 42, "granularity": "per_tensor"})
+
+    def test_granularity_must_be_string(self):
+        with pytest.raises(TypeError, match="'granularity' must be a string"):
+            resolve_config({"format": "int8", "granularity": 42})
+
+    def test_axis_must_be_int(self):
+        with pytest.raises(TypeError, match="'axis' must be an int"):
+            resolve_config({"format": "int8", "granularity": "per_channel", "axis": "-1"})
+
+    def test_block_size_must_be_int(self):
+        with pytest.raises(TypeError, match="'block_size' must be an int"):
+            resolve_config({"format": "int8", "granularity": "per_block", "block_size": "32"})
+
+    def test_weight_only_must_be_bool(self):
+        with pytest.raises(TypeError, match="'weight_only' must be a bool"):
+            resolve_config({"format": "int8", "granularity": "per_tensor", "weight_only": "yes"})
+
+    def test_transform_type_error(self):
+        with pytest.raises(TypeError, match="'transform' must be a string"):
+            resolve_config({"format": "int8", "granularity": "per_tensor", "transform": 42})

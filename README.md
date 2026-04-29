@@ -456,6 +456,8 @@ PYTHONPATH=. python examples/06_transforms.py    # Hadamard + SmoothQuant 变换
 PYTHONPATH=. python examples/07_pre_scale.py     # PreScale + LSQ 逐层优化 + PoT 约束
 ```
 
+> **Format Study**：`experiment_format_study.py` 是一个系统化的量化格式精度研究实验，比较 8 种格式 × 3 种粒度 × 3 种 Transform。详见 [docs/format_study_usage.md](docs/format_study_usage.md)。
+
 所有示例独立可运行，输出可验证结果。
 
 ---
