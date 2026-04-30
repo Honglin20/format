@@ -208,7 +208,6 @@ def run_experiment(
         "fp32_accuracy": fp32_metrics,
         "delta": delta,
         "report": report,
-        "session": session,
         "qsnr_per_layer": extract_metric_per_layer(report, "qsnr_db"),
         "mse_per_layer": extract_metric_per_layer(report, "mse"),
         "cost": cost,
