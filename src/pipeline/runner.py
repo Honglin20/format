@@ -102,22 +102,14 @@ class ExperimentRunner:
                 # Phase 1: Calibrate
                 if calib_data is not None:
                     with session.calibrate():
-                        if isinstance(calib_data, (list, tuple)):
-                            for batch in calib_data:
-                                eval_fn(session, batch)
-                        else:
-                            eval_fn(session, calib_data)
+                        eval_fn(session, calib_data)
 
                 # Phase 2: Analyze
                 report = None
                 analyze_input = analyze_data if analyze_data is not None else calib_data
                 if analyze_input is not None:
                     with session.analyze(observers=observers) as ctx:
-                        if isinstance(analyze_input, (list, tuple)):
-                            for batch in analyze_input:
-                                eval_fn(session, batch)
-                        else:
-                            eval_fn(session, analyze_input)
+                        eval_fn(session, analyze_input)
                     report = ctx.report()
 
                 # Phase 3: Evaluate

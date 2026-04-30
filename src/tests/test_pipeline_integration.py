@@ -31,6 +31,9 @@ class TestPipelineIntegration:
         def _eval_fn(m, data):
             m.eval()
             with torch.no_grad():
+                if isinstance(data, (list, tuple)):
+                    results = [m(b).mean().item() for b in data]
+                    return {"mean": sum(results) / len(results)}
                 return {"mean": m(data).mean().item()}
 
         calib = [torch.randn(2, 4)]

@@ -8,8 +8,7 @@ class AnalysisContext:
 
     Usage:
         with AnalysisContext(model, [QSNRObserver()]) as ctx:
-            for batch in data:
-                model(batch)
+            eval_fn(model, data)
         report = ctx.report()
     """
 

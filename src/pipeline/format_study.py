@@ -136,12 +136,14 @@ def run_experiment(
         cfg: OpQuantConfig or dict[layer_name -> OpQuantConfig].
         fp32_model: Reference FP32 model (deep-copied; not mutated).
         calib_data: List of calibration batch tensors.
-        eval_loader: Evaluation DataLoader yielding (input, label).
+        eval_loader: Evaluation DataLoader or data passed to eval_fn.
         observers: Override observer list. Default: QSNR + MSE + Histogram + Distribution.
         lsq_steps: If > 0, run LSQ pre-scale optimisation for this many steps.
         lsq_pot: Constrain LSQ scales to power-of-two.
         lsq_lr: Learning rate for LSQ optimiser.
-        eval_fn: Accepted for API compatibility; session.compare() handles evaluation.
+        eval_fn: ``(model, data) -> dict[str, float]``. Controls all
+            model interaction (calibration, analysis, evaluation).
+            When None, falls back to ``session(data)`` direct inference.
 
     Returns:
         Dict with keys: accuracy, fp32_accuracy, delta, report, session,
@@ -158,33 +160,52 @@ def run_experiment(
         keep_fp32=True,
     )
 
+    # ---- Calibration ----
     with session.calibrate():
-        for batch in calib_data:
-            session(batch)
+        if eval_fn is not None:
+            eval_fn(session, calib_data)
+        else:
+            for batch in calib_data:
+                session(batch)
 
+    # ---- LSQ pre-scale optimisation ----
     if lsq_steps > 0:
         session.initialize_pre_scales(calib_data, init="ones", pot=lsq_pot)
         opt = LayerwiseScaleOptimizer(
             num_steps=lsq_steps, num_batches=len(calib_data),
             optimizer="adam", lr=lsq_lr, pot=lsq_pot,
         )
-        session.optimize_scales(opt, calib_data)
+        session.optimize_scales(opt, calib_data, eval_fn=eval_fn)
 
+    # ---- Analysis ----
     with session.analyze(observers=observers) as ctx:
-        for batch in calib_data:
-            session(batch)
+        if eval_fn is not None:
+            eval_fn(session, calib_data)
+        else:
+            for batch in calib_data:
+                session(batch)
     report = ctx.report()
 
-    result = session.compare(eval_loader)
+    # ---- Evaluation ----
+    if eval_fn is not None:
+        fp32_metrics = eval_fn(session.fp32_model, eval_loader)
+        quant_metrics = eval_fn(session, eval_loader)
+        delta = {k: quant_metrics.get(k, 0.0) - fp32_metrics.get(k, 0.0)
+                 for k in fp32_metrics}
+    else:
+        result = session.compare(eval_loader)
+        fp32_metrics = result["fp32"]
+        quant_metrics = result["quant"]
+        delta = result["delta"]
 
     # Cost estimation (P6)
     cost = session.estimate_cost()
     cost_fp32 = session.estimate_cost(fp32=True)
 
     return {
-        "accuracy": result["quant"],
-        "fp32_accuracy": result["fp32"],
-        "delta": result["delta"],
+        "accuracy": quant_metrics,
+        "fp32_accuracy": fp32_metrics,
+        "delta": delta,
         "report": report,
         "session": session,
         "qsnr_per_layer": extract_metric_per_layer(report, "qsnr_db"),

@@ -5,7 +5,7 @@ For each layer, runs the partially-quantized model to get true inputs,
 then optimizes pre-scale via gradient descent to minimize MSE against
 fp32 layer output.
 """
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -99,6 +99,8 @@ class LayerwiseScaleOptimizer:
         qmodel: nn.Module,
         fp32_model: nn.Module,
         calib_batches: List[torch.Tensor],
+        *,
+        eval_fn: Optional[Callable] = None,
     ) -> Dict[str, torch.Tensor]:
         """Run layer-wise LSQ optimization.
 
@@ -106,6 +108,8 @@ class LayerwiseScaleOptimizer:
             qmodel: Quantized model (from quantize_model).
             fp32_model: Original fp32 model.
             calib_batches: List of input tensors from calibration.
+            eval_fn: ``(model, data) -> Any``. Controls model interaction
+                during LSQ. When None, falls back to ``model(data)``.
 
         Returns:
             Dict mapping module name -> optimized pre_scale tensor.
@@ -116,7 +120,7 @@ class LayerwiseScaleOptimizer:
 
         # Collect fp32 targets for all layers in one pass
         fp32_targets = self._collect_fp32_targets(
-            qmodel, fp32_model, modules, batches
+            qmodel, fp32_model, modules, batches, eval_fn=eval_fn,
         )
 
         for layer_idx, (name, module) in enumerate(modules):
@@ -134,7 +138,7 @@ class LayerwiseScaleOptimizer:
             pre_scale = nn.Parameter(init_scale)
 
             # Get real inputs from partially-quantized model
-            real_inputs = self._get_layer_inputs(qmodel, module, batches)
+            real_inputs = self._get_layer_inputs(qmodel, module, batches, eval_fn=eval_fn)
 
             # Build optimizer
             if self.optimizer == "adam":
@@ -228,7 +232,9 @@ class LayerwiseScaleOptimizer:
             module.register_buffer(f"_internal_amax_{f_name}", amax)
 
     def _collect_fp32_targets(
-        self, qmodel, fp32_model, modules, batches
+        self, qmodel, fp32_model, modules, batches,
+        *,
+        eval_fn: Optional[Callable] = None,
     ) -> Dict[str, List[torch.Tensor]]:
         """Collect fp32 layer outputs for all quantized layers using hooks."""
         targets: Dict[str, List[torch.Tensor]] = {}
@@ -251,8 +257,11 @@ class LayerwiseScaleOptimizer:
 
         try:
             with torch.no_grad():
-                for batch in batches:
-                    fp32_model(batch)
+                if eval_fn is not None:
+                    eval_fn(fp32_model, batches)
+                else:
+                    for batch in batches:
+                        fp32_model(batch)
         finally:
             for h in hooks:
                 h.remove()
@@ -260,7 +269,9 @@ class LayerwiseScaleOptimizer:
         return targets
 
     def _get_layer_inputs(
-        self, qmodel, module, batches
+        self, qmodel, module, batches,
+        *,
+        eval_fn: Optional[Callable] = None,
     ) -> List[torch.Tensor]:
         """Get real inputs to a module by running qmodel with a forward hook."""
         inputs: List[torch.Tensor] = []
@@ -271,8 +282,11 @@ class LayerwiseScaleOptimizer:
         handle = module.register_forward_hook(hook)
         try:
             with torch.no_grad():
-                for batch in batches:
-                    qmodel(batch)
+                if eval_fn is not None:
+                    eval_fn(qmodel, batches)
+                else:
+                    for batch in batches:
+                        qmodel(batch)
         finally:
             handle.remove()
 

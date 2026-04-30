@@ -11,17 +11,16 @@ Usage::
 
     # Calibrate (scales auto-assigned on exit)
     with session.calibrate():
-        for batch in calib_data:
-            session(batch)
+        eval_fn(session, calib_data)
 
     # Analyze
     with session.analyze() as ctx:
-        for batch in data:
-            session(batch)
+        eval_fn(session, data)
     report = ctx.report()
 
-    # Compare against fp32 baseline
-    result = session.compare(eval_loader, my_eval_fn)
+    # Evaluate
+    fp32_metrics = eval_fn(session.fp32_model, eval_loader)
+    quant_metrics = eval_fn(session, eval_loader)
 
     # Export
     session.export_onnx("model.onnx")
@@ -65,15 +64,14 @@ class QuantSession:
         session = QuantSession(model, cfg)
 
         with session.calibrate():
-            for batch in calib_data:
-                session(batch)
+            eval_fn(session, calib_data)
 
         with session.analyze() as ctx:
-            for batch in data:
-                session(batch)
+            eval_fn(session, data)
         report = ctx.report()
 
-        result = session.compare(eval_loader, my_eval_fn)
+        fp32_metrics = eval_fn(session.fp32_model, eval_loader)
+        quant_metrics = eval_fn(session, eval_loader)
         session.export_onnx("model.onnx")
     """
 
@@ -154,8 +152,7 @@ class QuantSession:
         passes inside the ``with`` block::
 
             with session.calibrate():
-                for batch in calib_data:
-                    session(batch)
+                eval_fn(session, calib_data)
         """
         strat = strategy if strategy is not None else self.calibrator
         return CalibrationSession(self.qmodel, strat)
@@ -170,8 +167,7 @@ class QuantSession:
         Observers are attached on enter and detached on exit::
 
             with session.analyze() as ctx:
-                for batch in data:
-                    session(batch)
+                eval_fn(session, data)
             report = ctx.report()
         """
         obs = observers if observers is not None else self.observers
@@ -344,12 +340,16 @@ class QuantSession:
         self,
         optimizer: "LayerwiseScaleOptimizer",
         calib_data: List[torch.Tensor],
+        *,
+        eval_fn: Optional[Callable] = None,
     ) -> Dict[str, torch.Tensor]:
         """Run layer-wise LSQ optimization on pre-scale parameters.
 
         Args:
             optimizer: Configured ``LayerwiseScaleOptimizer`` instance.
             calib_data: List of input tensors from calibration data.
+            eval_fn: ``(model, data) -> Any``. Controls model interaction
+                during LSQ. When None, falls back to ``model(data)``.
 
         Returns:
             Dict mapping module name → optimized pre_scale tensor.
@@ -363,7 +363,7 @@ class QuantSession:
                 "optimize_scales requires fp32_model (keep_fp32=True)"
             )
 
-        return optimizer.optimize(self.qmodel, self.fp32_model, calib_data)
+        return optimizer.optimize(self.qmodel, self.fp32_model, calib_data, eval_fn=eval_fn)
 
     @staticmethod
     def _infer_out_channels(module) -> int:

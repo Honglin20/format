@@ -11,8 +11,7 @@ Usage::
 
     # New (recommended) — context manager
     with CalibrationSession(model, MaxScaleStrategy()) as calib:
-        for batch in calib_data:
-            model(batch)
+        eval_fn(model, calib_data)
     # Scales auto-assigned on exit
 
     # Persist scales to disk

@@ -36,8 +36,7 @@ class CalibrationSession:
     Example::
 
         with CalibrationSession(model, MaxScaleStrategy()) as calib:
-            for batch in calib_data:
-                model(batch)
+            eval_fn(model, calib_data)
         # Scales are auto-assigned on exit — model is now calibrated.
     """
 

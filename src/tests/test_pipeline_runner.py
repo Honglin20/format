@@ -37,6 +37,9 @@ class TestExperimentRunner:
         def _eval_fn(m, data):
             m.eval()
             with torch.no_grad():
+                if isinstance(data, (list, tuple)):
+                    results = [m(b).mean().item() for b in data]
+                    return {"mean_output": sum(results) / len(results)}
                 out = m(data)
             return {"mean_output": out.mean().item()}
 
@@ -80,6 +83,9 @@ class TestExperimentRunner:
         def _eval_fn(m, data):
             m.eval()
             with torch.no_grad():
+                if isinstance(data, (list, tuple)):
+                    results = [m(b).mean().item() for b in data]
+                    return {"mean_output": sum(results) / len(results)}
                 out = m(data)
             return {"mean_output": out.mean().item()}
 
