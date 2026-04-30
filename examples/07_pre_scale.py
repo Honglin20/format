@@ -13,7 +13,7 @@ import copy
 
 import torch
 
-from _model import ToyMLP
+from pipeline._model import ToyMLP
 from src.formats.base import FormatBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec

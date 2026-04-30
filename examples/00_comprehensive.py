@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from _model import ToyMLP
+from pipeline._model import ToyMLP
 from src.formats.base import FormatBase
 from src.formats.registry import register_format
 from src.formats.lookup_formats import LookupFormat

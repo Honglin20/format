@@ -39,7 +39,7 @@ def eval_fn(model: nn.Module, dataloader: DataLoader) -> dict[str, float]:
     ...
 ```
 
-参见 `examples/experiment_format_study.py` 查看完整的默认实现。
+参见 `pipeline/experiment_format_study.py` 查看完整的默认实现。
 
 ## 修改搜索空间
 

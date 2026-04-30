@@ -25,12 +25,12 @@ from src.pipeline.format_study import run_format_study, plot_from_results
 # ---------------------------------------------------------------------------
 
 def build_model() -> nn.Module:
-    from examples._model import ToyMLP
+    from pipeline._model import ToyMLP
     return ToyMLP()
 
 
 def build_conv_model() -> nn.Module:
-    from examples._model import ToyConvNet
+    from pipeline._model import ToyConvNet
     return ToyConvNet()
 
 
