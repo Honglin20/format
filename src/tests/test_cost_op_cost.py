@@ -187,8 +187,8 @@ class TestOpCostNormDispatch:
         cost = op_cost(m, {}, device)
         assert cost.op_type == "group_norm"
 
-    def test_rms_norm_has_fewer_quant_steps(self, device):
-        """RMSNorm should have fewer quantize steps than LayerNorm."""
+    def test_rms_norm_has_7_steps_layer_norm_has_9(self, device):
+        """RMSNorm: 7 quantize steps; LayerNorm: 9 steps — exact ratio 7:9."""
         from src.ops.norm import QuantizedRMSNorm, QuantizedLayerNorm
         from src.scheme.quant_scheme import QuantScheme
         from src.scheme.granularity import GranularitySpec
@@ -196,15 +196,22 @@ class TestOpCostNormDispatch:
 
         fmt = FormatBase.from_str("int8")
         scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
-        rms = QuantizedRMSNorm(128, cfg=OpQuantConfig(input=scheme, output=scheme))
-        ln = QuantizedLayerNorm(128, cfg=OpQuantConfig(input=scheme, output=scheme))
+        # Set ALL roles so every step is active
+        cfg = OpQuantConfig(storage=scheme, input=scheme, weight=scheme, output=scheme)
+        rms = QuantizedRMSNorm(128, cfg=cfg)
+        ln = QuantizedLayerNorm(128, cfg=cfg)
 
-        cost_rms = op_cost(rms, {}, device)
-        cost_ln = op_cost(ln, {}, device)
-        assert cost_rms.flops_quantize < cost_ln.flops_quantize
+        cost_rms = op_cost(rms, {"n": 128}, device)
+        cost_ln = op_cost(ln, {"n": 128}, device)
+        # RMSNorm: 7 steps, LayerNorm: 9 steps
+        assert cost_rms.flops_quantize > 0
+        assert cost_ln.flops_quantize > cost_rms.flops_quantize
+        # Per-step: 128*5 + 128 = 768. 7 steps: 5376, 9 steps: 6912
+        assert cost_rms.flops_quantize == 7 * (128 * 5 + 128)
+        assert cost_ln.flops_quantize == 9 * (128 * 5 + 128)
 
     def test_layer_norm_step_count_is_9(self, device):
-        """LayerNorm has 9 quantize steps (not 10) — no compute(bias)."""
+        """LayerNorm has exactly 9 quantize steps with all roles set."""
         from src.ops.norm import QuantizedLayerNorm
         from src.scheme.quant_scheme import QuantScheme
         from src.scheme.granularity import GranularitySpec
@@ -212,9 +219,75 @@ class TestOpCostNormDispatch:
 
         fmt = FormatBase.from_str("int8")
         scheme = QuantScheme(format=fmt, granularity=GranularitySpec.per_tensor())
-        cfg = OpQuantConfig(input=scheme)
+        cfg = OpQuantConfig(storage=scheme, input=scheme, weight=scheme, output=scheme)
         ln = QuantizedLayerNorm(128, cfg=cfg)
-        cost = op_cost(ln, {}, device)
-        # With storage=None, quantize FLOPs come only from input scheme steps
-        # LayerNorm: compute(in) is 1 step with input scheme
-        assert cost.flops_quantize > 0
+        cost = op_cost(ln, {"n": 128}, device)
+
+        # 9 steps × per_step (128*5 + 128 = 768) = 6912
+        expected_per_step = 128 * 5 + 128  # num_elem * per_elem_ops + granularity
+        expected_total = 9 * expected_per_step
+        assert cost.flops_quantize == expected_total
+
+
+class TestOpCostConvDispatch:
+    """Conv1d and ConvTranspose2d are dispatched correctly."""
+
+    @pytest.fixture
+    def device(self):
+        return DeviceSpec.a100()
+
+    def test_conv1d_dispatch(self, device):
+        m = nn.Conv1d(16, 32, kernel_size=3)
+        cost = op_cost(m, {"batch": 4, "length": 64}, device)
+        assert cost.op_type == "conv1d"
+        assert cost.flops_math > 0
+
+    def test_conv_transpose2d_dispatch(self, device):
+        m = nn.ConvTranspose2d(16, 32, kernel_size=3)
+        cost = op_cost(m, {"batch": 2}, device)
+        assert "convtranspose" in cost.op_type
+        assert cost.flops_math > 0
+
+    def test_quantized_conv2d_dispatch(self, device):
+        from src.ops.conv import QuantizedConv2d
+        m = QuantizedConv2d(16, 32, kernel_size=3)
+        cost = op_cost(m, {"batch": 2}, device)
+        assert "conv2d" in cost.op_type
+        assert cost.flops_math > 0
+
+
+class TestOpCostEdgeCases:
+    """Edge cases: unrecognized modules, safe defaults."""
+
+    @pytest.fixture
+    def device(self):
+        return DeviceSpec.a100()
+
+    def test_unrecognized_module_returns_unknown(self, device):
+        """Modules without a dispatch entry return op_type='unknown'."""
+        m = nn.Dropout(0.5)
+        cost = op_cost(m, {}, device)
+        assert cost.op_type == "unknown"
+
+    def test_unknown_op_cost_is_zero(self, device):
+        """Unknown op type contributes zero latency and memory."""
+        m = nn.Dropout(0.5)
+        cost = op_cost(m, {}, device)
+        assert cost.latency_us == 0.0
+        assert cost.flops_math == 0
+        assert cost.memory_weight_bytes == 0
+
+    def test_group_norm_uses_num_channels(self, device):
+        """GroupNorm n = num_channels, not default 128."""
+        m = nn.GroupNorm(num_groups=4, num_channels=32)
+        cost = op_cost(m, {"batch": 1, "height": 8, "width": 8}, device)
+        # FLOPs = 4 * batch * num_channels * spatial = 4 * 1 * 32 * 64 = 8192
+        assert cost.flops_math == 4 * 1 * 32 * 64
+
+    def test_batch_norm_with_spatial_dims(self, device):
+        """BatchNorm2d FLOPs include H*W when provided in shapes."""
+        m = nn.BatchNorm2d(32)
+        cost_no_spatial = op_cost(m, {"batch": 1}, device)
+        cost_with_spatial = op_cost(m, {"batch": 1, "height": 8, "width": 8}, device)
+        # With spatial = 8*8=64, FLOPs should be 64x larger
+        assert cost_with_spatial.flops_math == cost_no_spatial.flops_math * 64

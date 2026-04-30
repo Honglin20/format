@@ -32,16 +32,10 @@ def test_report_to_dataframe():
     layers = [make_linear_cost("fc1"), make_linear_cost("fc2")]
     report = CostReport(layers=layers, model_name="test")
     df = report.to_dataframe()
-    # Returns pandas DataFrame if available, else list of dicts
-    try:
-        import pandas as pd
-        assert isinstance(df, pd.DataFrame)
-        assert len(df) == 2
-        assert df["op_name"].iloc[0] == "fc1"
-    except ImportError:
-        assert isinstance(df, list)
-        assert len(df) == 2
-        assert df[0]["op_name"] == "fc1"
+    # Always returns list of dicts
+    assert isinstance(df, list)
+    assert len(df) == 2
+    assert df[0]["op_name"] == "fc1"
 
 
 def test_report_print_summary_runs():

@@ -1,9 +1,13 @@
-"""CostReport: aggregate and format per-layer cost data."""
+"""CostReport: aggregate and format per-layer cost data.
+
+All memory values use decimal MB (10^6 bytes) for consistent "coarse model"
+scale. For binary MiB (2^20 bytes), divide by 1024*1024 explicitly.
+"""
 from __future__ import annotations
 
 
 class CostReport:
-    def __init__(self, layers: list, model_name: str = ""):
+    def __init__(self, layers: "list[OpCost]", model_name: str = ""):
         self.layers = list(layers)
         self.model_name = model_name
 
@@ -22,13 +26,18 @@ class CostReport:
             "model": self.model_name or "model",
             "num_layers": len(self.layers),
             "total_latency_us": self.total_latency_us,
-            "total_memory_mb": self.total_memory_bytes / (1024 * 1024),
+            "total_memory_mb": self.total_memory_bytes / 1e6,
             "total_flops_math": sum(l.flops_math for l in self.layers),
             "total_flops_quantize": sum(l.flops_quantize for l in self.layers),
             "total_flops_transform": sum(l.flops_transform for l in self.layers),
         }
 
     def to_dataframe(self):
+        """Return per-layer cost as a list of dicts.
+
+        Consumers that need a ``pandas.DataFrame`` can wrap with
+        ``pd.DataFrame(report.to_dataframe())``.
+        """
         rows = []
         for l in self.layers:
             rows.append({
@@ -40,11 +49,7 @@ class CostReport:
                 "mem_weight_kb": round(l.memory_weight_bytes / 1024, 2),
                 "mem_act_kb": round(l.memory_activation_bytes / 1024, 2),
             })
-        try:
-            import pandas as pd
-            return pd.DataFrame(rows)
-        except ImportError:
-            return rows
+        return rows
 
     def print_summary(self):
         s = self.summary()

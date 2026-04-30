@@ -3,8 +3,10 @@
 Formulas: docs/refs/p6-cost-model-formulas.md §2-§4.
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
+
+from src.scheme.quant_scheme import QuantScheme
 
 import torch.nn as nn
 
@@ -49,7 +51,7 @@ def _elem_bits(fmt) -> int:
     return fmt.ebits + fmt.mbits - 1
 
 
-def _effective_bits(scheme: Optional[object]) -> float:
+def _effective_bits(scheme: Optional[QuantScheme]) -> float:
     """Effective bits per element including per-block scale overhead (§4.1)."""
     if scheme is None:
         return 32.0
@@ -99,7 +101,7 @@ def _transform_ops_per_elem(scheme) -> float:
     return float(TRANSFORM_OPS_PER_ELEM_DEFAULT)
 
 
-def _quant_step_cost(num_elem: int, scheme: Optional[object]) -> tuple:
+def _quant_step_cost(num_elem: int, scheme: Optional[QuantScheme]) -> tuple:
     """Compute (quant_flops, transform_flops, bytes_read, bytes_write) for one step (§3.2, §4.2)."""
     if scheme is None:
         return (0, 0, 0, 0)
@@ -152,7 +154,7 @@ def _matmul_like_cost(m: nn.Module, shapes: dict, device: DeviceSpec, op_type: s
 
     # Quantize overhead
     cfg = getattr(m, "cfg", None)
-    flops_q, flops_t, q_r, q_w = _linear_quant_overhead(
+    flops_q, flops_t, q_r, q_w = _matmul_quant_overhead(
         cfg, input_elem, weight_elem, bias_elem, output_elem)
     bytes_r += q_r
     bytes_w += q_w
@@ -178,7 +180,7 @@ def _matmul_like_cost(m: nn.Module, shapes: dict, device: DeviceSpec, op_type: s
     )
 
 
-def _linear_quant_overhead(cfg, input_elem, weight_elem, bias_elem, output_elem):
+def _matmul_quant_overhead(cfg, input_elem, weight_elem, bias_elem, output_elem):
     """Quantize overhead for Linear forward (9 steps per §3.2)."""
     if cfg is None:
         return (0, 0, 0, 0)
@@ -208,40 +210,64 @@ def _linear_quant_overhead(cfg, input_elem, weight_elem, bias_elem, output_elem)
     return (total_q, total_t, total_r, total_w)
 
 
-def _conv2d_cost(m: nn.Module, shapes: dict, device: DeviceSpec) -> OpCost:
-    """Cost for Conv2d (§3.1)."""
+def _conv_cost(m: nn.Module, shapes: dict, device: DeviceSpec) -> OpCost:
+    """Cost for Conv1d / Conv2d / ConvTranspose2d (§3.1).
+
+    Handles Conv1d (spatial=L), Conv2d (spatial=H×W), ConvTranspose2d.
+    """
     batch = shapes.get("batch", 1)
-    h_in = shapes.get("height", 32)
-    w_in = shapes.get("width", 32)
-
-    kH = m.kernel_size[0] if isinstance(m.kernel_size, tuple) else m.kernel_size
-    kW = m.kernel_size[1] if isinstance(m.kernel_size, tuple) else m.kernel_size
-    stride_h = m.stride[0] if isinstance(m.stride, tuple) else m.stride
-    stride_w = m.stride[1] if isinstance(m.stride, tuple) else m.stride
-    pad_h = m.padding[0] if isinstance(m.padding, tuple) else m.padding
-    pad_w = m.padding[1] if isinstance(m.padding, tuple) else m.padding
-
-    h_out = (h_in + 2 * pad_h - kH) // stride_h + 1
-    w_out = (w_in + 2 * pad_w - kW) // stride_w + 1
-
     c_in = m.in_channels
     c_out = m.out_channels
 
-    # Math FLOPs: 2 × B × C_out × H_out × W_out × C_in × kH × kW
-    flops_math = 2 * batch * c_out * h_out * w_out * c_in * kH * kW
+    # Detect dimensionality
+    is_1d = isinstance(m, nn.Conv1d) or type(m).__name__.endswith("Conv1d")
+    is_transpose = "Transpose" in type(m).__name__
 
-    # Memory
-    weight_elem = c_out * c_in * kH * kW
+    def _int_list(val):
+        if isinstance(val, int):
+            return [val]
+        return list(val)
+
+    kernel = _int_list(m.kernel_size)
+    stride = _int_list(m.stride)
+    padding = _int_list(m.padding)
+
+    if is_1d:
+        l_in = shapes.get("length", 128)
+        kL = kernel[0]
+        sL = stride[0]
+        pL = padding[0]
+        l_out = (l_in + 2 * pL - kL) // sL + 1
+        spatial_in = l_in
+        spatial_out = l_out
+        weight_kernel = kL
+    else:
+        h_in = shapes.get("height", 32)
+        w_in = shapes.get("width", 32)
+        kH, kW = kernel[0], kernel[1] if len(kernel) > 1 else kernel[0]
+        sH, sW = stride[0], stride[1] if len(stride) > 1 else stride[0]
+        pH, pW = padding[0], padding[1] if len(padding) > 1 else padding[0]
+        h_out = (h_in + 2 * pH - kH) // sH + 1
+        w_out = (w_in + 2 * pW - kW) // sW + 1
+        spatial_in = h_in * w_in
+        spatial_out = h_out * w_out
+        weight_kernel = kH * kW
+
+    # Math FLOPs: 2 × B × C_out × spatial_out × C_in × kernel_product
+    flops_math = 2 * batch * c_out * spatial_out * c_in * weight_kernel
+
+    # Memory (§4.3)
+    weight_elem = c_out * c_in * weight_kernel
     has_bias = getattr(m, "bias", None) is not None
     bias_elem = c_out if has_bias else 0
-    input_elem = batch * c_in * h_in * w_in
-    output_elem = batch * c_out * h_out * w_out
+    input_elem = batch * c_in * spatial_in
+    output_elem = batch * c_out * spatial_out
 
     bytes_r = (input_elem + weight_elem + bias_elem) * 4
     bytes_w = output_elem * 4
 
     cfg = getattr(m, "cfg", None)
-    flops_q, flops_t, q_r, q_w = _linear_quant_overhead(
+    flops_q, flops_t, q_r, q_w = _matmul_quant_overhead(
         cfg, input_elem, weight_elem, bias_elem, output_elem)
     bytes_r += q_r
     bytes_w += q_w
@@ -257,7 +283,7 @@ def _conv2d_cost(m: nn.Module, shapes: dict, device: DeviceSpec) -> OpCost:
     latency = _compute_latency(flops_math, flops_q, flops_t, bytes_r, bytes_w, device)
 
     return OpCost(
-        op_name="", op_type="conv2d",
+        op_name="", op_type=type(m).__name__.lower(),
         flops_math=flops_math, flops_quantize=flops_q,
         flops_transform=flops_t,
         bytes_read=bytes_r, bytes_write=bytes_w,
@@ -270,8 +296,11 @@ def _norm_cost(m: nn.Module, shapes: dict, device: DeviceSpec, op_type: str) -> 
     """Cost for BatchNorm / LayerNorm / RMSNorm / GroupNorm (§3.1)."""
     batch = shapes.get("batch", 1)
 
+    # per-element feature count (channels / features)
     if hasattr(m, "num_features"):
         n = m.num_features  # BatchNorm
+    elif hasattr(m, "num_channels"):
+        n = m.num_channels  # GroupNorm
     elif hasattr(m, "normalized_shape"):
         n = m.normalized_shape[-1] if m.normalized_shape else shapes.get("n", 128)
     elif hasattr(m, "d_model"):
@@ -279,14 +308,20 @@ def _norm_cost(m: nn.Module, shapes: dict, device: DeviceSpec, op_type: str) -> 
     else:
         n = shapes.get("n", 128)
 
+    # Spatial multiplier: >1 for BatchNorm2d/GroupNorm operating on (B,C,H,W)
+    spatial = 1
+    if op_type in ("batch_norm", "group_norm"):
+        if "height" in shapes and "width" in shapes:
+            spatial = shapes["height"] * shapes["width"]
+
     ops_table = {
         "batch_norm": 4, "layer_norm": 4, "group_norm": 4, "rms_norm": 2,
     }
     flops_per_elem = ops_table.get(op_type, 4)
-    flops_math = flops_per_elem * batch * n
+    flops_math = flops_per_elem * batch * n * spatial
 
-    input_elem = batch * n
-    output_elem = batch * n
+    input_elem = batch * n * spatial
+    output_elem = batch * n * spatial
     weight_elem = n
     bias_elem = n
 
@@ -422,15 +457,19 @@ def _pool_cost(m: nn.Module, shapes: dict, device: DeviceSpec) -> OpCost:
 def _dispatch_op_cost(m: nn.Module, shapes: dict, device: DeviceSpec) -> Optional[OpCost]:
     """Dispatch to the correct cost function for a given module."""
     from src.ops.linear import QuantizedLinear
-    from src.ops.conv import QuantizedConv2d
+    from src.ops.conv import QuantizedConv2d, QuantizedConv1d, QuantizedConvTranspose2d
 
     # Linear / QuantizedLinear
     if isinstance(m, (nn.Linear, QuantizedLinear)):
         return _matmul_like_cost(m, shapes, device, "linear")
 
-    # Conv2d / QuantizedConv2d
-    if isinstance(m, (nn.Conv2d, QuantizedConv2d)):
-        return _conv2d_cost(m, shapes, device)
+    # Conv (all variants: 1d/2d/transpose, quantized or FP32)
+    conv_types = (
+        nn.Conv1d, nn.Conv2d, nn.ConvTranspose1d, nn.ConvTranspose2d,
+        QuantizedConv1d, QuantizedConv2d, QuantizedConvTranspose2d,
+    )
+    if isinstance(m, conv_types):
+        return _conv_cost(m, shapes, device)
 
     # Norm
     try:
