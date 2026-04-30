@@ -3,16 +3,21 @@ import torch
 import torch.nn as nn
 from src.pipeline.config import resolve_config
 from src.pipeline.runner import ExperimentRunner
-from src.pipeline.studies.format_study import FORMAT_STUDY
 
 
 class TestPipelineIntegration:
-    def test_format_study_search_space_resolves_all_configs(self):
-        """Every descriptor in FORMAT_STUDY resolves to OpQuantConfig."""
-        for part_name, part_def in FORMAT_STUDY.items():
-            for cfg_name, cfg_desc in part_def["configs"].items():
-                cfg = resolve_config(cfg_desc)
-                assert cfg.weight is not None, f"{part_name}/{cfg_name}: weight scheme missing"
+    def test_resolve_descriptors(self):
+        """Key descriptor types resolve to OpQuantConfig."""
+        descriptors = {
+            "per_tensor": {"format": "int8", "granularity": "per_tensor"},
+            "per_channel": {"format": "int8", "granularity": "per_channel", "axis": -1},
+            "per_block": {"format": "int8", "granularity": "per_block", "block_size": 32},
+            "fp8": {"format": "fp8_e4m3", "granularity": "per_block", "block_size": 32},
+            "nf4_weight_only": {"format": "nf4", "granularity": "per_channel", "axis": -1, "weight_only": True},
+        }
+        for name, desc in descriptors.items():
+            cfg = resolve_config(desc)
+            assert cfg.weight is not None, f"{name}: weight scheme missing"
 
     def test_runner_minimal_end_to_end(self):
         """Runner completes quantize->calibrate->analyze->evaluate for a tiny model."""

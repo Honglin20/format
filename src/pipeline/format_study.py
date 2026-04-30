@@ -12,7 +12,7 @@ Programmatic entry point::
         eval_fn=my_eval_fn,
     )
 
-To customise the search space, edit ``src/pipeline/studies/format_study.py``.
+To customise the search space, edit the config builders in this file.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import copy
 import json
 import math
 import os
+import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
@@ -56,10 +57,6 @@ from src.viz.figures import (
 )
 from src.viz.tables import accuracy_table
 from src.pipeline.runner import extract_metric_per_layer
-
-
-_PER_B32 = GranularitySpec.per_block(size=32, axis=-1)
-_PER_C0 = GranularitySpec.per_channel(axis=0)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +158,7 @@ def run_experiment(
     )
 
     # ---- Calibration ----
+    print(" calibrating", end="", flush=True)
     with session.calibrate():
         if eval_fn is not None:
             eval_fn(session, calib_data)
@@ -170,6 +168,7 @@ def run_experiment(
 
     # ---- LSQ pre-scale optimisation ----
     if lsq_steps > 0:
+        print(" lsq", end="", flush=True)
         session.initialize_pre_scales(calib_data, init="ones", pot=lsq_pot)
         opt = LayerwiseScaleOptimizer(
             num_steps=lsq_steps, num_batches=len(calib_data),
@@ -178,6 +177,7 @@ def run_experiment(
         session.optimize_scales(opt, calib_data, eval_fn=eval_fn)
 
     # ---- Analysis ----
+    print(" analyzing", end="", flush=True)
     with session.analyze(observers=observers) as ctx:
         if eval_fn is not None:
             eval_fn(session, calib_data)
@@ -187,6 +187,7 @@ def run_experiment(
     report = ctx.report()
 
     # ---- Evaluation ----
+    print(" evaluating", end="", flush=True)
     if eval_fn is not None:
         fp32_metrics = eval_fn(session.fp32_model, eval_loader)
         quant_metrics = eval_fn(session, eval_loader)
@@ -216,177 +217,133 @@ def run_experiment(
 
 
 # ---------------------------------------------------------------------------
-# Part runners
+# Config-driven part runners
 # ---------------------------------------------------------------------------
+from src.pipeline.config import resolve_config as _resolve_config
 
-def run_part_a_8bit(fp32_model, calib_data, eval_loader, *, eval_fn=None) -> dict:
-    """Part A: MXINT-8 / MXFP-8 / INT8-PC comparison."""
-    print("\n### Part A: 8-bit Format Comparison ###")
-    configs = {
-        "MXINT-8": make_op_cfg("int8",      _PER_B32),
-        "MXFP-8":  make_op_cfg("fp8_e4m3",  _PER_B32),
-        "INT8-PC": make_op_cfg("int8",       _PER_C0),
-    }
+
+def _now() -> str:
+    """Timestamp for progress logging."""
+    from datetime import datetime
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _fmt_desc(v: dict) -> str:
+    """Human-readable description of a variant dict."""
+    parts = [v["format"], v["granularity"]]
+    if v.get("block_size"):
+        parts.append(f"bs={v['block_size']}")
+    if v.get("axis") is not None and v.get("granularity") == "per_channel":
+        parts.append(f"axis={v['axis']}")
+    if v.get("weight_only"):
+        parts.append("weight_only")
+    if v.get("transform"):
+        parts.append(f"tx={v['transform']}")
+    return ", ".join(parts)
+
+
+def _run_simple_part(part_cfg: dict, fp32_model, calib_data, eval_loader, eval_fn) -> dict:
+    """Run a 'simple' part: one experiment per variant."""
+    variants = part_cfg["variants"]
+    desc = part_cfg.get("description", "")
     results = {}
-    for name, cfg in configs.items():
-        print(f"  Running {name}...")
+    total = len(variants)
+
+    print(f"\n{'='*60}")
+    print(f"  {desc}  [{total} variant(s)]")
+    print(f"{'='*60}")
+
+    t0 = time.time()
+    for i, v in enumerate(variants, 1):
+        name = v["name"]
+        cfg = _resolve_config(v)
+        print(f"  [{i}/{total}] {name} ({_fmt_desc(v)}) ...", end="", flush=True)
+        vt0 = time.time()
         results[name] = run_experiment(cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn)
-    results["FP32 (baseline)"] = {"accuracy": results[list(configs)[0]]["fp32_accuracy"]}
-    return results
-
-
-def run_part_b_4bit(fp32_model, calib_data, eval_loader, *, eval_fn=None) -> dict:
-    """Part B: MXINT-4 / MXFP-4 / INT4-PC / NF4-PC comparison."""
-    print("\n### Part B: 4-bit Format Comparison ###")
-    configs = {
-        "MXINT-4": make_op_cfg("int4",          _PER_B32),
-        "MXFP-4":  make_op_cfg("fp4_e2m1",      _PER_B32),
-        "INT4-PC": make_op_cfg("int4",           _PER_C0),
-        "NF4-PC":  make_op_cfg_weight_only("nf4", _PER_C0),
-    }
-    results = {}
-    for name, cfg in configs.items():
-        print(f"  Running {name}...")
-        results[name] = run_experiment(cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn)
-    results["FP32 (baseline)"] = {"accuracy": results[list(configs)[0]]["fp32_accuracy"]}
-    return results
-
-
-def run_part_c_pot_scaling(fp32_model, calib_data, eval_loader, *, eval_fn=None) -> dict:
-    """Part C: INT per-channel FP32 vs PoT scaling, LSQ-optimised."""
-    print("\n### Part C: FP32 vs PoT Scaling ###")
-    configs = {
-        "INT8-PC-FP32": ("int8", False),
-        "INT8-PC-PoT":  ("int8", True),
-        "INT4-PC-FP32": ("int4", False),
-        "INT4-PC-PoT":  ("int4", True),
-    }
-    results = {}
-    for name, (fmt, pot) in configs.items():
-        print(f"  Running {name} (LSQ, pot={pot})...")
-        results[name] = run_experiment(
-            make_op_cfg(fmt, _PER_C0), fp32_model, calib_data, eval_loader,
-            lsq_steps=100, lsq_pot=pot, eval_fn=eval_fn,
-        )
-    results["FP32 (baseline)"] = {"accuracy": results[list(configs)[0]]["fp32_accuracy"]}
-    return results
-
-
-def _make_smoothquant_transforms(
-    fp32_model: nn.Module,
-    calib_data: List[torch.Tensor],
-) -> Dict[str, TransformBase]:
-    """One calibration pass → per-layer SmoothQuantTransform. Pure; does not mutate model."""
-    if fp32_model is None:
-        return {}
-
-    activations: Dict[str, torch.Tensor] = {}
-    weights: Dict[str, torch.Tensor] = {}
-    channel_axes: Dict[str, int] = {}
-    hooks = []
-
-    def _hook(name):
-        def fn(module, _input, _output):
-            activations[name] = _input[0].detach()
-            if hasattr(module, "weight") and module.weight is not None:
-                weights[name] = module.weight.data.clone()
-        return fn
-
-    for name, module in fp32_model.named_modules():
-        if isinstance(module, nn.Linear):
-            channel_axes[name] = -1
-            hooks.append(module.register_forward_hook(_hook(name)))
-        elif isinstance(module, nn.Conv2d):
-            channel_axes[name] = 1
-            hooks.append(module.register_forward_hook(_hook(name)))
-
-    with torch.no_grad():
-        fp32_model.eval()
-        fp32_model(calib_data[0])
-    for h in hooks:
-        h.remove()
-
-    per_layer: Dict[str, TransformBase] = {}
-    for name in activations:
-        if name not in weights:
-            continue
-        try:
-            per_layer[name] = SmoothQuantTransform.from_calibration(
-                X_act=activations[name], W=weights[name], alpha=0.5,
-                act_channel_axis=channel_axes.get(name, -1),
-            )
-        except (ValueError, RuntimeError) as e:
-            print(f"  Warning: SmoothQuant for {name}: {e}")
-            per_layer[name] = IdentityTransform()
-    return per_layer
-
-
-def _fuse_smoothquant_weights(
-    fp32_model: nn.Module,
-    sq_transforms: Dict[str, TransformBase],
-    *,
-    layer_names: Optional[set] = None,
-) -> nn.Module:
-    """Return a deep copy of fp32_model with W = W * s applied to selected layers."""
-    fused = copy.deepcopy(fp32_model)
-    module_map = dict(fused.named_modules())
-    for name, sq_t in sq_transforms.items():
-        if layer_names is not None and name not in layer_names:
-            continue
-        if not isinstance(sq_t, SmoothQuantTransform):
-            continue
-        m = module_map.get(name)
-        if m is None or not hasattr(m, "weight") or m.weight is None:
-            continue
-        W = m.weight.data
-        shape = [1] * W.ndim
-        shape[1] = -1
-        m.weight.data = W * sq_t.scale.view(*shape)
-    return fused
-
-
-def _build_per_layer_optimal_cfg(
-    variant_results: dict,
-    sq_transforms: dict,
-    fmt_str: str,
-    gran: GranularitySpec,
-    cfg_builder: Callable,
-    weight_only: bool = False,
-) -> dict:
-    """Per-layer OpQuantConfig: pick the transform with highest QSNR per layer."""
-    layer_best_tx = _compute_best_transform_per_layer(
-        {k: v["qsnr_per_layer"] for k, v in variant_results.items()}
-    )
-    tx_map = {"None": None, "Hadamard": HadamardTransform()}
-    per_layer_cfg = {}
-    for layer, tx_name in layer_best_tx.items():
-        if tx_name == "SmoothQuant":
-            sq_tx = sq_transforms.get(layer, IdentityTransform())
-            per_layer_cfg[layer] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
+        vt = time.time() - vt0
+        acc = results[name].get("accuracy", {})
+        if isinstance(acc, dict):
+            acc_str = ", ".join(f"{k}={v:.4f}" for k, v in acc.items())
         else:
-            per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name])
-    return per_layer_cfg
+            acc_str = f"{acc:.4f}" if isinstance(acc, (int, float)) else str(acc)
+        print(f" done ({vt:.1f}s)  acc={{{acc_str}}}")
+
+    elapsed = time.time() - t0
+    baseline_key = list(results.keys())[0] if results else ""
+    results["FP32 (baseline)"] = {"accuracy": results[baseline_key]["fp32_accuracy"]} if baseline_key else {}
+    print(f"  ---- {desc} complete: {total}/{total} finished, total {elapsed:.1f}s ----")
+    return results
 
 
-def run_part_d_transforms(fp32_model, calib_data, eval_loader, *, eval_fn=None) -> dict:
-    """Part D: None / SmoothQuant / Hadamard at 4-bit + per-layer optimal selection."""
-    print("\n### Part D: Transform Study at 4-bit ###")
-    fmt_configs = [
-        ("MXINT-4", "int4",      _PER_B32, False),
-        ("MXFP-4",  "fp4_e2m1",  _PER_B32, False),
-        ("INT4-PC", "int4",      _PER_C0,  False),
-        ("NF4-PC",  "nf4",       _PER_C0,  True),
-    ]
+def _run_pot_scaling_part(part_cfg: dict, fp32_model, calib_data, eval_loader, eval_fn) -> dict:
+    """Run a 'pot_scaling' part: each variant × {pot=False, pot=True}."""
+    variants = part_cfg["variants"]
+    lsq_steps = part_cfg.get("lsq_steps", 100)
+    desc = part_cfg.get("description", "")
+    results = {}
 
-    print("  Computing SmoothQuant scales...")
+    expanded = []
+    for v in variants:
+        for pot in (False, True):
+            suffix = "PoT" if pot else "FP32"
+            expanded.append((f"{v['name']}-{suffix}", v, pot))
+
+    total = len(expanded)
+    print(f"\n{'='*60}")
+    print(f"  {desc}  [{total} variant(s), lsq_steps={lsq_steps}]")
+    print(f"{'='*60}")
+
+    t0 = time.time()
+    for i, (name, v, pot) in enumerate(expanded, 1):
+        cfg = _resolve_config(v)
+        print(f"  [{i}/{total}] {name} ({_fmt_desc(v)}, pot={pot}) ...", end="", flush=True)
+        vt0 = time.time()
+        results[name] = run_experiment(
+            cfg, fp32_model, calib_data, eval_loader,
+            lsq_steps=lsq_steps, lsq_pot=pot, eval_fn=eval_fn,
+        )
+        vt = time.time() - vt0
+        acc = results[name].get("accuracy", {})
+        if isinstance(acc, dict):
+            acc_str = ", ".join(f"{k}={v:.4f}" for k, v in acc.items())
+        else:
+            acc_str = f"{acc:.4f}" if isinstance(acc, (int, float)) else str(acc)
+        print(f" done ({vt:.1f}s)  acc={{{acc_str}}}")
+
+    elapsed = time.time() - t0
+    baseline_key = list(results.keys())[0] if results else ""
+    results["FP32 (baseline)"] = {"accuracy": results[baseline_key]["fp32_accuracy"]} if baseline_key else {}
+    print(f"  ---- {desc} complete: {total}/{total} finished, total {elapsed:.1f}s ----")
+    return results
+
+
+def _run_transform_part(part_cfg: dict, fp32_model, calib_data, eval_loader, eval_fn) -> dict:
+    """Run a 'transform' part: per-format None/Hadamard/SmoothQuant/PerLayerOpt."""
+    variants = part_cfg["variants"]
+    desc = part_cfg.get("description", "")
+
+    print(f"\n{'='*60}")
+    print(f"  {desc}  [{len(variants)} format(s)]")
+    print(f"{'='*60}")
+
+    t0 = time.time()
+    print(f"  [{_now()}] Computing SmoothQuant scales...", end="", flush=True)
+    sq_t0 = time.time()
     sq_transforms = _make_smoothquant_transforms(fp32_model, calib_data)
     sq_fp32_model = _fuse_smoothquant_weights(fp32_model, sq_transforms)
+    print(f" done ({time.time() - sq_t0:.1f}s)  [{len(sq_transforms)} layer(s) calibrated]")
 
     all_results: Dict[str, dict] = {}
-    for fmt_name, fmt_str, gran, weight_only in fmt_configs:
-        print(f"\n  == Transform study for {fmt_name} ==")
+    for fmt_idx, v in enumerate(variants, 1):
+        fmt_name = v["name"]
+        fmt_str = v["format"]
+        weight_only = v.get("weight_only", False)
+        gran = _resolve_granularity(v)
         builder = make_op_cfg_weight_only if weight_only else make_op_cfg
 
+        print(f"\n  -- [{fmt_idx}/{len(variants)}] Transform study for {fmt_name} ({_fmt_desc(v)}) --")
+
+        # Per-layer SmoothQuant configs
         sq_per_layer_cfg: Dict[str, OpQuantConfig] = {
             lname: _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
             for lname, sq_tx in sq_transforms.items()
@@ -396,55 +353,109 @@ def run_part_d_transforms(fp32_model, calib_data, eval_loader, *, eval_fn=None) 
             if mname and mname not in sq_per_layer_cfg:
                 sq_per_layer_cfg[mname] = fallback_cfg
 
+        tx_variants = [
+            ("None", None),
+            ("Hadamard", HadamardTransform()),
+            ("SmoothQuant", "sq"),  # special: uses sq_per_layer_cfg + sq_fp32_model
+        ]
         variant_results: Dict[str, dict] = {}
-        for tx_name, tx in {"None": None, "Hadamard": HadamardTransform()}.items():
-            print(f"    Running {fmt_name}-{tx_name}...")
-            variant_results[tx_name] = run_experiment(
-                builder(fmt_str, gran, transform=tx),
-                fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
-            )
 
-        print(f"    Running {fmt_name}-SmoothQuant...")
-        variant_results["SmoothQuant"] = run_experiment(
-            sq_per_layer_cfg, sq_fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
-        )
+        for tx_name, tx in tx_variants:
+            label = f"{fmt_name}-{tx_name}"
+            print(f"    {label} ...", end="", flush=True)
+            vt0 = time.time()
+            if tx_name == "SmoothQuant":
+                variant_results[tx_name] = run_experiment(
+                    sq_per_layer_cfg, sq_fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+                )
+            else:
+                variant_results[tx_name] = run_experiment(
+                    builder(fmt_str, gran, transform=tx),
+                    fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
+                )
+            vt = time.time() - vt0
+            acc = variant_results[tx_name].get("accuracy", {})
+            if isinstance(acc, dict):
+                acc_str = ", ".join(f"{k}={v:.4f}" for k, v in acc.items())
+            else:
+                acc_str = f"{acc:.4f}" if isinstance(acc, (int, float)) else str(acc)
+            print(f" done ({vt:.1f}s)  acc={{{acc_str}}}")
 
+        # Per-layer optimal
+        print(f"    {fmt_name}-PerLayerOpt ...", end="", flush=True)
+        vt0 = time.time()
         layer_best_tx = _compute_best_transform_per_layer(
             {k: v["qsnr_per_layer"] for k, v in variant_results.items()}
         )
         sq_winning = {n for n, tx in layer_best_tx.items() if tx == "SmoothQuant"}
         opt_model = _fuse_smoothquant_weights(fp32_model, sq_transforms, layer_names=sq_winning)
 
-        print(f"    Running {fmt_name}-PerLayerOpt...")
         variant_results["PerLayerOpt"] = run_experiment(
             _build_per_layer_optimal_cfg(variant_results, sq_transforms, fmt_str, gran, builder, weight_only),
             opt_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
+        vt = time.time() - vt0
+        acc = variant_results["PerLayerOpt"].get("accuracy", {})
+        if isinstance(acc, dict):
+            acc_str = ", ".join(f"{k}={v:.4f}" for k, v in acc.items())
+        else:
+            acc_str = f"{acc:.4f}" if isinstance(acc, (int, float)) else str(acc)
+        n_sq = sum(1 for tx in layer_best_tx.values() if tx == "SmoothQuant")
+        n_hd = sum(1 for tx in layer_best_tx.values() if tx == "Hadamard")
+        n_no = sum(1 for tx in layer_best_tx.values() if tx == "None")
+        print(f" done ({vt:.1f}s)  acc={{{acc_str}}}  [per-layer: {n_no} None + {n_hd} Hadamard + {n_sq} SmoothQuant]")
+
         all_results[fmt_name] = variant_results
 
+    elapsed = time.time() - t0
+    print(f"  ---- {desc} complete, total {elapsed:.1f}s ----")
     return all_results
 
 
-def run_block_size_sweep(
-    fp32_model,
-    calib_data,
-    eval_loader,
-    fmt_name: str = "int8",
-    *,
-    eval_fn=None,
-) -> dict:
-    """Sweep block sizes [16, 32, 64, 128] for sensitivity analysis."""
+def _run_block_sweep_part(part_cfg: dict, fp32_model, calib_data, eval_loader, eval_fn) -> dict:
+    """Run a 'block_sweep' part: sweep block sizes for a format."""
+    fmt_name = part_cfg.get("format", "int8")
+    block_sizes = part_cfg.get("block_sizes", [16, 32, 64, 128])
+    desc = part_cfg.get("description", "")
+
+    print(f"\n{'='*60}")
+    print(f"  {desc}  [format={fmt_name}, sizes={block_sizes}]")
+    print(f"{'='*60}")
+
     results = {}
-    for bs in (16, 32, 64, 128):
+    t0 = time.time()
+    for i, bs in enumerate(block_sizes, 1):
         gran = GranularitySpec.per_block(size=bs, axis=-1)
-        print(f"  Block size {bs}...")
+        label = f"{fmt_name}-blk{bs}"
+        print(f"  [{i}/{len(block_sizes)}] {label} ...", end="", flush=True)
+        vt0 = time.time()
         try:
-            results[f"{fmt_name}-blk{bs}"] = run_experiment(
+            results[label] = run_experiment(
                 make_op_cfg(fmt_name, gran), fp32_model, calib_data, eval_loader, eval_fn=eval_fn,
             )
+            vt = time.time() - vt0
+            acc = results[label].get("accuracy", {})
+            if isinstance(acc, dict):
+                acc_str = ", ".join(f"{k}={v:.4f}" for k, v in acc.items())
+            else:
+                acc_str = f"{acc:.4f}" if isinstance(acc, (int, float)) else str(acc)
+            print(f" done ({vt:.1f}s)  acc={{{acc_str}}}")
         except Exception as e:
-            print(f"    FAILED: {e}")
+            print(f" FAILED: {e}")
+    elapsed = time.time() - t0
+    print(f"  ---- {desc} complete, total {elapsed:.1f}s ----")
     return results
+
+
+def _resolve_granularity(v: dict) -> GranularitySpec:
+    """Convert a variant dict's granularity fields into a GranularitySpec."""
+    gran_type = v.get("granularity", "per_tensor")
+    if gran_type == "per_block":
+        return GranularitySpec.per_block(size=v.get("block_size", 32), axis=v.get("axis", -1))
+    elif gran_type == "per_channel":
+        return GranularitySpec.per_channel(axis=v.get("axis", -1))
+    else:
+        return GranularitySpec.per_tensor()
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +634,7 @@ def run_format_study(
     build_conv_model: Optional[Callable[[], nn.Module]] = None,
     output_dir: Optional[str] = None,
     skip_parts: Optional[Dict[str, bool]] = None,
+    config: Optional[dict] = None,
 ) -> Dict[str, dict]:
     """Run all format study experiments and produce tables and figures.
 
@@ -633,11 +645,14 @@ def run_format_study(
         eval_fn: ``(model, dataloader) -> dict[str, float]``.
         build_conv_model: Optional Conv2d model for Part D Conv2d validation.
         output_dir: Output directory. Default: ``results/<timestamp>/``.
-        skip_parts: Dict mapping ``"A"``, ``"B"``, ``"C"``, ``"D"`` to True to skip.
+        skip_parts: Dict mapping part key to True to skip (e.g. ``{"part_a": True}``).
+        config: Study config dict. Default: ``STUDY_CONFIG`` from ``study_config.py``.
 
     Returns:
         Dict mapping experiment name to result dict.
     """
+    if config is None:
+        from src.pipeline.study_config import STUDY_CONFIG as config
     if skip_parts is None:
         skip_parts = {}
     if output_dir is None:
@@ -645,61 +660,86 @@ def run_format_study(
     os.makedirs(f"{output_dir}/figures", exist_ok=True)
     os.makedirs(f"{output_dir}/tables", exist_ok=True)
 
+    # ---- Dispatch table for part types ----
+    _RUNNERS = {
+        "simple":       _run_simple_part,
+        "pot_scaling":  _run_pot_scaling_part,
+        "transform":    _run_transform_part,
+        "block_sweep":  _run_block_sweep_part,
+    }
+    _TABLE_GENERATORS = {
+        "table1": lambda r, od: accuracy_table(r, title="Table 1", output_dir=od, filename="table1_8bit.csv"),
+        "table2": lambda r, od: accuracy_table(r, title="Table 2", output_dir=od, filename="table2_4bit.csv"),
+        "table3": generate_table_3,
+        "table4": generate_table_4,
+        "table5": generate_table_5,
+    }
+
     print("=" * 60)
-    print("Quantization Format Precision Study")
-    print(f"Output: {output_dir}")
+    print(f"  Quantization Format Precision Study")
+    print(f"  Output: {output_dir}")
+    print(f"  Started: {_now()}")
     print("=" * 60)
 
+    study_t0 = time.time()
     fp32_model = build_model()
     fp32_model.eval()
     calib_data = make_calib_data()
     eval_loader = make_eval_loader()
     all_results: Dict[str, dict] = {}
 
-    for part, label, runner, tables in [
-        ("A", "8-bit Format Comparison",  run_part_a_8bit,     ["table1"]),
-        ("B", "4-bit Format Comparison",  run_part_b_4bit,     ["table2"]),
-        ("C", "FP32 vs PoT Scaling",      run_part_c_pot_scaling, ["table3"]),
-        ("D", "Transform Study (MLP)",    run_part_d_transforms,  ["table4", "table5"]),
-    ]:
-        if skip_parts.get(part):
-            print(f"\n### PART {part}: SKIPPED ###")
+    # ---- Run configured parts ----
+    for part_key, part_cfg in config.items():
+        if skip_parts.get(part_key):
+            print(f"\n  [{_now()}] PART {part_key}: SKIPPED")
             continue
-        print(f"\n{'='*60}\nPART {part}: {label}\n{'='*60}")
-        key = f"part_{part.lower()}"
-        all_results[key] = runner(fp32_model, calib_data, eval_loader, eval_fn=eval_fn)
-        if "table1" in tables:
-            print(accuracy_table(all_results[key], title=f"Table 1: {label}",
-                                 output_dir=output_dir, filename="table1_8bit.csv"))
-        if "table2" in tables:
-            print(accuracy_table(all_results[key], title=f"Table 2: {label}",
-                                 output_dir=output_dir, filename="table2_4bit.csv"))
-        if "table3" in tables:
-            print(generate_table_3(all_results[key], output_dir))
-        if "table4" in tables:
-            print(generate_table_4(all_results[key], output_dir))
-        if "table5" in tables:
-            print(generate_table_5(all_results[key], output_dir))
 
-    if not skip_parts.get("D") and build_conv_model is not None and not skip_parts.get("D_conv"):
-        print(f"\n{'='*60}\nPART D (Conv): Transform Study on Conv2d Model\n{'='*60}")
+        part_type = part_cfg.get("type", "simple")
+        runner = _RUNNERS.get(part_type)
+        if runner is None:
+            print(f"  [{_now()}] PART {part_key}: UNKNOWN type '{part_type}', skipped")
+            continue
+
+        all_results[part_key] = runner(part_cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn)
+
+        # Generate tables for this part
+        table_name = part_cfg.get("table")
+        if table_name and table_name in _TABLE_GENERATORS:
+            try:
+                print(_TABLE_GENERATORS[table_name](all_results[part_key], output_dir))
+            except Exception as e:
+                print(f"  Warning: table {table_name} generation failed: {e}")
+
+    # ---- Optional Part D on Conv2d model ----
+    part_d_cfg = config.get("part_d")
+    if part_d_cfg and not skip_parts.get("part_d_conv") and build_conv_model is not None:
+        print(f"\n{'='*60}")
+        print(f"  Part D (Conv): Transform Study on Conv2d Model")
+        print(f"{'='*60}")
         conv_model = build_conv_model()
         conv_model.eval()
-        all_results["part_d_conv"] = run_part_d_transforms(
-            conv_model, calib_data, eval_loader, eval_fn=eval_fn,
+        all_results["part_d_conv"] = _run_transform_part(
+            part_d_cfg, conv_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
-        print(generate_table_4(all_results["part_d_conv"], output_dir, suffix="_conv"))
+        try:
+            print(generate_table_4(all_results["part_d_conv"], output_dir, suffix="_conv"))
+        except Exception as e:
+            print(f"  Warning: table4_conv generation failed: {e}")
 
+    # ---- Cross-part table (Table 6: sensitivity) ----
     print(generate_table_6(all_results, output_dir))
 
-    print(f"\n{'='*60}\nBLOCK SIZE SWEEP\n{'='*60}")
-    all_results["block_sweep"] = run_block_size_sweep(fp32_model, calib_data, eval_loader, eval_fn=eval_fn)
-
-    print("\n### Generating Figures ###")
+    # ---- Figures ----
+    print(f"\n  [{_now()}] Generating figures ...")
+    fig_t0 = time.time()
     _generate_figures(all_results, output_dir)
+    print(f"  Figures done ({time.time() - fig_t0:.1f}s)")
 
     _save_results_json(all_results, output_dir)
-    print(f"\nStudy complete. Results in {output_dir}/")
+
+    total_elapsed = time.time() - study_t0
+    print(f"\n  Study complete. Results in {output_dir}/")
+    print(f"  Total time: {total_elapsed:.1f}s ({total_elapsed/60:.1f} min)")
     return all_results
 
 
