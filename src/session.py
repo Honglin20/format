@@ -40,6 +40,19 @@ from src.mapping.quantize_model import quantize_model
 from src.scheme.op_config import OpQuantConfig
 
 
+def _module_device(module: nn.Module) -> torch.device:
+    """Get the device of *module* from its parameters or buffers."""
+    try:
+        return next(module.parameters()).device
+    except StopIteration:
+        pass
+    try:
+        return next(module.buffers()).device
+    except StopIteration:
+        pass
+    return torch.device('cpu')
+
+
 class QuantSession:
     """Unified high-level API for model quantization workflow.
 
@@ -322,7 +335,8 @@ class QuantSession:
 
             # Compute initial pre-scale
             if init == "ones":
-                init_scale = torch.ones(1)
+                device = _module_device(module)
+                init_scale = torch.ones(1, device=device)
             else:
                 raise ValueError(f"Unknown init method: {init!r}")
 

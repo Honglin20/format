@@ -197,7 +197,8 @@ class LayerwiseScaleOptimizer:
         Returns a single-element tensor that broadcasts to any shape.
         Per-channel initialization can be added later.
         """
-        return torch.ones(1)
+        device = targets[0].device if targets else module._pre_scale.device
+        return torch.ones(1, device=device)
 
     @staticmethod
     def _fix_internal_scales(module, targets) -> None:

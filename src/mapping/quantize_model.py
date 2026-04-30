@@ -128,11 +128,11 @@ def _make_bn3d(orig: nn.BatchNorm3d, cfg: OpQuantConfig, name: str):
 
 def _copy_bn_state(orig, target):
     if orig.affine:
-        target.weight.data.copy_(orig.weight.data)
-        target.bias.data.copy_(orig.bias.data)
+        target.weight.data = orig.weight.data.clone()
+        target.bias.data = orig.bias.data.clone()
     if orig.track_running_stats:
-        target.running_mean.copy_(orig.running_mean)
-        target.running_var.copy_(orig.running_var)
+        target.running_mean = orig.running_mean.clone()
+        target.running_var = orig.running_var.clone()
 
 
 def _make_ln(orig: nn.LayerNorm, cfg: OpQuantConfig, name: str):
@@ -145,8 +145,8 @@ def _make_ln(orig: nn.LayerNorm, cfg: OpQuantConfig, name: str):
         elementwise_affine=orig.elementwise_affine, cfg=cfg, name=name,
     )
     if orig.elementwise_affine:
-        mod.weight.data.copy_(orig.weight.data)
-        mod.bias.data.copy_(orig.bias.data)
+        mod.weight.data = orig.weight.data.clone()
+        mod.bias.data = orig.bias.data.clone()
     return mod
 
 
@@ -157,8 +157,8 @@ def _make_gn(orig: nn.GroupNorm, cfg: OpQuantConfig, name: str):
         eps=orig.eps, affine=orig.affine, cfg=cfg, name=name,
     )
     if orig.affine:
-        mod.weight.data.copy_(orig.weight.data)
-        mod.bias.data.copy_(orig.bias.data)
+        mod.weight.data = orig.weight.data.clone()
+        mod.bias.data = orig.bias.data.clone()
     return mod
 
 
@@ -172,7 +172,7 @@ def _make_rms_norm(orig, cfg: OpQuantConfig, name: str):
         elementwise_affine=orig.elementwise_affine, cfg=cfg, name=name,
     )
     if orig.elementwise_affine:
-        mod.weight.data.copy_(orig.weight.data)
+        mod.weight.data = orig.weight.data.clone()
     return mod
 
 
@@ -441,5 +441,16 @@ def _replace_module(
             mod.load_state_dict(module.state_dict(), strict=False)
         except Exception:
             pass
+
+    # Preserve device of original module
+    try:
+        device = next(module.parameters()).device
+    except StopIteration:
+        try:
+            device = next(module.buffers()).device
+        except StopIteration:
+            device = None
+    if device is not None and device.type != 'cpu':
+        mod = mod.to(device)
 
     return mod
