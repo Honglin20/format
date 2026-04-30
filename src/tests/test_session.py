@@ -760,3 +760,173 @@ class TestPreScaleIntegration:
         out = session(torch.randn(4, 4))
         assert out.shape == (4, 3)
         assert not torch.isnan(out).any()
+
+    # ---- New init modes, granularity, trainable ----
+
+    def test_initialize_amax_init(self):
+        """init='amax' creates pre-scales from activation statistics."""
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+        session.eval()
+
+        calib_data = [torch.randn(8, 4) for _ in range(4)]
+        count = session.initialize_pre_scales(calib_data, init="amax")
+        assert count > 0
+
+        for _, mod in session.qmodel.named_modules():
+            if hasattr(mod, "_pre_scale"):
+                assert mod._pre_scale.numel() == 1  # per_tensor default
+
+        # Forward pass works
+        out = session(torch.randn(4, 4))
+        assert out.shape == (4, 3)
+        assert not torch.isnan(out).any()
+
+    def test_initialize_pot_amax_init(self):
+        """init='pot_amax' creates PoT pre-scales from activation statistics."""
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+        session.eval()
+
+        calib_data = [torch.randn(8, 4) for _ in range(4)]
+        count = session.initialize_pre_scales(calib_data, init="pot_amax")
+        assert count > 0
+
+        for _, mod in session.qmodel.named_modules():
+            if hasattr(mod, "_pre_scale"):
+                scale = mod._pre_scale
+                log2 = torch.log2(scale)
+                assert torch.equal(log2, torch.round(log2)), \
+                    f"scale {scale} is not power-of-two"
+
+        # Forward pass works
+        out = session(torch.randn(4, 4))
+        assert out.shape == (4, 3)
+        assert not torch.isnan(out).any()
+
+    def test_collect_input_amax_accumulates_across_batches(self):
+        """_collect_input_amax takes element-wise max across multiple batches."""
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+        session.eval()
+
+        # Batch 1: small values (amax ~ 0.5), Batch 2: larger (amax ~ 5.0)
+        batch1 = [torch.randn(8, 4) * 0.5]
+        batch2 = [torch.randn(8, 4) * 5.0]
+        batch2_big = batch2[0].clone()
+        batch2_big[0, 0] = 10.0  # forced large value
+        batch2 = [batch2_big]
+
+        amap = QuantSession._collect_input_amax(batch1, session.qmodel)
+        amap2 = QuantSession._collect_input_amax(batch2, session.qmodel)
+        amap_both = QuantSession._collect_input_amax(
+            batch1 + batch2, session.qmodel,
+        )
+
+        # Running max across both batches should equal max of individual amax values
+        for name in amap:
+            if name in amap_both:
+                expected = torch.maximum(amap[name], amap2[name])
+                assert torch.allclose(amap_both[name], expected), \
+                    f"amax for {name}: batch1={amap[name].item():.3f}, batch2={amap2[name].item():.3f}, both={amap_both[name].item():.3f}"
+
+    def test_initialize_per_channel_granularity(self):
+        """granularity='per_channel' creates (C,) pre-scales on input activation roles only.
+
+        Output/grad_output are excluded because channel counts differ
+        across matmul ops (in_features vs out_features).
+        """
+        from src.session import QuantSession
+        from src.transform.pre_scale import PreScaleTransform
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+        session.eval()
+
+        calib_data = [torch.randn(8, 4) for _ in range(4)]
+        count = session.initialize_pre_scales(
+            calib_data, init="ones", granularity="per_channel",
+        )
+        assert count > 0
+
+        for _, mod in session.qmodel.named_modules():
+            if hasattr(mod, "_pre_scale"):
+                # Input activation role has PreScaleTransform
+                if mod.cfg.input is not None:
+                    assert isinstance(mod.cfg.input.transform, PreScaleTransform)
+                # Output role does NOT have PreScaleTransform (channel mismatch)
+                if mod.cfg.output is not None:
+                    assert not isinstance(
+                        mod.cfg.output.transform, PreScaleTransform,
+                    )
+                # Weight scheme does NOT have PreScaleTransform
+                if mod.cfg.weight is not None:
+                    assert not isinstance(
+                        mod.cfg.weight.transform, PreScaleTransform,
+                    )
+
+    def test_initialize_trainable_parameter(self):
+        """trainable=True registers _pre_scale as nn.Parameter."""
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+        session.eval()
+
+        calib_data = [torch.randn(8, 4) for _ in range(4)]
+        count = session.initialize_pre_scales(
+            calib_data, init="ones", trainable=True,
+        )
+        assert count > 0
+
+        for _, mod in session.qmodel.named_modules():
+            if hasattr(mod, "_pre_scale"):
+                assert isinstance(mod._pre_scale, nn.Parameter)
+
+        # Scales appear in model parameters
+        param_names = [n for n, _ in session.qmodel.named_parameters()]
+        pre_scale_params = [n for n in param_names if "_pre_scale" in n]
+        assert len(pre_scale_params) > 0
+
+    def test_initialize_invalid_granularity(self):
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg)
+
+        with pytest.raises(ValueError, match="Unknown granularity"):
+            session.initialize_pre_scales(
+                [torch.randn(8, 4)], init="ones", granularity="invalid",
+            )
+
+    def test_e2e_hierarchical_pipeline(self):
+        """Full pipeline: pot_amax init + calibration + forward."""
+        from src.session import QuantSession
+        model = _make_small_model()
+        cfg = _make_cfg()
+        session = QuantSession(model, cfg, keep_fp32=True)
+        session.eval()
+
+        calib_data = [torch.randn(8, 4) for _ in range(6)]
+
+        # Step 1: Initialize pre-scales (pot_amax, per_channel, pot=True)
+        count = session.initialize_pre_scales(
+            calib_data, init="pot_amax", pot=True, granularity="per_channel",
+        )
+        assert count > 0
+
+        # Step 2: Calibrate
+        with session.calibrate():
+            for batch in calib_data:
+                session(batch)
+
+        # Step 3: Forward pass works
+        out = session(torch.randn(4, 4))
+        assert out.shape == (4, 3)
+        assert not torch.isnan(out).any()

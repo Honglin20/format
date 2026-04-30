@@ -302,50 +302,99 @@ class QuantSession:
     def initialize_pre_scales(
         self,
         calib_data: List[torch.Tensor],
+        *,
         init: str = "ones",
         pot: bool = False,
+        granularity: str = "per_tensor",
+        trainable: bool = False,
+        channel_axis: int = -1,
     ) -> int:
-        """Initialize ``_pre_scale`` buffers on all quantized modules.
-
-        Creates per-tensor pre-scale tensors, registers them as buffers,
-        and updates each module's cfg to route quantization through
-        ``PreScaleTransform``.
+        """Initialize ``_pre_scale`` tensors on all quantized modules.
 
         Args:
-            calib_data: List of input tensors from calibration.
-            init: Initialization method — ``"ones"`` (identity, recommended
-                  for LSQ optimization).
-            pot: If True, create a power-of-two PreScaleTransform
-                 (hardware-friendly bit-shift scaling).
+            calib_data: List of input tensors from calibration (used when
+                ``init`` is ``"amax"`` or ``"pot_amax"`` to collect
+                per-module activation statistics).
+            init: Initialization method:
+
+                - ``"ones"`` — identity (all ones), for LSQ optimisation.
+                - ``"amax"`` — ``1 / max(|x|)`` from calibration data.
+                - ``"pot_amax"`` — ``2 ** round(log2(1/amax))`` (PoT).
+
+            pot: If True, create a PreScaleTransform that projects the scale
+                to nearest power-of-two at every forward pass.
+            granularity: ``"per_tensor"`` (single scalar per module) or
+                ``"per_channel"`` (one scalar per output channel).
+                Per-channel only replaces activation-role transforms
+                (input/output/grad_*) — weight/bias keep their originals.
+            trainable: If True, register as ``nn.Parameter`` (gradient-based
+                optimisation). If False, register as a buffer.
+            channel_axis: Which dimension is the channel axis for per-channel
+                broadcasting (default -1, the last dim).
 
         Returns:
-            Number of modules that received pre-scale buffers.
+            Number of modules that received pre-scale tensors.
         """
         from src.transform.pre_scale import PreScaleTransform
         from src.calibration.lsq_optimizer import (
             _get_quantized_modules, _replace_transform,
+            _replace_transform_activation_only, _INPUT_ACTIVATION_ROLES,
         )
+
+        if init not in ("ones", "amax", "pot_amax"):
+            raise ValueError(f"Unknown init method: {init!r}")
+        if granularity not in ("per_tensor", "per_channel"):
+            raise ValueError(
+                f"Unknown granularity: {granularity!r}"
+            )
+
+        # Collect per-module input amax when init requires calibration data
+        amax_map = None
+        if init in ("amax", "pot_amax"):
+            amax_map = QuantSession._collect_input_amax(
+                calib_data, self.qmodel,
+                channel_axis=channel_axis,
+                granularity=granularity,
+            )
 
         count = 0
         for name, module in _get_quantized_modules(self.qmodel):
-            # Skip modules without clear output channels (activations, etc.)
-            out_channels = self._infer_out_channels(module)
-            if out_channels is None:
-                continue
+            device = _module_device(module)
 
             # Compute initial pre-scale
             if init == "ones":
-                device = _module_device(module)
-                init_scale = torch.ones(1, device=device)
-            else:
-                raise ValueError(f"Unknown init method: {init!r}")
+                if granularity == "per_channel":
+                    out_channels = self._infer_out_channels(module)
+                    if out_channels is None:
+                        continue
+                    init_scale = torch.ones(out_channels, device=device)
+                else:
+                    init_scale = torch.ones(1, device=device)
+            else:  # "amax" or "pot_amax"
+                amax = amax_map.get(name)
+                if amax is None:
+                    continue
+                amax = amax.to(device).clamp(min=1e-12)
+                init_scale = torch.tensor(1.0, device=device) / amax
+                if init == "pot_amax":
+                    init_scale = 2 ** torch.round(torch.log2(init_scale))
 
-            # Register as buffer
-            module.register_buffer("_pre_scale", init_scale)
+            # Register as buffer or Parameter
+            if trainable:
+                module.register_parameter("_pre_scale", nn.Parameter(init_scale))
+            else:
+                module.register_buffer("_pre_scale", init_scale)
 
             # Update cfg to route through PreScaleTransform
-            transform = PreScaleTransform(scale=module._pre_scale, pot=pot)
-            module.cfg = _replace_transform(module.cfg, transform)
+            transform = PreScaleTransform(
+                scale=module._pre_scale, pot=pot, channel_axis=channel_axis,
+            )
+            if granularity == "per_channel":
+                module.cfg = _replace_transform_activation_only(
+                    module.cfg, transform, roles=_INPUT_ACTIVATION_ROLES,
+                )
+            else:
+                module.cfg = _replace_transform(module.cfg, transform)
             count += 1
 
         return count
@@ -389,6 +438,64 @@ class QuantSession:
         if hasattr(module, "num_features"):
             return module.num_features
         return None
+
+    @staticmethod
+    def _collect_input_amax(
+        calib_data: List[torch.Tensor],
+        model: nn.Module,
+        *,
+        channel_axis: int = -1,
+        granularity: str = "per_tensor",
+    ) -> Dict[str, torch.Tensor]:
+        """Collect per-module input activation max-abs via forward hooks.
+
+        Runs a forward pass with *calib_data* on *model*, hooking into
+        every quantized module's input to compute amax.
+
+        Args:
+            calib_data: List of input tensors to run forward.
+            model: Quantized model.
+            channel_axis: Which dim is the channel (default -1, last dim).
+            granularity: ``"per_tensor"`` — scalar amax per module;
+                         ``"per_channel"`` — 1D amax along channel_axis.
+
+        Returns:
+            Dict mapping module name → amax tensor (shape ``()`` for
+            per_tensor, ``(C,)`` for per_channel).
+        """
+        from src.calibration.lsq_optimizer import _get_quantized_modules
+
+        amax_store: Dict[str, torch.Tensor] = {}
+        handles = []
+
+        def _make_hook(name):
+            def _fn(_module, inp, _out):
+                x = inp[0].detach()
+                if granularity == "per_channel":
+                    ndim = x.ndim
+                    ax = channel_axis if channel_axis >= 0 else ndim + channel_axis
+                    reduce_dims = tuple(d for d in range(ndim) if d != ax)
+                    batch_amax = torch.amax(torch.abs(x), dim=reduce_dims)
+                else:
+                    batch_amax = torch.amax(torch.abs(x)).reshape(1)
+                if name in amax_store:
+                    amax_store[name] = torch.maximum(amax_store[name], batch_amax)
+                else:
+                    amax_store[name] = batch_amax
+            return _fn
+
+        for qname, qmod in _get_quantized_modules(model):
+            handles.append(qmod.register_forward_hook(_make_hook(qname)))
+
+        try:
+            with torch.no_grad():
+                for batch in calib_data:
+                    model(batch)
+        finally:
+            for h in handles:
+                h.remove()
+
+        return amax_store
 
     # ------------------------------------------------------------------
     # Delegation

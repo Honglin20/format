@@ -127,4 +127,24 @@ STUDY_CONFIG: dict = {
         "format": "int8",
         "block_sizes": [16, 32, 64, 128],
     },
+
+    # =====================================================================
+    # Hierarchical Pre-Scale Study (pot pre-scale + MX per-block)
+    # =====================================================================
+    "part_hierarchical": {
+        "type": "hierarchical",
+        "description": "Hierarchical Pre-Scale Study (pot pre-scale + MX per-block)",
+        "pre_scale": {
+            "init": "pot_amax",
+            "pot": True,
+            "granularity": "per_tensor",
+            "trainable": False,
+        },
+        "variants": [
+            {"name": "MXINT-8-HIER", "format": "int8",     "granularity": "per_block", "block_size": 32},
+            {"name": "MXFP-8-HIER",  "format": "fp8_e4m3", "granularity": "per_block", "block_size": 32},
+            {"name": "MXINT-4-HIER", "format": "int4",     "granularity": "per_block", "block_size": 32},
+            {"name": "MXFP-4-HIER",  "format": "fp4_e2m1", "granularity": "per_block", "block_size": 32},
+        ],
+    },
 }

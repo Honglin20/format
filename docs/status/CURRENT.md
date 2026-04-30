@@ -29,6 +29,14 @@
 ### P5 — 可学习量化参数 ✅ (ADR-006)
 
 - [x] LayerwiseScaleOptimizer + PreScaleTransform（Transform 槽位方案，非 scale_mode 字段方案）
+- [x] PreScaleTransform channel_axis 支持（SmoothQuant 风格广播）
+- [x] `initialize_pre_scales` 增强：trainable/non-trainable, per_tensor/per_channel, ones/amax/pot_amax
+- [x] `_ACTIVATION_ROLES` / `_INPUT_ACTIVATION_ROLES` + `_replace_transform_activation_only(roles=...)`
+- [x] `QuantSession._collect_input_amax` — forward hook 收集 per-module amax
+- [x] `_INPUT_ACTIVATION_ROLES` 用于 per-channel（matmul 输入/输出 channel 维度不同，输出角色不可替换）
+- [x] Hierarchical study: `part_hierarchical` in STUDY_CONFIG + `_run_hierarchical_part` runner
+- [x] 14 PreScale 新测试 + 全量 1416 passed
+- [x] Review fixes: multi-batch amax accumulation, _infer_out_channels guard scoped to per_channel, orphaned table7 removed
 
 ### P8.R1 — Pipeline Refactor ✅
 
@@ -41,7 +49,7 @@
 - [x] `QuantSession.estimate_cost()` — 无 forward pass，同步返回
 - [x] `run_experiment()` 返回 dict 附加 `cost` / `cost_fp32` 键
 - [x] 修复计划中 `_elem_bits` 公式错误（`ebits==0` 时取 `mbits`，否则 `ebits+mbits-1`）
-- [x] 全量测试：1387 passed（无 regression）
+- [x] 全量测试：1415 passed（无 regression）
 
 ### P1 收尾项（全局最低优先级，P7-P9 完成后再关注）
 
@@ -73,7 +81,7 @@
 
 `pytest src/tests/` 有 26 个预存在失败（非本分支引入）：
 - `test_golden_equiv.py` — 26 tests FileNotFoundError（golden data `.pt` 文件未 staging）
-- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,387 passed
+- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,416 passed
 
 ## 关键经验记录
 
@@ -83,3 +91,5 @@
 4. **Type guards 是 CLAUDE.md §5.1 硬性要求**：每个公共 API 参数的类型守卫必须配一条 pytest.raises + match= 测试。
 5. **quantize_model 不替换根模块**：向 QuantSession 传入裸 `nn.Linear` 时，该 Linear 本身是 root（name=""）不会被 quantize_model 替换。测试需用 wrapper 模型。
 6. **_elem_bits 公式**：IntFormat/LookupFormat（ebits=0）：取 `mbits`；FPFormat/BFloat16Format（ebits>0）：取 `ebits+mbits-1`（mbits 包含 sign + implicit bit）。
+7. **Per-channel PreScaleTransform 不能用于 matmul 输出角色**：`forward(x) = x * s[in_features]` → `y = x' @ W^T` → `inverse(y_q) = y_q / s[in_features]` 但 y 的 shape 是 `(B, out_features)`。s 无法从 matmul 因子化出来。解决方案：per-channel 只替换 `input` / `grad_input`（`_INPUT_ACTIVATION_ROLES`），per-tensor 安全用于所有算子。
+8. **Hierarchical = PreScaleTransform + MX PER_BLOCK**：两级 scale（全局 PoT pre-scale + block 共享指数），使用现有框架原语组合而成，无需新概念。

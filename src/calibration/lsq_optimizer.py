@@ -41,6 +41,41 @@ def _replace_transform(cfg: OpQuantConfig, transform) -> OpQuantConfig:
     return OpQuantConfig(**fields)
 
 
+_ACTIVATION_ROLES = frozenset({
+    "input", "output", "grad_input", "grad_output",
+    "input_gw", "grad_output_gw", "weight_gi", "grad_output_gi",
+})
+
+_INPUT_ACTIVATION_ROLES = frozenset({"input", "grad_input"})
+
+
+def _replace_transform_activation_only(
+    cfg: OpQuantConfig, transform, *, roles=_ACTIVATION_ROLES,
+) -> OpQuantConfig:
+    """Return a new OpQuantConfig with *transform* replacing selected activation roles.
+
+    Weight/bias/grad_weight/grad_bias schemes keep their existing transforms.
+    The *roles* parameter controls which activation roles are replaced
+    (default: all activation roles).
+
+    Use ``roles=_INPUT_ACTIVATION_ROLES`` for per-channel PreScaleTransform
+    where the channel count differs between input and output (Linear/Conv).
+    """
+    fields = {}
+    for f_name in cfg.__dataclass_fields__:
+        old = getattr(cfg, f_name)
+        if f_name in roles and old is not None and isinstance(old, QuantScheme):
+            fields[f_name] = QuantScheme(
+                format=old.format,
+                granularity=old.granularity,
+                transform=transform,
+                round_mode=old.round_mode,
+            )
+        else:
+            fields[f_name] = old
+    return OpQuantConfig(**fields)
+
+
 class LayerwiseScaleOptimizer:
     """Gradient-based per-layer pre-scale optimization.
 

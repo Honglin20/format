@@ -446,6 +446,118 @@ def _run_block_sweep_part(part_cfg: dict, fp32_model, calib_data, eval_loader, e
     return results
 
 
+def _run_hierarchical_part(part_cfg: dict, fp32_model, calib_data, eval_loader, eval_fn) -> dict:
+    """Run a 'hierarchical' part: pre-scale init + standard experiment per variant.
+
+    For each variant:
+    1. Resolve config (MX per_block format)
+    2. Create QuantSession
+    3. session.initialize_pre_scales with part_cfg["pre_scale"] params
+    4. Standard calibrate → analyze → evaluate flow
+    """
+    variants = part_cfg["variants"]
+    pre_scale_cfg = part_cfg.get("pre_scale", {})
+    desc = part_cfg.get("description", "")
+    results = {}
+    total = len(variants)
+
+    print(f"\n{'='*60}")
+    print(f"  {desc}  [{total} variant(s)]")
+    print(f"  Pre-Scale: init={pre_scale_cfg.get('init')}, "
+          f"pot={pre_scale_cfg.get('pot')}, "
+          f"granularity={pre_scale_cfg.get('granularity')}")
+    print(f"{'='*60}")
+
+    t0 = time.time()
+    for i, v in enumerate(variants, 1):
+        name = v["name"]
+        cfg = _resolve_config(v)
+        print(f"  [{i}/{total}] {name} ({_fmt_desc(v)}) ...", end="", flush=True)
+        vt0 = time.time()
+
+        # Build session
+        session = QuantSession(
+            copy.deepcopy(fp32_model), cfg,
+            calibrator=MSEScaleStrategy(),
+            keep_fp32=True,
+        )
+
+        # -- Pre-scale initialization (before calibration) --
+        ps_init = pre_scale_cfg.get("init")
+        if ps_init:
+            print(" pre-scale", end="", flush=True)
+            session.initialize_pre_scales(
+                calib_data,
+                init=ps_init,
+                pot=pre_scale_cfg.get("pot", False),
+                granularity=pre_scale_cfg.get("granularity", "per_tensor"),
+                trainable=pre_scale_cfg.get("trainable", False),
+                channel_axis=pre_scale_cfg.get("channel_axis", -1),
+            )
+
+        # -- Standard calibration --
+        print(" calibrate", end="", flush=True)
+        with session.calibrate():
+            if eval_fn is not None:
+                eval_fn(session, calib_data)
+            else:
+                for batch in calib_data:
+                    session(batch)
+
+        # -- Analysis --
+        print(" analyze", end="", flush=True)
+        observers = [QSNRObserver(), MSEObserver(), HistogramObserver(), DistributionObserver()]
+        with session.analyze(observers=observers) as ctx:
+            if eval_fn is not None:
+                eval_fn(session, calib_data)
+            else:
+                for batch in calib_data:
+                    session(batch)
+        report = ctx.report()
+
+        # -- Evaluation --
+        print(" evaluate", end="", flush=True)
+        if eval_fn is not None:
+            fp32_metrics = eval_fn(session.fp32_model, eval_loader)
+            quant_metrics = eval_fn(session, eval_loader)
+            delta = {k: quant_metrics.get(k, 0.0) - fp32_metrics.get(k, 0.0)
+                     for k in fp32_metrics}
+        else:
+            result = session.compare(eval_loader)
+            fp32_metrics = result["fp32"]
+            quant_metrics = result["quant"]
+            delta = result["delta"]
+
+        # Cost estimation
+        cost = session.estimate_cost()
+        cost_fp32 = session.estimate_cost(fp32=True)
+
+        results[name] = {
+            "accuracy": quant_metrics,
+            "fp32_accuracy": fp32_metrics,
+            "delta": delta,
+            "report": report,
+            "qsnr_per_layer": extract_metric_per_layer(report, "qsnr_db"),
+            "mse_per_layer": extract_metric_per_layer(report, "mse"),
+            "cost": cost,
+            "cost_fp32": cost_fp32,
+        }
+
+        vt = time.time() - vt0
+        acc = results[name].get("accuracy", {})
+        if isinstance(acc, dict):
+            acc_str = ", ".join(f"{k}={v:.4f}" for k, v in acc.items())
+        else:
+            acc_str = f"{acc:.4f}" if isinstance(acc, (int, float)) else str(acc)
+        print(f" done ({vt:.1f}s)  acc={{{acc_str}}}")
+
+    elapsed = time.time() - t0
+    baseline_key = list(results.keys())[0] if results else ""
+    results["FP32 (baseline)"] = {"accuracy": results[baseline_key]["fp32_accuracy"]} if baseline_key else {}
+    print(f"  ---- {desc} complete: {total}/{total} finished, total {elapsed:.1f}s ----")
+    return results
+
+
 def _resolve_granularity(v: dict) -> GranularitySpec:
     """Convert a variant dict's granularity fields into a GranularitySpec."""
     gran_type = v.get("granularity", "per_tensor")
@@ -661,10 +773,11 @@ def run_format_study(
 
     # ---- Dispatch table for part types ----
     _RUNNERS = {
-        "simple":       _run_simple_part,
-        "pot_scaling":  _run_pot_scaling_part,
-        "transform":    _run_transform_part,
-        "block_sweep":  _run_block_sweep_part,
+        "simple":        _run_simple_part,
+        "pot_scaling":   _run_pot_scaling_part,
+        "transform":     _run_transform_part,
+        "block_sweep":   _run_block_sweep_part,
+        "hierarchical":  _run_hierarchical_part,
     }
     _TABLE_GENERATORS = {
         "table1": lambda r, od: accuracy_table(r, title="Table 1", output_dir=od, filename="table1_8bit.csv"),
