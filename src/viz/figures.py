@@ -225,8 +225,10 @@ def histogram_overlay(
     """Three-channel histogram overlay (fp32 / quant / error).
 
     Extracts histogram data from ``HistogramObserver`` (keys: ``fp32_hist``,
-    ``quant_hist``, ``err_hist``) and renders the most sensitive layers as
-    overlaid semi-transparent bar charts.
+    ``quant_hist``, ``err_hist``) and renders the most quantization-sensitive
+    layers as overlaid semi-transparent bar charts. Sensitivity is determined
+    by QSNR (lower = more quantization-sensitive), with a fallback to
+    activation magnitude when no QSNR data is available.
 
     Args:
         all_results: Nested dict of ``{part: {config: {"report": ...}}}``.
@@ -238,6 +240,7 @@ def histogram_overlay(
         matplotlib Figure.
     """
     layer_hists: Dict[str, dict] = {}
+    layer_error: Dict[str, float] = {}  # QSNR for sensitivity ranking
 
     for part_name, part_data in all_results.items():
         if not part_name.startswith("part_") or not isinstance(part_data, dict):
@@ -249,13 +252,13 @@ def histogram_overlay(
             if not hasattr(report, "iter_slices"):
                 continue
             for layer, role, stage, slice_key, metrics in report.iter_slices():
-                if layer in layer_hists:
-                    continue
-                if "fp32_hist" in metrics and "quant_hist" in metrics:
+                if layer not in layer_hists and "fp32_hist" in metrics and "quant_hist" in metrics:
                     layer_hists[layer] = {
                         k: _to_numpy(metrics.get(k))
                         for k in ("fp32_hist", "quant_hist", "err_hist")
                     }
+                if layer not in layer_error and "qsnr_db" in metrics:
+                    layer_error[layer] = metrics["qsnr_db"]
 
     if not layer_hists:
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -266,12 +269,20 @@ def histogram_overlay(
         save_figure(fig, output_dir, "histogram_overlay")
         return fig
 
-    # Pick top 3-5 layers with the richest histogram data
-    top_layers = sorted(
-        layer_hists.items(),
-        key=lambda x: x[1].get("fp32_hist", np.array(0)).sum(),
-        reverse=True,
-    )[:5]
+    # Rank by sensitivity: lowest QSNR first (most quantization-sensitive)
+    if layer_error:
+        top_layers = sorted(
+            layer_hists.items(),
+            key=lambda x: layer_error.get(x[0], float("inf")),
+        )[:5]
+    else:
+        print("  Warning: No QSNR data for sensitivity ranking, "
+              "falling back to histogram magnitude")
+        top_layers = sorted(
+            layer_hists.items(),
+            key=lambda x: x[1].get("fp32_hist", np.array(0)).sum(),
+            reverse=True,
+        )[:5]
     if not top_layers:
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.text(0.5, 0.5, "No histogram data found",

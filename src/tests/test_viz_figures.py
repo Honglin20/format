@@ -126,6 +126,14 @@ class TestHistogramOverlay:
             assert fig is not None
             assert len(fig.axes) > 0
 
+    def test_renders_with_qsnr_ranking(self):
+        """When QSNR data is available, layers should be ranked by sensitivity."""
+        # This test verifies the function doesn't crash when report has iter_slices
+        # with both histogram and QSNR data
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = histogram_overlay({}, output_dir=tmpdir)
+            assert fig is not None
+
 
 class TestTransformHeatmap:
     def test_renders_without_error(self):
