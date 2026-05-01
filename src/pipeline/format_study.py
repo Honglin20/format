@@ -112,6 +112,169 @@ def _make_sq_op_cfg(
 
 
 # ---------------------------------------------------------------------------
+# Transform part helpers
+# ---------------------------------------------------------------------------
+
+def _make_smoothquant_transforms(
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+) -> Dict[str, TransformBase]:
+    """Create per-layer SmoothQuantTransform dict from a single calibration pass.
+
+    Runs one forward pass through the FP32 model to capture each layer's
+    activation and weight, then creates a per-layer SmoothQuantTransform
+    with correctly-shaped per-channel scales.
+
+    This function is PURE — it does NOT mutate ``fp32_model``.  Weight fusion
+    (``W = W * s``) must be performed separately via
+    :func:`_fuse_smoothquant_weights`.
+
+    Args:
+        fp32_model: FP32 reference model (not mutated).
+        calib_data: List of calibration batches (first batch used).
+
+    Returns:
+        Dict mapping layer name to ``SmoothQuantTransform`` (or
+        ``IdentityTransform`` on failure).
+    """
+    if fp32_model is None:
+        return {}
+
+    activations: Dict[str, torch.Tensor] = {}
+    weights: Dict[str, torch.Tensor] = {}
+    channel_axes: Dict[str, int] = {}
+    hooks = []
+
+    def _hook(name):
+        def fn(module, _input, _output):
+            activations[name] = _input[0].detach()
+            if hasattr(module, "weight") and module.weight is not None:
+                weights[name] = module.weight.data.clone()
+        return fn
+
+    for name, module in fp32_model.named_modules():
+        if isinstance(module, nn.Linear):
+            channel_axes[name] = -1  # activation channel = last dim
+            hooks.append(module.register_forward_hook(_hook(name)))
+        elif isinstance(module, nn.Conv2d):
+            channel_axes[name] = 1   # activation channel = dim 1 (NCHW)
+            hooks.append(module.register_forward_hook(_hook(name)))
+
+    with torch.no_grad():
+        fp32_model.eval()
+        fp32_model(calib_data[0])
+
+    for h in hooks:
+        h.remove()
+
+    per_layer: Dict[str, TransformBase] = {}
+
+    for name in activations:
+        if name not in weights:
+            continue
+        try:
+            act_axis = channel_axes.get(name, -1)
+            sq_t = SmoothQuantTransform.from_calibration(
+                X_act=activations[name], W=weights[name], alpha=0.5,
+                act_channel_axis=act_axis,
+            )
+            per_layer[name] = sq_t
+        except (ValueError, RuntimeError) as e:
+            print(f"  Warning: SmoothQuant for {name}: {e}")
+            per_layer[name] = IdentityTransform()
+
+    return per_layer
+
+
+def _fuse_smoothquant_weights(
+    fp32_model: nn.Module,
+    sq_transforms: Dict[str, TransformBase],
+    *,
+    layer_names: Optional[set] = None,
+) -> nn.Module:
+    """Return a deep copy of ``fp32_model`` with SmoothQuant weight fusion applied.
+
+    For each layer in ``sq_transforms`` (filtered by ``layer_names`` if given),
+    applies ``W = W * s`` — the one-time calibration-time weight compensation
+    from SmoothQuant (Xiao et al. 2023, eq. 3).  The original ``fp32_model``
+    is NOT mutated.
+
+    Args:
+        fp32_model: Reference FP32 model (not mutated).
+        sq_transforms: Per-layer SmoothQuantTransform dict.
+        layer_names: If given, only fuse weights for layers in this set.
+                     ``None`` fuses all layers present in ``sq_transforms``.
+
+    Returns:
+        Deep copy of ``fp32_model`` with fused weights for the selected layers.
+    """
+    fused_model = copy.deepcopy(fp32_model)
+    module_map = dict(fused_model.named_modules())
+
+    for name, sq_t in sq_transforms.items():
+        if layer_names is not None and name not in layer_names:
+            continue
+        if not isinstance(sq_t, SmoothQuantTransform):
+            continue
+        module = module_map.get(name)
+        if module is None or not hasattr(module, "weight") or module.weight is None:
+            continue
+        W = module.weight.data
+        # w_axis=1: PyTorch standard input-channel axis for both Linear
+        # (out, in) and Conv2d (out, in, kH, kW).
+        shape = [1] * W.ndim
+        shape[1] = -1
+        module.weight.data = W * sq_t.scale.view(*shape)
+
+    return fused_model
+
+
+def _build_per_layer_optimal_cfg(
+    variant_results: dict,
+    sq_transforms: dict,
+    fmt_str: str,
+    gran: GranularitySpec,
+    cfg_builder: Callable,
+    weight_only: bool = False,
+) -> dict:
+    """Build per-layer OpQuantConfig dict choosing best transform per layer by QSNR.
+
+    For each layer in the model, selects the transform variant (None, SmoothQuant,
+    or Hadamard) that achieves the highest QSNR score from the variant experiments.
+
+    Args:
+        variant_results: Dict mapping ``"None"``, ``"SmoothQuant"``, ``"Hadamard"``
+            to their experiment result dicts (which contain ``qsnr_per_layer``).
+        sq_transforms: Per-layer SmoothQuantTransform dict from
+            ``_make_smoothquant_transforms``.
+        fmt_str: Format name string for the config builder.
+        gran: ``GranularitySpec`` for the config builder.
+        cfg_builder: ``make_op_cfg`` or ``make_op_cfg_weight_only``.
+        weight_only: Whether the format is weight-only (NF4, INT4-PC).
+
+    Returns:
+        Dict mapping layer name to ``OpQuantConfig``.
+    """
+    variant_qsnr = {k: v["qsnr_per_layer"] for k, v in variant_results.items()}
+    layer_best_tx = _compute_best_transform_per_layer(variant_qsnr)
+
+    tx_map = {
+        "None": None,
+        "Hadamard": HadamardTransform(),
+    }
+
+    per_layer_cfg = {}
+    for layer, tx_name in layer_best_tx.items():
+        if tx_name == "SmoothQuant":
+            sq_tx = sq_transforms.get(layer, IdentityTransform())
+            per_layer_cfg[layer] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
+        else:
+            per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name])
+
+    return per_layer_cfg
+
+
+# ---------------------------------------------------------------------------
 # Single-experiment runner
 # ---------------------------------------------------------------------------
 
