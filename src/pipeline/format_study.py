@@ -746,14 +746,14 @@ def generate_table_3(part_c: dict, output_dir: str) -> str:
     """Table 3: FP32 vs PoT accuracy delta."""
     baseline_acc = 0.0
     for name, data in part_c.items():
-        if "baseline" in name.lower():
+        if name == "FP32 (baseline)":
             acc = data.get("accuracy", {})
             baseline_acc = float(acc.get("accuracy", 0.0)) if isinstance(acc, dict) else float(acc or 0.0)
             break
 
     rows = []
     for name, data in part_c.items():
-        if "baseline" in name.lower():
+        if name == "FP32 (baseline)":
             continue
         acc = data.get("accuracy", {})
         if isinstance(acc, dict):

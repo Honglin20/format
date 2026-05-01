@@ -79,6 +79,9 @@ def qsnr_line_chart(
 ) -> plt.Figure:
     """Per-layer QSNR line chart.
 
+    Aligns all configs by shared layer names (union of all layers across
+    configs) instead of plotting each config independently by sorted index.
+
     Args:
         results: Dict mapping series name to dict with ``qsnr_per_layer``.
         title: Chart title.
@@ -89,17 +92,39 @@ def qsnr_line_chart(
         matplotlib Figure.
     """
     fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Collect shared x-axis: union of all layer names
+    all_layer_names: list = []
     for name, data in results.items():
         if "baseline" in name.lower() or "qsnr_per_layer" not in data:
             continue
-        layers = sorted(data["qsnr_per_layer"].keys())
-        values = [data["qsnr_per_layer"][l] for l in layers]
+        for lname in data["qsnr_per_layer"]:
+            if lname not in all_layer_names:
+                all_layer_names.append(lname)
+
+    if not all_layer_names:
+        ax.text(0.5, 0.5, "No QSNR data available", ha="center", va="center",
+                fontsize=12, transform=ax.transAxes)
+        ax.set_title(title)
+        save_figure(fig, output_dir, title.lower().replace(" ", "_"))
+        return fig
+
+    x_positions = range(len(all_layer_names))
+    for name, data in results.items():
+        if "baseline" in name.lower() or "qsnr_per_layer" not in data:
+            continue
+        values = [data["qsnr_per_layer"].get(l, float("nan")) for l in all_layer_names]
         color = colors.get(name, FALLBACK_CYCLE[0])
-        ax.plot(
-            range(len(layers)), values,
-            marker="o", label=name, linewidth=2, color=color,
-        )
-    ax.set_xlabel("Layer Index")
+        ax.plot(x_positions, values, marker="o", label=name, linewidth=2, color=color)
+
+    # X-axis labels: short layer names
+    short_names = [l.replace("module.", "").replace("Quantized", "") for l in all_layer_names]
+    # Truncate to 20 chars for readability
+    short_names = [n[:20] for n in short_names]
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(short_names, rotation=45, ha="right", fontsize=7)
+
+    ax.set_xlabel("Layer")
     ax.set_ylabel("QSNR (dB)")
     ax.set_title(title)
     ax.legend()
@@ -530,12 +555,31 @@ def transform_delta(
                                   if bar_positions else x_pos)
             tick_labels.append(tx_name)
             x_pos += len(all_layers) + 2
-            if len(all_layers) <= 20:
+            num_layers = len(all_layers)
+            if num_layers <= 10:
+                # Show all layer names
                 for i, layer in enumerate(all_layers):
-                    ax.text(bar_positions[i], deltas[i],
-                            layer.split(".")[-1] if "." in layer else layer,
+                    short = layer.split(".")[-1] if "." in layer else layer
+                    ax.text(bar_positions[i], deltas[i], short[:12],
                             ha="center", va="bottom" if deltas[i] >= 0 else "top",
-                            fontsize=4, rotation=90)
+                            fontsize=6, rotation=90)
+            elif num_layers <= 30:
+                # Show every 3rd layer
+                for i, layer in enumerate(all_layers):
+                    if i % 3 == 0:
+                        short = layer.split(".")[-1] if "." in layer else layer
+                        ax.text(bar_positions[i], deltas[i], short[:12],
+                                ha="center", va="bottom" if deltas[i] >= 0 else "top",
+                                fontsize=5, rotation=90)
+            else:
+                # Show top-5 by absolute delta
+                top_indices = sorted(range(len(deltas)),
+                                    key=lambda i: abs(deltas[i]), reverse=True)[:5]
+                for i in top_indices:
+                    short = all_layers[i].split(".")[-1] if "." in all_layers[i] else all_layers[i]
+                    ax.text(bar_positions[i], deltas[i], short[:12],
+                            ha="center", va="bottom" if deltas[i] >= 0 else "top",
+                            fontsize=6, rotation=90, fontweight="bold")
 
         ax.axhline(y=0, color="black", linewidth=0.5)
         if tick_positions:

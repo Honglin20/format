@@ -71,6 +71,24 @@ class TestQSNRBarChart:
             assert fig is not None
             assert len(fig.axes) > 0
 
+    def test_qsnr_aligns_by_shared_layer_names(self):
+        """Different configs should use the same x position for the same layer."""
+        results = {
+            "A": {"qsnr_per_layer": {"fc1": 10.0, "fc2": 12.0}},
+            "B": {"qsnr_per_layer": {"fc2": 15.0, "fc1": 8.0}},  # different order
+        }
+        colors = {"A": "#0072B2", "B": "#D55E00"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = qsnr_line_chart(results, title="Test", colors=colors, output_dir=tmpdir)
+            assert fig is not None
+            # Both configs should have the same number of x points (2 shared layers)
+            ax = fig.axes[0]
+            # Each line has exactly 2 points
+            assert len(ax.lines) == 2
+            for line in ax.lines:
+                assert len(line.get_xdata()) == 2
+                assert len(line.get_ydata()) == 2
+
 
 class TestMSEBoxPlot:
     def test_renders_without_error(self):
