@@ -295,6 +295,7 @@ def run_experiment(
     lsq_pot: bool = False,
     lsq_lr: float = 1e-3,
     eval_fn: Optional[Callable] = None,
+    session: Optional[QuantSession] = None,
 ) -> dict:
     """Run one quantization experiment and return results.
 
@@ -310,6 +311,9 @@ def run_experiment(
         eval_fn: ``(model, data) -> dict[str, float]``. Controls all
             model interaction (calibration, analysis, evaluation).
             When None, falls back to ``session(data)`` direct inference.
+        session: Optional[QuantSession]. When provided, skip session creation
+            and use this pre-configured session (caller must set up pre-scales
+            etc. before passing).
 
     Returns:
         Dict with keys: accuracy, fp32_accuracy, delta, report, session,
@@ -320,11 +324,12 @@ def run_experiment(
     if not calib_data:
         raise ValueError("calib_data must contain at least one batch")
 
-    session = QuantSession(
-        copy.deepcopy(fp32_model), cfg,
-        calibrator=MSEScaleStrategy(),
-        keep_fp32=True,
-    )
+    if session is None:
+        session = QuantSession(
+            copy.deepcopy(fp32_model), cfg,
+            calibrator=MSEScaleStrategy(),
+            keep_fp32=True,
+        )
 
     # ---- Calibration ----
     print(" calibrating", end="", flush=True)
@@ -664,53 +669,11 @@ def _run_hierarchical_part(part_cfg: dict, fp32_model, calib_data, eval_loader, 
                 channel_axis=pre_scale_cfg.get("channel_axis", -1),
             )
 
-        # -- Standard calibration --
-        print(" calibrate", end="", flush=True)
-        with session.calibrate():
-            if eval_fn is not None:
-                eval_fn(session, calib_data)
-            else:
-                for batch in calib_data:
-                    session(batch)
-
-        # -- Analysis --
-        print(" analyze", end="", flush=True)
-        observers = [QSNRObserver(), MSEObserver(), HistogramObserver(), DistributionObserver()]
-        with session.analyze(observers=observers) as ctx:
-            if eval_fn is not None:
-                eval_fn(session, calib_data)
-            else:
-                for batch in calib_data:
-                    session(batch)
-        report = ctx.report()
-
-        # -- Evaluation --
-        print(" evaluate", end="", flush=True)
-        if eval_fn is not None:
-            fp32_metrics = eval_fn(session.fp32_model, eval_loader)
-            quant_metrics = eval_fn(session, eval_loader)
-            delta = {k: quant_metrics.get(k, 0.0) - fp32_metrics.get(k, 0.0)
-                     for k in fp32_metrics}
-        else:
-            result = session.compare(eval_loader)
-            fp32_metrics = result["fp32"]
-            quant_metrics = result["quant"]
-            delta = result["delta"]
-
-        # Cost estimation
-        cost = session.estimate_cost()
-        cost_fp32 = session.estimate_cost(fp32=True)
-
-        results[name] = {
-            "accuracy": quant_metrics,
-            "fp32_accuracy": fp32_metrics,
-            "delta": delta,
-            "report": report,
-            "qsnr_per_layer": extract_metric_per_layer(report, "qsnr_db"),
-            "mse_per_layer": extract_metric_per_layer(report, "mse"),
-            "cost": cost,
-            "cost_fp32": cost_fp32,
-        }
+        # Delegate to run_experiment with pre-configured session
+        results[name] = run_experiment(
+            cfg, fp32_model, calib_data, eval_loader,
+            eval_fn=eval_fn, session=session,
+        )
 
         vt = time.time() - vt0
         acc = results[name].get("accuracy", {})
@@ -880,22 +843,22 @@ def generate_table_6(all_results: dict, output_dir: str) -> str:
     ranking = sorted(
         (
             (layer,
-             sum(m["mse"]) / max(len(m["mse"]), 1) if m["mse"] else 0.0,
-             sum(m["qsnr"]) / max(len(m["qsnr"]), 1) if m["qsnr"] else 0.0)
+             max(m["mse"]) if m["mse"] else 0.0,
+             min(m["qsnr"]) if m["qsnr"] else 0.0)
             for layer, m in layer_metrics.items()
         ),
         key=lambda x: x[1], reverse=True,
     )[:10]
 
     lines = [f"\n{'='*80}", "Table 6: Top-10 Most Sensitive Layers", "=" * 80,
-             f"{'#':<4} {'Layer':<28} {'Avg MSE':<18} {'Avg QSNR (dB)':<15}", "-" * 80]
+             f"{'#':<4} {'Layer':<28} {'Max MSE':<18} {'Min QSNR (dB)':<15}", "-" * 80]
     for i, (layer, mse, qsnr) in enumerate(ranking, 1):
         lines.append(f"{i:<4} {layer:<28} {mse:<18.6e} {qsnr:<15.2f}")
     result = "\n".join(lines)
 
     os.makedirs(f"{output_dir}/tables", exist_ok=True)
     with open(f"{output_dir}/tables/table6_sensitivity.csv", "w") as f:
-        f.write("Rank,Layer,Avg_MSE,Avg_QSNR_dB\n")
+        f.write("Rank,Layer,Max_MSE,Min_QSNR_dB\n")
         for i, (layer, mse, qsnr) in enumerate(ranking, 1):
             f.write(f"{i},{layer},{mse:.6e},{qsnr:.4f}\n")
     return result
