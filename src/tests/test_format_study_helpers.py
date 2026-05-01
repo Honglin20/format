@@ -25,6 +25,8 @@ class TestMakeSmoothQuantTransforms:
         assert isinstance(result, dict)
         assert "fc1" in result
         assert "fc2" in result
+        assert isinstance(result["fc1"], SmoothQuantTransform)
+        assert isinstance(result["fc2"], SmoothQuantTransform)
 
     def test_none_model_returns_empty(self):
         result = _make_smoothquant_transforms(None, [torch.randn(2, 8)])
@@ -36,6 +38,13 @@ class TestMakeSmoothQuantTransforms:
         calib = [torch.randn(2, 8)]
         result = _make_smoothquant_transforms(model, calib)
         assert result == {}
+
+
+    def test_empty_calib_data_raises(self):
+        """Empty calib_data list should raise ValueError."""
+        model = ToyMLP(hidden_size=16, intermediate_size=32)
+        with pytest.raises(ValueError, match="calib_data must contain at least one batch"):
+            _make_smoothquant_transforms(model, [])
 
 
 class TestFuseSmoothQuantWeights:
@@ -105,3 +114,16 @@ class TestBuildPerLayerOptimalCfg:
         assert cfg.weight is not None
         assert cfg.input is None
         assert cfg.output is None
+
+    def test_hadamard_selection_path(self):
+        variant_results = {
+            "None": {"qsnr_per_layer": {"fc1": 10.0}},
+            "Hadamard": {"qsnr_per_layer": {"fc1": 15.0}},
+        }
+        sq_transforms = {}
+        gran = GranularitySpec.per_tensor()
+        result = _build_per_layer_optimal_cfg(
+            variant_results, sq_transforms, "int8", gran, make_op_cfg, weight_only=False,
+        )
+        assert "fc1" in result
+        assert result["fc1"].input is not None  # Hadamard applies to input

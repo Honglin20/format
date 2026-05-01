@@ -125,7 +125,7 @@ def _make_smoothquant_transforms(
     activation and weight, then creates a per-layer SmoothQuantTransform
     with correctly-shaped per-channel scales.
 
-    This function is PURE — it does NOT mutate ``fp32_model``.  Weight fusion
+    This function does NOT mutate ``fp32_model`` weights.  Weight fusion
     (``W = W * s``) must be performed separately via
     :func:`_fuse_smoothquant_weights`.
 
@@ -139,6 +139,8 @@ def _make_smoothquant_transforms(
     """
     if fp32_model is None:
         return {}
+    if not calib_data:
+        raise ValueError("calib_data must contain at least one batch")
 
     activations: Dict[str, torch.Tensor] = {}
     weights: Dict[str, torch.Tensor] = {}
@@ -162,10 +164,11 @@ def _make_smoothquant_transforms(
 
     with torch.no_grad():
         fp32_model.eval()
-        fp32_model(calib_data[0])
-
-    for h in hooks:
-        h.remove()
+        try:
+            fp32_model(calib_data[0])
+        finally:
+            for h in hooks:
+                h.remove()
 
     per_layer: Dict[str, TransformBase] = {}
 
@@ -266,7 +269,10 @@ def _build_per_layer_optimal_cfg(
     per_layer_cfg = {}
     for layer, tx_name in layer_best_tx.items():
         if tx_name == "SmoothQuant":
-            sq_tx = sq_transforms.get(layer, IdentityTransform())
+            sq_tx = sq_transforms.get(layer)
+            if sq_tx is None:
+                print(f"  Warning: {layer} selected SmoothQuant but no transform found, falling back to Identity")
+                sq_tx = IdentityTransform()
             per_layer_cfg[layer] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
         else:
             per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name])
