@@ -394,7 +394,7 @@ def run_experiment(
 # ---------------------------------------------------------------------------
 # Config-driven part runners
 # ---------------------------------------------------------------------------
-from src.pipeline.config import resolve_config as _resolve_config
+from src.pipeline.config import resolve_config as _resolve_config, _resolve_granularity
 
 
 def _now() -> str:
@@ -690,17 +690,6 @@ def _run_hierarchical_part(part_cfg: dict, fp32_model, calib_data, eval_loader, 
     results["FP32 (baseline)"] = {"accuracy": results[baseline_key]["fp32_accuracy"]} if baseline_key else {}
     print(f"  ---- {desc} complete: {total}/{total} finished, total {elapsed:.1f}s ----")
     return results
-
-
-def _resolve_granularity(v: dict) -> GranularitySpec:
-    """Convert a variant dict's granularity fields into a GranularitySpec."""
-    gran_type = v.get("granularity", "per_tensor")
-    if gran_type == "per_block":
-        return GranularitySpec.per_block(size=v.get("block_size", 32), axis=v.get("axis", -1))
-    elif gran_type == "per_channel":
-        return GranularitySpec.per_channel(axis=v.get("axis", -1))
-    else:
-        return GranularitySpec.per_tensor()
 
 
 # ---------------------------------------------------------------------------
