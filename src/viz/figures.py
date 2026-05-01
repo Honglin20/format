@@ -230,9 +230,8 @@ def histogram_overlay(
 
     Args:
         all_results: Nested dict of ``{part: {config: {"report": ...}}}``.
-            Reports are expected to have a ``_raw`` attribute (private
-            Report API; if Report's internal format changes this function
-            must be updated) containing histogram metrics.
+            Reports are expected to have an ``iter_slices`` method
+            yielding ``(layer, role, stage, slice_key, metrics)`` tuples.
         output_dir: Output root directory.
 
     Returns:
@@ -247,24 +246,16 @@ def histogram_overlay(
             if not isinstance(config_data, dict) or "report" not in config_data:
                 continue
             report = config_data["report"]
-            if not hasattr(report, "_raw"):
+            if not hasattr(report, "iter_slices"):
                 continue
-            for layer, roles in report._raw.items():
+            for layer, role, stage, slice_key, metrics in report.iter_slices():
                 if layer in layer_hists:
                     continue
-                for role, stages in roles.items():
-                    for stage, slices in stages.items():
-                        for metrics in slices.values():
-                            if "fp32_hist" in metrics and "quant_hist" in metrics:
-                                layer_hists[layer] = {
-                                    k: _to_numpy(metrics.get(k))
-                                    for k in ("fp32_hist", "quant_hist", "err_hist")
-                                }
-                                break
-                        if layer in layer_hists:
-                            break
-                    if layer in layer_hists:
-                        break
+                if "fp32_hist" in metrics and "quant_hist" in metrics:
+                    layer_hists[layer] = {
+                        k: _to_numpy(metrics.get(k))
+                        for k in ("fp32_hist", "quant_hist", "err_hist")
+                    }
 
     if not layer_hists:
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -563,10 +554,8 @@ def error_vs_distribution(
 
     Args:
         all_results: Nested dict ``{part: {config: {"report": ...}}}``.
-            Reports are expected to have a ``_raw`` attribute (private
-            Report API; if Report's internal format changes this function
-            must be updated) with per-slice metrics (``qsnr_db``,
-            ``dynamic_range_bits``, etc.).
+            Reports are expected to have an ``iter_slices`` method
+            yielding ``(layer, role, stage, slice_key, metrics)`` tuples.
         output_dir: Output root directory.
 
     Returns:
@@ -581,24 +570,21 @@ def error_vs_distribution(
             if not isinstance(config_data, dict) or "report" not in config_data:
                 continue
             report = config_data["report"]
-            if not hasattr(report, "_raw"):
+            if not hasattr(report, "iter_slices"):
                 continue
-            for layer, roles in report._raw.items():
-                for role, stages in roles.items():
-                    for stage, slices in stages.items():
-                        for metrics in slices.values():
-                            if "qsnr_db" not in metrics or "dynamic_range_bits" not in metrics:
-                                continue
-                            data_points.append({
-                                "qsnr": metrics["qsnr_db"],
-                                "dynamic_range": metrics["dynamic_range_bits"],
-                                "skewness": metrics.get("skewness", 0),
-                                "kurtosis": metrics.get("kurtosis", 0),
-                                "sparse_ratio": metrics.get("sparse_ratio", 0),
-                                "layer": layer,
-                                "role": role,
-                                "mse": metrics.get("mse", 1e-10),
-                            })
+            for layer, role, stage, slice_key, metrics in report.iter_slices():
+                if "qsnr_db" not in metrics or "dynamic_range_bits" not in metrics:
+                    continue
+                data_points.append({
+                    "qsnr": metrics["qsnr_db"],
+                    "dynamic_range": metrics["dynamic_range_bits"],
+                    "skewness": metrics.get("skewness", 0),
+                    "kurtosis": metrics.get("kurtosis", 0),
+                    "sparse_ratio": metrics.get("sparse_ratio", 0),
+                    "layer": layer,
+                    "role": role,
+                    "mse": metrics.get("mse", 1e-10),
+                })
 
     if not data_points:
         fig, ax = plt.subplots(figsize=(10, 6))
