@@ -814,6 +814,9 @@ def run_format_study(
 
         all_results[part_key] = runner(part_cfg, fp32_model, calib_data, eval_loader, eval_fn=eval_fn)
 
+        # Incremental save — protect against crashes mid-study
+        _save_results_json(all_results, output_dir)
+
         # Generate tables for this part
         table_name = part_cfg.get("table")
         if table_name and table_name in _TABLE_GENERATORS:
@@ -833,6 +836,7 @@ def run_format_study(
         all_results["part_d_conv"] = _run_transform_part(
             part_d_cfg, conv_model, calib_data, eval_loader, eval_fn=eval_fn,
         )
+        _save_results_json(all_results, output_dir)  # incremental save
         try:
             print(generate_table_4(all_results["part_d_conv"], output_dir, suffix="_conv"))
         except Exception as e:
@@ -871,6 +875,14 @@ def plot_from_results(results_path: str, output_dir: Optional[str] = None):
     ]:
         if key in all_results:
             print(accuracy_table(all_results[key], title=title, output_dir=output_dir, filename=filename))
+    if "block_sweep" in all_results:
+        print(accuracy_table(all_results["block_sweep"],
+              title="Block Size Sweep Results", output_dir=output_dir,
+              filename="block_sweep.csv"))
+    if "part_hierarchical" in all_results:
+        print(accuracy_table(all_results["part_hierarchical"],
+              title="Hierarchical Pre-Scale Results", output_dir=output_dir,
+              filename="hierarchical.csv"))
     if "part_c" in all_results:
         print(generate_table_3(all_results["part_c"], output_dir))
     if "part_d" in all_results:
@@ -909,16 +921,17 @@ def _generate_figures(all_results: dict, output_dir: str):
 def _save_results_json(all_results: dict, output_dir: str):
     serializable: Dict[str, dict] = {}
     for part_name, part_data in all_results.items():
-        if not part_name.startswith("part_") or not isinstance(part_data, dict):
+        if not isinstance(part_data, dict):
             continue
         serializable[part_name] = {}
         for cfg_name, cfg_data in part_data.items():
-            entry: Dict = {}
             if isinstance(cfg_data, dict):
+                entry: Dict = {}
                 for key in ("accuracy", "qsnr_per_layer", "mse_per_layer"):
                     if key in cfg_data:
                         entry[key] = cfg_data[key]
-            serializable[part_name][cfg_name] = entry
+                if entry:
+                    serializable[part_name][cfg_name] = entry
     with open(f"{output_dir}/results.json", "w") as f:
         json.dump(serializable, f, indent=2, default=str)
     print("  results.json: saved")
