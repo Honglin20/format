@@ -788,6 +788,143 @@ def layer_type_qsnr(
 
 
 # ---------------------------------------------------------------------------
+# Figure 12 — Block size sweep line chart
+# ---------------------------------------------------------------------------
+
+def block_sweep_line_chart(
+    block_sweep: dict,
+    *,
+    output_dir: str,
+) -> plt.Figure:
+    """Block size vs per-layer average QSNR line chart.
+
+    One line per block-size configuration, showing how each layer's QSNR
+    changes with block size. Useful for understanding the sensitivity of
+    different layers to block granularity.
+
+    Args:
+        block_sweep: Dict mapping config name (e.g. ``"int8-blk32"``) to
+            result dict with ``qsnr_per_layer``.
+        output_dir: Output root directory.
+
+    Returns:
+        matplotlib Figure.
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Collect shared layers and config data
+    entries = []
+    for name, data in block_sweep.items():
+        if "baseline" in name.lower() or "qsnr_per_layer" not in data:
+            continue
+        entries.append((name, data["qsnr_per_layer"]))
+
+    if not entries:
+        ax.text(0.5, 0.5, "No block sweep data available",
+                ha="center", va="center", fontsize=12, transform=ax.transAxes)
+        ax.set_title("Block Size vs QSNR")
+        save_figure(fig, output_dir, "block_sweep_line")
+        return fig
+
+    # Compute per-layer avg QSNR for each block size
+    sizes, avg_qsnr = [], []
+    for name, qsnr_dict in entries:
+        try:
+            bs = int(name.split("blk")[-1])
+        except (ValueError, IndexError):
+            bs = 0
+        avg = sum(qsnr_dict.values()) / max(len(qsnr_dict), 1)
+        sizes.append(bs)
+        avg_qsnr.append(avg)
+
+    # Sort by block size
+    sorted_pairs = sorted(zip(sizes, avg_qsnr, [e[0] for e in entries]))
+    sizes = [p[0] for p in sorted_pairs]
+    avg_qsnr = [p[1] for p in sorted_pairs]
+
+    ax.plot(sizes, avg_qsnr, marker="o", linewidth=2, color=FALLBACK_CYCLE[0])
+    ax.set_xlabel("Block Size")
+    ax.set_ylabel("Average QSNR (dB)")
+    ax.set_title("Block Size vs Average QSNR")
+    ax.grid(True, alpha=0.3)
+    ax.set_xticks(sizes)
+
+    save_figure(fig, output_dir, "block_sweep_line")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 13 — Hierarchical Pre-Scale delta bar chart
+# ---------------------------------------------------------------------------
+
+def hierarchical_delta_bar(
+    hierarchical: dict,
+    *,
+    output_dir: str,
+    colors: dict | None = None,
+) -> plt.Figure:
+    """Pre-scale (hierarchical) vs baseline per-layer QSNR delta.
+
+    Shows the benefit of two-level quantization (global PoT pre-scale +
+    MX per-block) relative to plain MX quantization at the same bit-width.
+
+    Args:
+        hierarchical: Dict mapping config name (e.g. ``"MXINT-8-HIER"``)
+            to result dict with ``qsnr_per_layer``. A ``"FP32 (baseline)"``
+            entry is skipped.
+        output_dir: Output root directory.
+        colors: Optional colour mapping for bars.
+
+    Returns:
+        matplotlib Figure.
+    """
+    color_cycle = colors if colors else {}
+    entries = [
+        (name, data)
+        for name, data in hierarchical.items()
+        if "baseline" not in name.lower() and "qsnr_per_layer" in data
+    ]
+
+    if not entries:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, "No hierarchical study data available",
+                ha="center", va="center", fontsize=12, transform=ax.transAxes)
+        ax.set_title("Hierarchical Pre-Scale — Per-Layer QSNR")
+        save_figure(fig, output_dir, "hierarchical_delta")
+        return fig
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Show avg QSNR per variant as grouped bars
+    x_positions = range(len(entries))
+    values = [
+        sum(data["qsnr_per_layer"].values()) / max(len(data["qsnr_per_layer"]), 1)
+        for _, data in entries
+    ]
+    names = [name for name, _ in entries]
+    bar_colors = [
+        color_cycle.get(name, FALLBACK_CYCLE[i % len(FALLBACK_CYCLE)])
+        for i, name in enumerate(names)
+    ]
+
+    bars = ax.bar(x_positions, values, color=bar_colors, alpha=0.7, edgecolor="white")
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(names, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Average QSNR (dB)")
+    ax.set_title("Hierarchical Pre-Scale — Average Per-Layer QSNR")
+
+    # Add value labels on top of bars
+    for bar, val in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+                f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    save_figure(fig, output_dir, "hierarchical_delta")
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

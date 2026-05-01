@@ -53,6 +53,8 @@ from src.viz.figures import (
     transform_delta,
     error_vs_distribution,
     layer_type_qsnr,
+    block_sweep_line_chart,
+    hierarchical_delta_bar,
     _compute_best_transform_per_layer,
 )
 from src.viz.tables import accuracy_table
@@ -1040,6 +1042,8 @@ def _generate_figures(all_results: dict, output_dir: str):
         (lambda d, od: transform_delta(d, colors=TRANSFORM_COLORS, output_dir=od),                   "part_d", "fig9"),
         (lambda d, od: error_vs_distribution(d, output_dir=od),                                      None,     "fig10"),
         (lambda d, od: layer_type_qsnr(d, output_dir=od),                                            None,     "fig11"),
+        (lambda d, od: block_sweep_line_chart(d, output_dir=od),                                     "block_sweep", "fig12"),
+        (lambda d, od: hierarchical_delta_bar(d, output_dir=od, colors=FORMAT_COLORS),               "part_hierarchical", "fig13"),
     ]
     for fn, part_key, name in plot_tasks:
         if part_key is not None and part_key not in all_results:

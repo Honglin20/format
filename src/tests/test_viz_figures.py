@@ -13,6 +13,8 @@ from src.viz.figures import (
     transform_delta,
     error_vs_distribution,
     layer_type_qsnr,
+    block_sweep_line_chart,
+    hierarchical_delta_bar,
     _compute_best_transform_per_layer,
     _get_acc_val,
 )
@@ -238,4 +240,57 @@ class TestLayerTypeQSNR:
     def test_renders_no_data_message(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fig = layer_type_qsnr({}, output_dir=tmpdir)
+            assert fig is not None
+
+
+class TestBlockSweepLineChart:
+    def test_renders_without_error(self):
+        block_sweep = {
+            "int8-blk16": {"qsnr_per_layer": {"fc1": 20.0, "fc2": 18.0}},
+            "int8-blk32": {"qsnr_per_layer": {"fc1": 22.0, "fc2": 19.0}},
+            "int8-blk64": {"qsnr_per_layer": {"fc1": 23.0, "fc2": 20.0}},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = block_sweep_line_chart(block_sweep, output_dir=tmpdir)
+            assert fig is not None
+            assert len(fig.axes) > 0
+
+    def test_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = block_sweep_line_chart({}, output_dir=tmpdir)
+            assert fig is not None
+
+    def test_skips_baseline(self):
+        block_sweep = {
+            "FP32 (baseline)": {"qsnr_per_layer": {"fc1": 30.0}},
+            "int8-blk32": {"qsnr_per_layer": {"fc1": 20.0}},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = block_sweep_line_chart(block_sweep, output_dir=tmpdir)
+            assert fig is not None
+
+
+class TestHierarchicalDeltaBar:
+    def test_renders_without_error(self):
+        hierarchical = {
+            "MXINT-8-HIER": {"qsnr_per_layer": {"fc1": 25.0, "fc2": 23.0}},
+            "MXFP-8-HIER": {"qsnr_per_layer": {"fc1": 24.0, "fc2": 22.0}},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = hierarchical_delta_bar(hierarchical, output_dir=tmpdir)
+            assert fig is not None
+            assert len(fig.axes) > 0
+
+    def test_skips_baseline(self):
+        hierarchical = {
+            "FP32 (baseline)": {"qsnr_per_layer": {"fc1": 30.0}},
+            "MXINT-8-HIER": {"qsnr_per_layer": {"fc1": 25.0}},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = hierarchical_delta_bar(hierarchical, output_dir=tmpdir)
+            assert fig is not None
+
+    def test_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = hierarchical_delta_bar({}, output_dir=tmpdir)
             assert fig is not None
