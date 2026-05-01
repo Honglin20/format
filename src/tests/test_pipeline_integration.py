@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -112,3 +113,88 @@ def test_save_results_json_includes_non_part_keys():
             saved = json.load(f)
         assert "custom_experiment" in saved
         assert "block_sweep" in saved
+
+
+def test_incremental_save_after_each_part():
+    """_save_results_json should be called per-part during run_format_study."""
+    from src.pipeline.format_study import run_format_study, _save_results_json
+    from pipeline._model import ToyMLP
+    from torch.utils.data import DataLoader, TensorDataset
+
+    mini_config = {
+        "part_a": {
+            "type": "simple",
+            "description": "mini 8-bit",
+            "table": "table1",
+            "variants": [{"name": "INT8-PT", "format": "int8", "granularity": "per_tensor"}],
+        },
+    }
+
+    def build_model():
+        model = ToyMLP(hidden_size=16, intermediate_size=32)
+        model.head = nn.Linear(16, 10)
+        return model
+
+    def make_calib():
+        return [torch.randn(4, 16)]
+
+    def make_eval():
+        x = torch.randn(16, 16)
+        y = torch.randint(0, 10, (16,))
+        return DataLoader(TensorDataset(x, y), batch_size=4)
+
+    def eval_fn(m, data):
+        """Handles both calibration (list of tensors) and eval (DataLoader)."""
+        with torch.no_grad():
+            m.eval()
+            if isinstance(data, (list, tuple)) and isinstance(data[0], torch.Tensor):
+                # Calibration: list of batch tensors — just forward pass
+                for batch in data:
+                    if isinstance(batch, torch.Tensor) and batch.dim() >= 2:
+                        m(batch)
+                return {"accuracy": 0.0}
+            # Evaluation: DataLoader yielding (input, label)
+            correct, total = 0, 0
+            for batch in data:
+                if isinstance(batch, (list, tuple)) and len(batch) == 2:
+                    xb, yb = batch
+                else:
+                    xb = batch
+                    yb = torch.zeros(1)
+                out = m(xb)
+                if out.size(1) >= 2:
+                    correct += (out.argmax(1) == yb).sum().item()
+                    total += yb.size(0)
+            return {"accuracy": correct / total if total > 0 else 0.0}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with patch("src.pipeline.format_study._save_results_json",
+                   wraps=_save_results_json) as mock_save:
+            run_format_study(
+                build_model, make_calib, make_eval, eval_fn,
+                output_dir=tmpdir, config=mini_config,
+            )
+            # Called at least twice: once after the part, once at the end
+            assert mock_save.call_count >= 2, \
+                f"Expected >=2 saves, got {mock_save.call_count}"
+
+
+def test_plot_from_results_handles_block_sweep_and_hierarchical():
+    """plot_from_results should generate tables for block_sweep and part_hierarchical."""
+    from src.pipeline.format_study import plot_from_results
+
+    results = {
+        "block_sweep": {"int8-blk32": {"accuracy": {"accuracy": 0.85},
+                         "qsnr_per_layer": {}, "mse_per_layer": {}}},
+        "part_hierarchical": {"MXINT-8-HIER": {"accuracy": {"accuracy": 0.88},
+                                "qsnr_per_layer": {}, "mse_per_layer": {}}},
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results_path = os.path.join(tmpdir, "results.json")
+        with open(results_path, "w") as f:
+            json.dump(results, f)
+        plot_from_results(results_path, output_dir=tmpdir)
+        assert os.path.exists(os.path.join(tmpdir, "tables", "block_sweep.csv"))
+        assert os.path.exists(os.path.join(tmpdir, "tables", "hierarchical.csv"))
+        assert os.path.exists(os.path.join(tmpdir, "figures"))
