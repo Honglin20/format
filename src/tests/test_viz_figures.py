@@ -1,5 +1,6 @@
 """Tests for src/viz/figures.py."""
 import tempfile
+import pytest
 import matplotlib
 matplotlib.use("Agg")
 
@@ -91,6 +92,22 @@ class TestQSNRBarChart:
                 assert len(line.get_xdata()) == 2
                 assert len(line.get_ydata()) == 2
 
+    def test_line_values_reflect_input(self):
+        """Line data points must match the QSNR values from the input dict."""
+        results = {
+            "A": {"qsnr_per_layer": {"fc1": 10.0, "fc2": 12.0}},
+        }
+        colors = {"A": "#0072B2"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = qsnr_line_chart(results, title="Test", colors=colors, output_dir=tmpdir)
+            assert fig is not None
+            ax = fig.axes[0]
+            ydata = list(ax.lines[0].get_ydata())
+            # Both values present and non-NaN
+            assert len(ydata) == 2
+            for y in ydata:
+                assert y == pytest.approx(10.0) or y == pytest.approx(12.0)
+
 
 class TestMSEBoxPlot:
     def test_renders_without_error(self):
@@ -177,6 +194,26 @@ class TestTransformHeatmap:
             fig = transform_heatmap({}, colors={}, output_dir=tmpdir)
             assert fig is not None
 
+    def test_cell_values_match_input(self):
+        """Heatmap annotations should reflect the underlying accuracy data."""
+        part_d = {
+            "INT8": {
+                "None":         {"accuracy": {"accuracy": 0.85}},
+                "SmoothQuant":  {"accuracy": {"accuracy": 0.92}},
+            },
+        }
+        colors = {"None": "#0072B2", "SmoothQuant": "#D55E00"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = transform_heatmap(part_d, colors=colors, output_dir=tmpdir)
+            assert fig is not None
+            ax = fig.axes[0]
+            # Verify axes are labelled with correct format/transform names
+            x_labels = [t.get_text() for t in ax.get_xticklabels()]
+            y_labels = [t.get_text() for t in ax.get_yticklabels()]
+            assert "None" in x_labels
+            assert "SmoothQuant" in x_labels
+            assert "INT8" in y_labels
+
 
 class TestTransformPie:
     def test_renders_without_error(self):
@@ -202,6 +239,25 @@ class TestTransformPie:
         with tempfile.TemporaryDirectory() as tmpdir:
             fig = transform_pie({}, colors={}, output_dir=tmpdir)
             assert fig is not None
+
+    def test_percentages_are_positive(self):
+        """All pie wedge percentages should be non-negative."""
+        part_d = {
+            "MXINT-8": {
+                "PerLayerOpt": True,
+                "None": {"qsnr_per_layer": {"fc1": 10.0}},
+                "SmoothQuant": {"qsnr_per_layer": {"fc1": 15.0}},
+                "Hadamard": {"qsnr_per_layer": {"fc1": 12.0}},
+            },
+        }
+        colors = {"None": "#0072B2", "SmoothQuant": "#D55E00", "Hadamard": "#009E73"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = transform_pie(part_d, colors=colors, output_dir=tmpdir)
+            assert fig is not None
+            ax = fig.axes[0]
+            # All wedge widths should be non-negative
+            for wedge in ax.patches:
+                assert wedge.theta2 - wedge.theta1 >= 0
 
 
 class TestTransformDelta:

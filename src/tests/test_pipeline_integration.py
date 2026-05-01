@@ -198,3 +198,34 @@ def test_plot_from_results_handles_block_sweep_and_hierarchical():
         assert os.path.exists(os.path.join(tmpdir, "tables", "block_sweep.csv"))
         assert os.path.exists(os.path.join(tmpdir, "tables", "hierarchical.csv"))
         assert os.path.exists(os.path.join(tmpdir, "figures"))
+
+
+def test_plot_from_results_regenerates_tables_and_figures():
+    """plot_from_results should regenerate all tables and figures from a saved JSON."""
+    from src.pipeline.format_study import plot_from_results
+
+    results = {
+        "part_a": {"INT8-PT": {"accuracy": {"accuracy": 0.92},
+                    "qsnr_per_layer": {}, "mse_per_layer": {}}},
+        "part_b": {"INT4-PT": {"accuracy": {"accuracy": 0.88},
+                    "qsnr_per_layer": {}, "mse_per_layer": {}}},
+        "part_c": {"INT8-PC-FP32": {"accuracy": {"accuracy": 0.90},
+                    "qsnr_per_layer": {}, "mse_per_layer": {}},
+                   "FP32 (baseline)": {"accuracy": 0.95}},
+        "block_sweep": {"int8-blk32": {"accuracy": {"accuracy": 0.85},
+                        "qsnr_per_layer": {}, "mse_per_layer": {}}},
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results_path = os.path.join(tmpdir, "results.json")
+        with open(results_path, "w") as f:
+            json.dump(results, f)
+        plot_from_results(results_path, output_dir=tmpdir)
+        # All table types regenerated
+        assert os.path.exists(os.path.join(tmpdir, "tables", "table1_8bit.csv"))
+        assert os.path.exists(os.path.join(tmpdir, "tables", "table2_4bit.csv"))
+        assert os.path.exists(os.path.join(tmpdir, "tables", "block_sweep.csv"))
+        assert os.path.exists(os.path.join(tmpdir, "figures"))
+        # Figures dir populated (part_a and part_c triggers figure generation)
+        figures = os.listdir(os.path.join(tmpdir, "figures"))
+        assert len(figures) >= 1  # at least one figure produced
