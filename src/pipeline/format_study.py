@@ -991,6 +991,9 @@ def run_format_study(
             except Exception as e:
                 print(f"  Warning: table {table_name} generation failed: {e}")
 
+        # Incremental save after part loop
+        _save_results_json(all_results, output_dir)
+
     # ---- Optional Part D on Conv2d model ----
     part_d_cfg = config.get("part_d")
     if part_d_cfg and not skip_parts.get("part_d_conv") and build_conv_model is not None:
@@ -1006,6 +1009,9 @@ def run_format_study(
             print(generate_table_4(all_results["part_d_conv"], output_dir, suffix="_conv"))
         except Exception as e:
             print(f"  Warning: table4_conv generation failed: {e}")
+
+        # Incremental save after Part D Conv
+        _save_results_json(all_results, output_dir)
 
     # ---- Cross-part table (Table 6: sensitivity) ----
     print(generate_table_6(all_results, output_dir))
@@ -1045,6 +1051,14 @@ def plot_from_results(results_path: str, output_dir: Optional[str] = None):
     if "part_d" in all_results:
         print(generate_table_4(all_results["part_d"], output_dir))
         print(generate_table_5(all_results["part_d"], output_dir))
+    if "block_sweep" in all_results:
+        print(accuracy_table(all_results["block_sweep"],
+               title="Block Size Sweep Results", output_dir=output_dir,
+               filename="block_sweep.csv"))
+    if "part_hierarchical" in all_results:
+        print(accuracy_table(all_results["part_hierarchical"],
+               title="Hierarchical Pre-Scale Results", output_dir=output_dir,
+               filename="hierarchical.csv"))
     print(generate_table_6(all_results, output_dir))
     _generate_figures(all_results, output_dir)
     print(f"\nRegeneration complete. Output in {output_dir}/")
@@ -1078,7 +1092,7 @@ def _generate_figures(all_results: dict, output_dir: str):
 def _save_results_json(all_results: dict, output_dir: str):
     serializable: Dict[str, dict] = {}
     for part_name, part_data in all_results.items():
-        if not part_name.startswith("part_") or not isinstance(part_data, dict):
+        if not isinstance(part_data, dict):
             continue
         serializable[part_name] = {}
         for cfg_name, cfg_data in part_data.items():

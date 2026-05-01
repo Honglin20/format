@@ -1,4 +1,8 @@
 """Integration test: verify pipeline + viz produce valid output."""
+import json
+import os
+import tempfile
+
 import torch
 import torch.nn as nn
 from src.pipeline.config import resolve_config
@@ -79,3 +83,32 @@ class TestPipelineIntegration:
                         for forbidden_mod in forbidden:
                             assert not module.startswith(forbidden_mod), \
                                 f"{fname} imports {module} (forbidden: {forbidden_mod})"
+
+
+def test_save_results_json_includes_block_sweep():
+    """block_sweep key (not starting with 'part_') must be saved to results.json."""
+    from src.pipeline.format_study import _save_results_json
+
+    results = {"block_sweep": {"int8-blk32": {"accuracy": 0.85}}}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _save_results_json(results, tmpdir)
+        with open(os.path.join(tmpdir, "results.json")) as f:
+            saved = json.load(f)
+        assert "block_sweep" in saved
+        assert saved["block_sweep"]["int8-blk32"]["accuracy"] == 0.85
+
+
+def test_save_results_json_includes_non_part_keys():
+    """Any dict key should be saved, not just 'part_*' keys."""
+    from src.pipeline.format_study import _save_results_json
+
+    results = {
+        "custom_experiment": {"variant_a": {"accuracy": 0.92}},
+        "block_sweep": {"int8-blk32": {"accuracy": 0.85}},
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _save_results_json(results, tmpdir)
+        with open(os.path.join(tmpdir, "results.json")) as f:
+            saved = json.load(f)
+        assert "custom_experiment" in saved
+        assert "block_sweep" in saved
