@@ -53,6 +53,8 @@ from src.viz.figures import (
     transform_delta,
     error_vs_distribution,
     layer_type_qsnr,
+    block_sweep_line_chart,
+    hierarchical_delta_bar,
     _compute_best_transform_per_layer,
 )
 from src.viz.tables import accuracy_table
@@ -112,6 +114,175 @@ def _make_sq_op_cfg(
 
 
 # ---------------------------------------------------------------------------
+# Transform part helpers
+# ---------------------------------------------------------------------------
+
+def _make_smoothquant_transforms(
+    fp32_model: nn.Module,
+    calib_data: List[torch.Tensor],
+) -> Dict[str, TransformBase]:
+    """Create per-layer SmoothQuantTransform dict from a single calibration pass.
+
+    Runs one forward pass through the FP32 model to capture each layer's
+    activation and weight, then creates a per-layer SmoothQuantTransform
+    with correctly-shaped per-channel scales.
+
+    This function does NOT mutate ``fp32_model`` weights.  Weight fusion
+    (``W = W * s``) must be performed separately via
+    :func:`_fuse_smoothquant_weights`.
+
+    Args:
+        fp32_model: FP32 reference model (not mutated).
+        calib_data: List of calibration batches (first batch used).
+
+    Returns:
+        Dict mapping layer name to ``SmoothQuantTransform`` (or
+        ``IdentityTransform`` on failure).
+    """
+    if fp32_model is None:
+        return {}
+    if not calib_data:
+        raise ValueError("calib_data must contain at least one batch")
+
+    activations: Dict[str, torch.Tensor] = {}
+    weights: Dict[str, torch.Tensor] = {}
+    channel_axes: Dict[str, int] = {}
+    hooks = []
+
+    def _hook(name):
+        def fn(module, _input, _output):
+            activations[name] = _input[0].detach()
+            if hasattr(module, "weight") and module.weight is not None:
+                weights[name] = module.weight.data.clone()
+        return fn
+
+    for name, module in fp32_model.named_modules():
+        if isinstance(module, nn.Linear):
+            channel_axes[name] = -1  # activation channel = last dim
+            hooks.append(module.register_forward_hook(_hook(name)))
+        elif isinstance(module, nn.Conv2d):
+            channel_axes[name] = 1   # activation channel = dim 1 (NCHW)
+            hooks.append(module.register_forward_hook(_hook(name)))
+
+    with torch.no_grad():
+        fp32_model.eval()
+        try:
+            fp32_model(calib_data[0])
+        finally:
+            for h in hooks:
+                h.remove()
+
+    per_layer: Dict[str, TransformBase] = {}
+
+    for name in activations:
+        if name not in weights:
+            continue
+        try:
+            act_axis = channel_axes.get(name, -1)
+            sq_t = SmoothQuantTransform.from_calibration(
+                X_act=activations[name], W=weights[name], alpha=0.5,
+                act_channel_axis=act_axis,
+            )
+            per_layer[name] = sq_t
+        except (ValueError, RuntimeError) as e:
+            print(f"  Warning: SmoothQuant for {name}: {e}")
+            per_layer[name] = IdentityTransform()
+
+    return per_layer
+
+
+def _fuse_smoothquant_weights(
+    fp32_model: nn.Module,
+    sq_transforms: Dict[str, TransformBase],
+    *,
+    layer_names: Optional[set] = None,
+) -> nn.Module:
+    """Return a deep copy of ``fp32_model`` with SmoothQuant weight fusion applied.
+
+    For each layer in ``sq_transforms`` (filtered by ``layer_names`` if given),
+    applies ``W = W * s`` — the one-time calibration-time weight compensation
+    from SmoothQuant (Xiao et al. 2023, eq. 3).  The original ``fp32_model``
+    is NOT mutated.
+
+    Args:
+        fp32_model: Reference FP32 model (not mutated).
+        sq_transforms: Per-layer SmoothQuantTransform dict.
+        layer_names: If given, only fuse weights for layers in this set.
+                     ``None`` fuses all layers present in ``sq_transforms``.
+
+    Returns:
+        Deep copy of ``fp32_model`` with fused weights for the selected layers.
+    """
+    fused_model = copy.deepcopy(fp32_model)
+    module_map = dict(fused_model.named_modules())
+
+    for name, sq_t in sq_transforms.items():
+        if layer_names is not None and name not in layer_names:
+            continue
+        if not isinstance(sq_t, SmoothQuantTransform):
+            continue
+        module = module_map.get(name)
+        if module is None or not hasattr(module, "weight") or module.weight is None:
+            continue
+        W = module.weight.data
+        # w_axis=1: PyTorch standard input-channel axis for both Linear
+        # (out, in) and Conv2d (out, in, kH, kW).
+        shape = [1] * W.ndim
+        shape[1] = -1
+        module.weight.data = W * sq_t.scale.view(*shape)
+
+    return fused_model
+
+
+def _build_per_layer_optimal_cfg(
+    variant_results: dict,
+    sq_transforms: dict,
+    fmt_str: str,
+    gran: GranularitySpec,
+    cfg_builder: Callable,
+    weight_only: bool = False,
+) -> dict:
+    """Build per-layer OpQuantConfig dict choosing best transform per layer by QSNR.
+
+    For each layer in the model, selects the transform variant (None, SmoothQuant,
+    or Hadamard) that achieves the highest QSNR score from the variant experiments.
+
+    Args:
+        variant_results: Dict mapping ``"None"``, ``"SmoothQuant"``, ``"Hadamard"``
+            to their experiment result dicts (which contain ``qsnr_per_layer``).
+        sq_transforms: Per-layer SmoothQuantTransform dict from
+            ``_make_smoothquant_transforms``.
+        fmt_str: Format name string for the config builder.
+        gran: ``GranularitySpec`` for the config builder.
+        cfg_builder: ``make_op_cfg`` or ``make_op_cfg_weight_only``.
+        weight_only: Whether the format is weight-only (NF4, INT4-PC).
+
+    Returns:
+        Dict mapping layer name to ``OpQuantConfig``.
+    """
+    variant_qsnr = {k: v["qsnr_per_layer"] for k, v in variant_results.items()}
+    layer_best_tx = _compute_best_transform_per_layer(variant_qsnr)
+
+    tx_map = {
+        "None": None,
+        "Hadamard": HadamardTransform(),
+    }
+
+    per_layer_cfg = {}
+    for layer, tx_name in layer_best_tx.items():
+        if tx_name == "SmoothQuant":
+            sq_tx = sq_transforms.get(layer)
+            if sq_tx is None:
+                print(f"  Warning: {layer} selected SmoothQuant but no transform found, falling back to Identity")
+                sq_tx = IdentityTransform()
+            per_layer_cfg[layer] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
+        else:
+            per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name])
+
+    return per_layer_cfg
+
+
+# ---------------------------------------------------------------------------
 # Single-experiment runner
 # ---------------------------------------------------------------------------
 
@@ -126,6 +297,7 @@ def run_experiment(
     lsq_pot: bool = False,
     lsq_lr: float = 1e-3,
     eval_fn: Optional[Callable] = None,
+    session: Optional[QuantSession] = None,
 ) -> dict:
     """Run one quantization experiment and return results.
 
@@ -141,6 +313,9 @@ def run_experiment(
         eval_fn: ``(model, data) -> dict[str, float]``. Controls all
             model interaction (calibration, analysis, evaluation).
             When None, falls back to ``session(data)`` direct inference.
+        session: Optional[QuantSession]. When provided, skip session creation
+            and use this pre-configured session (caller must set up pre-scales
+            etc. before passing).
 
     Returns:
         Dict with keys: accuracy, fp32_accuracy, delta, report, session,
@@ -151,11 +326,12 @@ def run_experiment(
     if not calib_data:
         raise ValueError("calib_data must contain at least one batch")
 
-    session = QuantSession(
-        copy.deepcopy(fp32_model), cfg,
-        calibrator=MSEScaleStrategy(),
-        keep_fp32=True,
-    )
+    if session is None:
+        session = QuantSession(
+            copy.deepcopy(fp32_model), cfg,
+            calibrator=MSEScaleStrategy(),
+            keep_fp32=True,
+        )
 
     # ---- Calibration ----
     print(" calibrating", end="", flush=True)
@@ -218,7 +394,7 @@ def run_experiment(
 # ---------------------------------------------------------------------------
 # Config-driven part runners
 # ---------------------------------------------------------------------------
-from src.pipeline.config import resolve_config as _resolve_config
+from src.pipeline.config import resolve_config as _resolve_config, _resolve_granularity
 
 
 def _now() -> str:
@@ -495,53 +671,11 @@ def _run_hierarchical_part(part_cfg: dict, fp32_model, calib_data, eval_loader, 
                 channel_axis=pre_scale_cfg.get("channel_axis", -1),
             )
 
-        # -- Standard calibration --
-        print(" calibrate", end="", flush=True)
-        with session.calibrate():
-            if eval_fn is not None:
-                eval_fn(session, calib_data)
-            else:
-                for batch in calib_data:
-                    session(batch)
-
-        # -- Analysis --
-        print(" analyze", end="", flush=True)
-        observers = [QSNRObserver(), MSEObserver(), HistogramObserver(), DistributionObserver()]
-        with session.analyze(observers=observers) as ctx:
-            if eval_fn is not None:
-                eval_fn(session, calib_data)
-            else:
-                for batch in calib_data:
-                    session(batch)
-        report = ctx.report()
-
-        # -- Evaluation --
-        print(" evaluate", end="", flush=True)
-        if eval_fn is not None:
-            fp32_metrics = eval_fn(session.fp32_model, eval_loader)
-            quant_metrics = eval_fn(session, eval_loader)
-            delta = {k: quant_metrics.get(k, 0.0) - fp32_metrics.get(k, 0.0)
-                     for k in fp32_metrics}
-        else:
-            result = session.compare(eval_loader)
-            fp32_metrics = result["fp32"]
-            quant_metrics = result["quant"]
-            delta = result["delta"]
-
-        # Cost estimation
-        cost = session.estimate_cost()
-        cost_fp32 = session.estimate_cost(fp32=True)
-
-        results[name] = {
-            "accuracy": quant_metrics,
-            "fp32_accuracy": fp32_metrics,
-            "delta": delta,
-            "report": report,
-            "qsnr_per_layer": extract_metric_per_layer(report, "qsnr_db"),
-            "mse_per_layer": extract_metric_per_layer(report, "mse"),
-            "cost": cost,
-            "cost_fp32": cost_fp32,
-        }
+        # Delegate to run_experiment with pre-configured session
+        results[name] = run_experiment(
+            cfg, fp32_model, calib_data, eval_loader,
+            eval_fn=eval_fn, session=session,
+        )
 
         vt = time.time() - vt0
         acc = results[name].get("accuracy", {})
@@ -558,17 +692,6 @@ def _run_hierarchical_part(part_cfg: dict, fp32_model, calib_data, eval_loader, 
     return results
 
 
-def _resolve_granularity(v: dict) -> GranularitySpec:
-    """Convert a variant dict's granularity fields into a GranularitySpec."""
-    gran_type = v.get("granularity", "per_tensor")
-    if gran_type == "per_block":
-        return GranularitySpec.per_block(size=v.get("block_size", 32), axis=v.get("axis", -1))
-    elif gran_type == "per_channel":
-        return GranularitySpec.per_channel(axis=v.get("axis", -1))
-    else:
-        return GranularitySpec.per_tensor()
-
-
 # ---------------------------------------------------------------------------
 # Table generators (Tables 3–6; Tables 1–2 delegate to src.viz.tables)
 # ---------------------------------------------------------------------------
@@ -577,14 +700,14 @@ def generate_table_3(part_c: dict, output_dir: str) -> str:
     """Table 3: FP32 vs PoT accuracy delta."""
     baseline_acc = 0.0
     for name, data in part_c.items():
-        if "baseline" in name.lower():
+        if name == "FP32 (baseline)":
             acc = data.get("accuracy", {})
             baseline_acc = float(acc.get("accuracy", 0.0)) if isinstance(acc, dict) else float(acc or 0.0)
             break
 
     rows = []
     for name, data in part_c.items():
-        if "baseline" in name.lower():
+        if name == "FP32 (baseline)":
             continue
         acc = data.get("accuracy", {})
         if isinstance(acc, dict):
@@ -711,22 +834,22 @@ def generate_table_6(all_results: dict, output_dir: str) -> str:
     ranking = sorted(
         (
             (layer,
-             sum(m["mse"]) / max(len(m["mse"]), 1) if m["mse"] else 0.0,
-             sum(m["qsnr"]) / max(len(m["qsnr"]), 1) if m["qsnr"] else 0.0)
+             max(m["mse"]) if m["mse"] else 0.0,
+             min(m["qsnr"]) if m["qsnr"] else 0.0)
             for layer, m in layer_metrics.items()
         ),
         key=lambda x: x[1], reverse=True,
     )[:10]
 
     lines = [f"\n{'='*80}", "Table 6: Top-10 Most Sensitive Layers", "=" * 80,
-             f"{'#':<4} {'Layer':<28} {'Avg MSE':<18} {'Avg QSNR (dB)':<15}", "-" * 80]
+             f"{'#':<4} {'Layer':<28} {'Max MSE':<18} {'Min QSNR (dB)':<15}", "-" * 80]
     for i, (layer, mse, qsnr) in enumerate(ranking, 1):
         lines.append(f"{i:<4} {layer:<28} {mse:<18.6e} {qsnr:<15.2f}")
     result = "\n".join(lines)
 
     os.makedirs(f"{output_dir}/tables", exist_ok=True)
     with open(f"{output_dir}/tables/table6_sensitivity.csv", "w") as f:
-        f.write("Rank,Layer,Avg_MSE,Avg_QSNR_dB\n")
+        f.write("Rank,Layer,Max_MSE,Min_QSNR_dB\n")
         for i, (layer, mse, qsnr) in enumerate(ranking, 1):
             f.write(f"{i},{layer},{mse:.6e},{qsnr:.4f}\n")
     return result
@@ -825,6 +948,9 @@ def run_format_study(
             except Exception as e:
                 print(f"  Warning: table {table_name} generation failed: {e}")
 
+        # Incremental save after part loop
+        _save_results_json(all_results, output_dir)
+
     # ---- Optional Part D on Conv2d model ----
     part_d_cfg = config.get("part_d")
     if part_d_cfg and not skip_parts.get("part_d_conv") and build_conv_model is not None:
@@ -841,6 +967,9 @@ def run_format_study(
             print(generate_table_4(all_results["part_d_conv"], output_dir, suffix="_conv"))
         except Exception as e:
             print(f"  Warning: table4_conv generation failed: {e}")
+
+        # Incremental save after Part D Conv
+        _save_results_json(all_results, output_dir)
 
     # ---- Cross-part table (Table 6: sensitivity) ----
     print(generate_table_6(all_results, output_dir))
@@ -888,6 +1017,14 @@ def plot_from_results(results_path: str, output_dir: Optional[str] = None):
     if "part_d" in all_results:
         print(generate_table_4(all_results["part_d"], output_dir))
         print(generate_table_5(all_results["part_d"], output_dir))
+    if "block_sweep" in all_results:
+        print(accuracy_table(all_results["block_sweep"],
+               title="Block Size Sweep Results", output_dir=output_dir,
+               filename="block_sweep.csv"))
+    if "part_hierarchical" in all_results:
+        print(accuracy_table(all_results["part_hierarchical"],
+               title="Hierarchical Pre-Scale Results", output_dir=output_dir,
+               filename="hierarchical.csv"))
     print(generate_table_6(all_results, output_dir))
     _generate_figures(all_results, output_dir)
     print(f"\nRegeneration complete. Output in {output_dir}/")
@@ -906,6 +1043,8 @@ def _generate_figures(all_results: dict, output_dir: str):
         (lambda d, od: transform_delta(d, colors=TRANSFORM_COLORS, output_dir=od),                   "part_d", "fig9"),
         (lambda d, od: error_vs_distribution(d, output_dir=od),                                      None,     "fig10"),
         (lambda d, od: layer_type_qsnr(d, output_dir=od),                                            None,     "fig11"),
+        (lambda d, od: block_sweep_line_chart(d, output_dir=od),                                     "block_sweep", "fig12"),
+        (lambda d, od: hierarchical_delta_bar(d, output_dir=od, colors=FORMAT_COLORS),               "part_hierarchical", "fig13"),
     ]
     for fn, part_key, name in plot_tasks:
         if part_key is not None and part_key not in all_results:

@@ -71,6 +71,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip-part-c", action="store_true")
     parser.add_argument("--skip-part-d", action="store_true")
     parser.add_argument("--skip-part-d-conv", action="store_true")
+    parser.add_argument("--skip-block-sweep", action="store_true")
+    parser.add_argument("--skip-hierarchical", action="store_true")
     parser.add_argument("--plot-from", default=None, metavar="RESULTS_JSON")
     args = parser.parse_args()
 
@@ -83,6 +85,8 @@ if __name__ == "__main__":
             "A": args.skip_part_a, "B": args.skip_part_b,
             "C": args.skip_part_c, "D": args.skip_part_d,
             "D_conv": args.skip_part_d_conv,
+            "block_sweep": args.skip_block_sweep,
+            "part_hierarchical": args.skip_hierarchical,
         }.items() if v}
         run_format_study(
             build_model,

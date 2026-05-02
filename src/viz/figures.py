@@ -79,6 +79,9 @@ def qsnr_line_chart(
 ) -> plt.Figure:
     """Per-layer QSNR line chart.
 
+    Aligns all configs by shared layer names (union of all layers across
+    configs) instead of plotting each config independently by sorted index.
+
     Args:
         results: Dict mapping series name to dict with ``qsnr_per_layer``.
         title: Chart title.
@@ -89,17 +92,39 @@ def qsnr_line_chart(
         matplotlib Figure.
     """
     fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Collect shared x-axis: union of all layer names
+    all_layer_names: list = []
     for name, data in results.items():
         if "baseline" in name.lower() or "qsnr_per_layer" not in data:
             continue
-        layers = sorted(data["qsnr_per_layer"].keys())
-        values = [data["qsnr_per_layer"][l] for l in layers]
+        for lname in data["qsnr_per_layer"]:
+            if lname not in all_layer_names:
+                all_layer_names.append(lname)
+
+    if not all_layer_names:
+        ax.text(0.5, 0.5, "No QSNR data available", ha="center", va="center",
+                fontsize=12, transform=ax.transAxes)
+        ax.set_title(title)
+        save_figure(fig, output_dir, title.lower().replace(" ", "_"))
+        return fig
+
+    x_positions = range(len(all_layer_names))
+    for name, data in results.items():
+        if "baseline" in name.lower() or "qsnr_per_layer" not in data:
+            continue
+        values = [data["qsnr_per_layer"].get(l, float("nan")) for l in all_layer_names]
         color = colors.get(name, FALLBACK_CYCLE[0])
-        ax.plot(
-            range(len(layers)), values,
-            marker="o", label=name, linewidth=2, color=color,
-        )
-    ax.set_xlabel("Layer Index")
+        ax.plot(x_positions, values, marker="o", label=name, linewidth=2, color=color)
+
+    # X-axis labels: short layer names
+    short_names = [l.replace("module.", "").replace("Quantized", "") for l in all_layer_names]
+    # Truncate to 20 chars for readability
+    short_names = [n[:20] for n in short_names]
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(short_names, rotation=45, ha="right", fontsize=7)
+
+    ax.set_xlabel("Layer")
     ax.set_ylabel("QSNR (dB)")
     ax.set_title(title)
     ax.legend()
@@ -225,20 +250,22 @@ def histogram_overlay(
     """Three-channel histogram overlay (fp32 / quant / error).
 
     Extracts histogram data from ``HistogramObserver`` (keys: ``fp32_hist``,
-    ``quant_hist``, ``err_hist``) and renders the most sensitive layers as
-    overlaid semi-transparent bar charts.
+    ``quant_hist``, ``err_hist``) and renders the most quantization-sensitive
+    layers as overlaid semi-transparent bar charts. Sensitivity is determined
+    by QSNR (lower = more quantization-sensitive), with a fallback to
+    activation magnitude when no QSNR data is available.
 
     Args:
         all_results: Nested dict of ``{part: {config: {"report": ...}}}``.
-            Reports are expected to have a ``_raw`` attribute (private
-            Report API; if Report's internal format changes this function
-            must be updated) containing histogram metrics.
+            Reports are expected to have an ``iter_slices`` method
+            yielding ``(layer, role, stage, slice_key, metrics)`` tuples.
         output_dir: Output root directory.
 
     Returns:
         matplotlib Figure.
     """
     layer_hists: Dict[str, dict] = {}
+    layer_error: Dict[str, float] = {}  # QSNR for sensitivity ranking
 
     for part_name, part_data in all_results.items():
         if not part_name.startswith("part_") or not isinstance(part_data, dict):
@@ -247,24 +274,16 @@ def histogram_overlay(
             if not isinstance(config_data, dict) or "report" not in config_data:
                 continue
             report = config_data["report"]
-            if not hasattr(report, "_raw"):
+            if not hasattr(report, "iter_slices"):
                 continue
-            for layer, roles in report._raw.items():
-                if layer in layer_hists:
-                    continue
-                for role, stages in roles.items():
-                    for stage, slices in stages.items():
-                        for metrics in slices.values():
-                            if "fp32_hist" in metrics and "quant_hist" in metrics:
-                                layer_hists[layer] = {
-                                    k: _to_numpy(metrics.get(k))
-                                    for k in ("fp32_hist", "quant_hist", "err_hist")
-                                }
-                                break
-                        if layer in layer_hists:
-                            break
-                    if layer in layer_hists:
-                        break
+            for layer, role, stage, slice_key, metrics in report.iter_slices():
+                if layer not in layer_hists and "fp32_hist" in metrics and "quant_hist" in metrics:
+                    layer_hists[layer] = {
+                        k: _to_numpy(metrics.get(k))
+                        for k in ("fp32_hist", "quant_hist", "err_hist")
+                    }
+                if layer not in layer_error and "qsnr_db" in metrics:
+                    layer_error[layer] = metrics["qsnr_db"]
 
     if not layer_hists:
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -275,12 +294,20 @@ def histogram_overlay(
         save_figure(fig, output_dir, "histogram_overlay")
         return fig
 
-    # Pick top 3-5 layers with the richest histogram data
-    top_layers = sorted(
-        layer_hists.items(),
-        key=lambda x: x[1].get("fp32_hist", np.array(0)).sum(),
-        reverse=True,
-    )[:5]
+    # Rank by sensitivity: lowest QSNR first (most quantization-sensitive)
+    if layer_error:
+        top_layers = sorted(
+            layer_hists.items(),
+            key=lambda x: layer_error.get(x[0], float("inf")),
+        )[:5]
+    else:
+        print("  Warning: No QSNR data for sensitivity ranking, "
+              "falling back to histogram magnitude")
+        top_layers = sorted(
+            layer_hists.items(),
+            key=lambda x: x[1].get("fp32_hist", np.array(0)).sum(),
+            reverse=True,
+        )[:5]
     if not top_layers:
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.text(0.5, 0.5, "No histogram data found",
@@ -528,12 +555,31 @@ def transform_delta(
                                   if bar_positions else x_pos)
             tick_labels.append(tx_name)
             x_pos += len(all_layers) + 2
-            if len(all_layers) <= 20:
+            num_layers = len(all_layers)
+            if num_layers <= 10:
+                # Show all layer names
                 for i, layer in enumerate(all_layers):
-                    ax.text(bar_positions[i], deltas[i],
-                            layer.split(".")[-1] if "." in layer else layer,
+                    short = layer.split(".")[-1] if "." in layer else layer
+                    ax.text(bar_positions[i], deltas[i], short[:12],
                             ha="center", va="bottom" if deltas[i] >= 0 else "top",
-                            fontsize=4, rotation=90)
+                            fontsize=6, rotation=90)
+            elif num_layers <= 30:
+                # Show every 3rd layer
+                for i, layer in enumerate(all_layers):
+                    if i % 3 == 0:
+                        short = layer.split(".")[-1] if "." in layer else layer
+                        ax.text(bar_positions[i], deltas[i], short[:12],
+                                ha="center", va="bottom" if deltas[i] >= 0 else "top",
+                                fontsize=5, rotation=90)
+            else:
+                # Show top-5 by absolute delta
+                top_indices = sorted(range(len(deltas)),
+                                    key=lambda i: abs(deltas[i]), reverse=True)[:5]
+                for i in top_indices:
+                    short = all_layers[i].split(".")[-1] if "." in all_layers[i] else all_layers[i]
+                    ax.text(bar_positions[i], deltas[i], short[:12],
+                            ha="center", va="bottom" if deltas[i] >= 0 else "top",
+                            fontsize=6, rotation=90, fontweight="bold")
 
         ax.axhline(y=0, color="black", linewidth=0.5)
         if tick_positions:
@@ -563,10 +609,8 @@ def error_vs_distribution(
 
     Args:
         all_results: Nested dict ``{part: {config: {"report": ...}}}``.
-            Reports are expected to have a ``_raw`` attribute (private
-            Report API; if Report's internal format changes this function
-            must be updated) with per-slice metrics (``qsnr_db``,
-            ``dynamic_range_bits``, etc.).
+            Reports are expected to have an ``iter_slices`` method
+            yielding ``(layer, role, stage, slice_key, metrics)`` tuples.
         output_dir: Output root directory.
 
     Returns:
@@ -581,24 +625,21 @@ def error_vs_distribution(
             if not isinstance(config_data, dict) or "report" not in config_data:
                 continue
             report = config_data["report"]
-            if not hasattr(report, "_raw"):
+            if not hasattr(report, "iter_slices"):
                 continue
-            for layer, roles in report._raw.items():
-                for role, stages in roles.items():
-                    for stage, slices in stages.items():
-                        for metrics in slices.values():
-                            if "qsnr_db" not in metrics or "dynamic_range_bits" not in metrics:
-                                continue
-                            data_points.append({
-                                "qsnr": metrics["qsnr_db"],
-                                "dynamic_range": metrics["dynamic_range_bits"],
-                                "skewness": metrics.get("skewness", 0),
-                                "kurtosis": metrics.get("kurtosis", 0),
-                                "sparse_ratio": metrics.get("sparse_ratio", 0),
-                                "layer": layer,
-                                "role": role,
-                                "mse": metrics.get("mse", 1e-10),
-                            })
+            for layer, role, stage, slice_key, metrics in report.iter_slices():
+                if "qsnr_db" not in metrics or "dynamic_range_bits" not in metrics:
+                    continue
+                data_points.append({
+                    "qsnr": metrics["qsnr_db"],
+                    "dynamic_range": metrics["dynamic_range_bits"],
+                    "skewness": metrics.get("skewness", 0),
+                    "kurtosis": metrics.get("kurtosis", 0),
+                    "sparse_ratio": metrics.get("sparse_ratio", 0),
+                    "layer": layer,
+                    "role": role,
+                    "mse": metrics.get("mse", 1e-10),
+                })
 
     if not data_points:
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -713,6 +754,36 @@ def layer_type_qsnr(
         save_figure(fig, output_dir, "layer_type_qsnr")
         return fig
 
+    # Single layer type degrades to isolated boxplots — fall back to per-layer chart
+    if len(ltype_qsnr) == 1:
+        single_lt = list(ltype_qsnr.keys())[0]
+        print(f"  layer_type_qsnr: only '{single_lt}' layers found, "
+              f"falling back to per-layer QSNR chart")
+
+        qsnr_results: dict = {}
+        for part_name, part_data in all_results.items():
+            if not part_name.startswith("part_") or not isinstance(part_data, dict):
+                continue
+            for config_name, config_data in part_data.items():
+                if not isinstance(config_data, dict) or "report" not in config_data:
+                    continue
+                report = config_data["report"]
+                ls = LayerSensitivity(report)
+                per_layer: Dict[str, list] = {}
+                for s in ls._samples:
+                    per_layer.setdefault(s["layer"], []).append(s.get("qsnr_db", 0))
+                qsnr_results[config_name] = {
+                    "qsnr_per_layer": {
+                        l: sum(v) / max(len(v), 1) for l, v in per_layer.items()
+                    }
+                }
+        return qsnr_line_chart(
+            qsnr_results,
+            title="Per-Layer QSNR (single layer-type model)",
+            colors={},
+            output_dir=output_dir,
+        )
+
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     colors_cycle = FALLBACK_CYCLE
     labels = list(ltype_qsnr.keys())
@@ -743,6 +814,143 @@ def layer_type_qsnr(
     fig.suptitle("Layer-Type Grouped Quantization Error", fontsize=14)
     fig.tight_layout()
     save_figure(fig, output_dir, "layer_type_qsnr")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 12 — Block size sweep line chart
+# ---------------------------------------------------------------------------
+
+def block_sweep_line_chart(
+    block_sweep: dict,
+    *,
+    output_dir: str,
+) -> plt.Figure:
+    """Block size vs per-layer average QSNR line chart.
+
+    One line per block-size configuration, showing how each layer's QSNR
+    changes with block size. Useful for understanding the sensitivity of
+    different layers to block granularity.
+
+    Args:
+        block_sweep: Dict mapping config name (e.g. ``"int8-blk32"``) to
+            result dict with ``qsnr_per_layer``.
+        output_dir: Output root directory.
+
+    Returns:
+        matplotlib Figure.
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Collect shared layers and config data
+    entries = []
+    for name, data in block_sweep.items():
+        if "baseline" in name.lower() or "qsnr_per_layer" not in data:
+            continue
+        entries.append((name, data["qsnr_per_layer"]))
+
+    if not entries:
+        ax.text(0.5, 0.5, "No block sweep data available",
+                ha="center", va="center", fontsize=12, transform=ax.transAxes)
+        ax.set_title("Block Size vs QSNR")
+        save_figure(fig, output_dir, "block_sweep_line")
+        return fig
+
+    # Compute per-layer avg QSNR for each block size
+    sizes, avg_qsnr = [], []
+    for name, qsnr_dict in entries:
+        try:
+            bs = int(name.split("blk")[-1])
+        except (ValueError, IndexError):
+            bs = 0
+        avg = sum(qsnr_dict.values()) / max(len(qsnr_dict), 1)
+        sizes.append(bs)
+        avg_qsnr.append(avg)
+
+    # Sort by block size
+    sorted_pairs = sorted(zip(sizes, avg_qsnr, [e[0] for e in entries]))
+    sizes = [p[0] for p in sorted_pairs]
+    avg_qsnr = [p[1] for p in sorted_pairs]
+
+    ax.plot(sizes, avg_qsnr, marker="o", linewidth=2, color=FALLBACK_CYCLE[0])
+    ax.set_xlabel("Block Size")
+    ax.set_ylabel("Average QSNR (dB)")
+    ax.set_title("Block Size vs Average QSNR")
+    ax.grid(True, alpha=0.3)
+    ax.set_xticks(sizes)
+
+    save_figure(fig, output_dir, "block_sweep_line")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 13 — Hierarchical Pre-Scale delta bar chart
+# ---------------------------------------------------------------------------
+
+def hierarchical_delta_bar(
+    hierarchical: dict,
+    *,
+    output_dir: str,
+    colors: dict | None = None,
+) -> plt.Figure:
+    """Pre-scale (hierarchical) vs baseline per-layer QSNR delta.
+
+    Shows the benefit of two-level quantization (global PoT pre-scale +
+    MX per-block) relative to plain MX quantization at the same bit-width.
+
+    Args:
+        hierarchical: Dict mapping config name (e.g. ``"MXINT-8-HIER"``)
+            to result dict with ``qsnr_per_layer``. A ``"FP32 (baseline)"``
+            entry is skipped.
+        output_dir: Output root directory.
+        colors: Optional colour mapping for bars.
+
+    Returns:
+        matplotlib Figure.
+    """
+    color_cycle = colors if colors else {}
+    entries = [
+        (name, data)
+        for name, data in hierarchical.items()
+        if "baseline" not in name.lower() and "qsnr_per_layer" in data
+    ]
+
+    if not entries:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, "No hierarchical study data available",
+                ha="center", va="center", fontsize=12, transform=ax.transAxes)
+        ax.set_title("Hierarchical Pre-Scale — Per-Layer QSNR")
+        save_figure(fig, output_dir, "hierarchical_delta")
+        return fig
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Show avg QSNR per variant as grouped bars
+    x_positions = range(len(entries))
+    values = [
+        sum(data["qsnr_per_layer"].values()) / max(len(data["qsnr_per_layer"]), 1)
+        for _, data in entries
+    ]
+    names = [name for name, _ in entries]
+    bar_colors = [
+        color_cycle.get(name, FALLBACK_CYCLE[i % len(FALLBACK_CYCLE)])
+        for i, name in enumerate(names)
+    ]
+
+    bars = ax.bar(x_positions, values, color=bar_colors, alpha=0.7, edgecolor="white")
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(names, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Average QSNR (dB)")
+    ax.set_title("Hierarchical Pre-Scale — Average Per-Layer QSNR")
+
+    # Add value labels on top of bars
+    for bar, val in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+                f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    save_figure(fig, output_dir, "hierarchical_delta")
     return fig
 
 

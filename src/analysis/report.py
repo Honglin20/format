@@ -16,6 +16,19 @@ class Report:
     def stages(self, layer: str, role: str) -> list:
         return list(self._raw.get(layer, {}).get(role, {}).keys())
 
+    def iter_slices(self):
+        """Iterate over all analysis slices.
+
+        Yields:
+            Tuple of ``(layer, role, stage, slice_key, metrics)`` for every
+            slice in the report.
+        """
+        for layer, roles in self._raw.items():
+            for role, stages in roles.items():
+                for stage, slices in stages.items():
+                    for slice_key, metrics in slices.items():
+                        yield layer, role, stage, slice_key, metrics
+
     def to_dataframe(self):
         """Flatten to rows — one per slice."""
         rows = []

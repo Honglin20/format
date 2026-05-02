@@ -10,11 +10,12 @@ class ToyMLP(nn.Module):
     module replacement AND inline-op patching (F.gelu, +) in quantize_model.
     """
 
-    def __init__(self, hidden_size: int = 128, intermediate_size: int = 512):
+    def __init__(self, hidden_size: int = 128, intermediate_size: int = 512, num_classes: int = 10):
         super().__init__()
         self.ln = nn.LayerNorm(hidden_size)
         self.fc1 = nn.Linear(hidden_size, intermediate_size)
         self.fc2 = nn.Linear(intermediate_size, hidden_size)
+        self.head = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x):
         residual = x
@@ -23,6 +24,7 @@ class ToyMLP(nn.Module):
         x = F.gelu(x)  # inline op
         x = self.fc2(x)
         x = x + residual  # inline op
+        x = self.head(x)
         return x
 
 

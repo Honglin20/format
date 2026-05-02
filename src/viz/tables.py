@@ -39,14 +39,18 @@ def accuracy_table(results: dict, *, title: str, output_dir: str, filename: str)
         avg_mse = sum(mse_dict.values()) / max(len(mse_dict), 1)
         rows.append((name, acc_str, avg_qsnr, avg_mse))
 
-    lines = [f"\n{'=' * 70}", title, "=" * 70]
-    lines.append(
-        f"{'Config':<20} {'Accuracy':<20} {'Avg QSNR (dB)':<15} {'Avg MSE':<15}"
+    max_name = max((len(r[0]) for r in rows), default=20)
+    name_w = max(max_name + 2, 20)
+    header_line = (
+        f"{'Config':<{name_w}} {'Accuracy':<20} {'Avg QSNR (dB)':<15} {'Avg MSE':<15}"
     )
-    lines.append("-" * 70)
+    sep_line = "-" * len(header_line)
+    lines = [f"\n{'=' * len(header_line)}", title, "=" * len(header_line)]
+    lines.append(header_line)
+    lines.append(sep_line)
     for row in rows:
         lines.append(
-            f"{row[0]:<20} {row[1]:<20} {row[2]:<15.2f} {row[3]:<15.6f}"
+            f"{row[0]:<{name_w}} {row[1]:<20} {row[2]:<15.2f} {row[3]:<15.6f}"
         )
 
     csv_dir = os.path.join(output_dir, "tables")
