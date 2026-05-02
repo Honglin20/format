@@ -298,6 +298,24 @@ class TestLayerTypeQSNR:
             fig = layer_type_qsnr({}, output_dir=tmpdir)
             assert fig is not None
 
+    def test_single_layer_type_falls_back_to_per_layer_chart(self):
+        """When all layers are the same type, fall back to qsnr_line_chart."""
+        from unittest.mock import MagicMock, PropertyMock
+        # Create a mock report where LayerSensitivity only sees Linear layers
+        mock_report = MagicMock()
+        type(mock_report)._raw = PropertyMock(return_value={
+            "fc1": {"weight": {"weight_pre_quant": {"0": {"mse": 0.01, "qsnr_db": 20.0}}}},
+            "fc2": {"weight": {"weight_pre_quant": {"0": {"mse": 0.02, "qsnr_db": 18.0}}}},
+        })
+        results = {
+            "part_a": {"INT8-PT": {"report": mock_report}},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = layer_type_qsnr(results, output_dir=tmpdir)
+            assert fig is not None
+            # Should produce a line chart (single axes), not boxplot pair
+            assert len(fig.axes) == 1
+
 
 class TestBlockSweepLineChart:
     def test_renders_without_error(self):

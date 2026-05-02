@@ -754,6 +754,36 @@ def layer_type_qsnr(
         save_figure(fig, output_dir, "layer_type_qsnr")
         return fig
 
+    # Single layer type degrades to isolated boxplots — fall back to per-layer chart
+    if len(ltype_qsnr) == 1:
+        single_lt = list(ltype_qsnr.keys())[0]
+        print(f"  layer_type_qsnr: only '{single_lt}' layers found, "
+              f"falling back to per-layer QSNR chart")
+
+        qsnr_results: dict = {}
+        for part_name, part_data in all_results.items():
+            if not part_name.startswith("part_") or not isinstance(part_data, dict):
+                continue
+            for config_name, config_data in part_data.items():
+                if not isinstance(config_data, dict) or "report" not in config_data:
+                    continue
+                report = config_data["report"]
+                ls = LayerSensitivity(report)
+                per_layer: Dict[str, list] = {}
+                for s in ls._samples:
+                    per_layer.setdefault(s["layer"], []).append(s.get("qsnr_db", 0))
+                qsnr_results[config_name] = {
+                    "qsnr_per_layer": {
+                        l: sum(v) / max(len(v), 1) for l, v in per_layer.items()
+                    }
+                }
+        return qsnr_line_chart(
+            qsnr_results,
+            title="Per-Layer QSNR (single layer-type model)",
+            colors={},
+            output_dir=output_dir,
+        )
+
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     colors_cycle = FALLBACK_CYCLE
     labels = list(ltype_qsnr.keys())
