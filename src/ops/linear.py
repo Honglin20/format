@@ -16,7 +16,7 @@ from src.scheme.op_config import OpQuantConfig
 
 _F_linear = F.linear
 from src.quantize import quantize
-from src.analysis.mixin import ObservableMixin
+from src.observer.mixin import ObservableMixin
 
 
 class LinearFunction(torch.autograd.Function):

@@ -177,7 +177,7 @@ from src.analysis.context import AnalysisContext
 
 class TestAnalysisContext:
     def test_context_attaches_and_detaches_observers(self):
-        from src.analysis.mixin import ObservableMixin
+        from src.observer.mixin import ObservableMixin
 
         class DummyLayer(ObservableMixin, nn.Module):
             def forward(self, x):
@@ -196,7 +196,7 @@ class TestAnalysisContext:
                 assert len(m._observers) == 0
 
     def test_report_returns_report_object(self):
-        from src.analysis.mixin import ObservableMixin
+        from src.observer.mixin import ObservableMixin
 
         class NoOpLayer(ObservableMixin, nn.Module):
             def forward(self, x):
@@ -213,7 +213,7 @@ class TestAnalysisContext:
         assert isinstance(report, Report)
 
     def test_warmup_batches_reset_observer(self):
-        from src.analysis.mixin import ObservableMixin
+        from src.observer.mixin import ObservableMixin
 
         class SimpleLayer(ObservableMixin, nn.Module):
             def __init__(self):

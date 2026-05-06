@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.quantize import quantize
-from src.analysis.mixin import ObservableMixin
+from src.observer.mixin import ObservableMixin
 from src.ops.vec_ops import (
     vec_quantize, vec_add, vec_sub, vec_mul, vec_div,
     vec_recip, vec_sqrt, vec_exp, vec_exp2, vec_tanh,

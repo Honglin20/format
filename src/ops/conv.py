@@ -16,7 +16,7 @@ from torch.nn.modules.utils import _single, _pair, _triple
 
 from src.scheme.op_config import OpQuantConfig
 from src.quantize import quantize
-from src.analysis.mixin import ObservableMixin
+from src.observer.mixin import ObservableMixin
 
 
 def _conv_weight(input, weight_shape, grad_output, stride=1, padding=0,

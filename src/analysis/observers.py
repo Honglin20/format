@@ -2,7 +2,7 @@ from typing import List
 
 import torch
 
-from src.analysis.observer import SliceAwareObserver
+from src.observer import SliceAwareObserver
 
 
 class DistributionObserver(SliceAwareObserver):

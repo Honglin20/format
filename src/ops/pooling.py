@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.op_config import OpQuantConfig
-from src.analysis.mixin import ObservableMixin
+from src.observer.mixin import ObservableMixin
 from src.ops.vec_ops import vec_add, vec_reduce_mean
 from src.quantize import quantize
 

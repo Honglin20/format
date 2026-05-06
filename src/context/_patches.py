@@ -56,7 +56,7 @@ def _make_emit_fn(state, layer_name: str, op_suffix: str):
     full_name = f"{layer_name}.{op_suffix}" if layer_name else op_suffix
 
     def emit_fn(role, pipeline_index, stage, fp32, quant, scheme, group_map=None):
-        from src.analysis.events import QuantEvent
+        from src.observer.events import QuantEvent
         event = QuantEvent(
             layer_name=full_name,
             role=role,

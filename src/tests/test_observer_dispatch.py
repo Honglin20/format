@@ -13,8 +13,8 @@ import math
 import pytest
 import torch
 
-from src.analysis.events import QuantEvent
-from src.analysis.observer import SliceAwareObserver
+from src.observer.events import QuantEvent
+from src.observer import SliceAwareObserver
 from src.scheme.granularity import GranularityMode, GranularitySpec
 from src.scheme.quant_scheme import QuantScheme
 from src.formats.int_formats import IntFormat

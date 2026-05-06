@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 
 from src.scheme.quant_scheme import QuantScheme
-from src.analysis.events import QuantEvent
+from src.observer.events import QuantEvent
 
 
 class ObservableMixin:

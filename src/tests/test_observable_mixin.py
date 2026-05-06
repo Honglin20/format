@@ -10,9 +10,9 @@ Key invariants:
 import pytest
 import torch
 
-from src.analysis.mixin import ObservableMixin
-from src.analysis.events import QuantEvent
-from src.analysis.observer import ObserverBase, SliceAwareObserver
+from src.observer.mixin import ObservableMixin
+from src.observer.events import QuantEvent
+from src.observer import ObserverBase, SliceAwareObserver
 from src.analysis.slicing import SliceKey
 from src.scheme.quant_scheme import QuantScheme
 

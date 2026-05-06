@@ -19,7 +19,7 @@ from typing import List
 
 import torch
 
-from src.analysis.events import QuantEvent
+from src.observer.events import QuantEvent
 from src.scheme.granularity import GranularityMode
 
 SliceKey = tuple  # (tag, *identifiers); first element is always a str tag

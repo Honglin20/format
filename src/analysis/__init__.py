@@ -3,9 +3,7 @@ Analysis infrastructure for quantized operators.
 
 Phase 4: full AnalysisContext + concrete Observers + Report + Distribution taxonomy.
 """
-from .events import QuantEvent
-from .mixin import ObservableMixin
-from .observer import ObserverBase, SliceAwareObserver, SliceKey
+from src.observer import QuantEvent, ObservableMixin, ObserverBase, SliceAwareObserver, SliceKey
 from .observers import DistributionObserver, QSNRObserver, MSEObserver, HistogramObserver
 from .context import AnalysisContext
 
