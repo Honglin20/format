@@ -10,8 +10,8 @@ from src.scheme.quant_scheme import QuantScheme
 
 import torch.nn as nn
 
-from .device import DeviceSpec
-from .defaults import (
+from .device import (
+    DeviceSpec,
     QUANT_OPS_PER_ELEM_BASE, QUANT_OPS_PER_ELEM_MX,
     QUANT_OPS_PER_ELEM_BFLOAT, QUANT_OPS_PER_ELEM_LOOKUP,
     TRANSFORM_OPS_PER_ELEM_DEFAULT, TRANSFORM_OPS_PER_ELEM_HADAMARD,

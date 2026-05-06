@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
 import torch.nn as nn
 
@@ -9,6 +9,18 @@ from src.pipeline.config import resolve_config
 from src.session import QuantSession
 from src.calibration.strategies import MSEScaleStrategy
 from src.analysis.observers import QSNRObserver, MSEObserver
+
+
+class EvalFn(Protocol):
+    """User-provided evaluation function.
+
+    Called by ExperimentRunner in three contexts:
+    - Calibration: forward side-effects trigger hooks, return value ignored
+    - Analysis: forward side-effects trigger observer hooks, return value ignored
+    - Evaluation: return value used for fp32 vs quant delta computation
+    """
+
+    def __call__(self, model: nn.Module, data: Any) -> Dict[str, float]: ...
 
 
 def extract_metric_per_layer(report, metric: str) -> Dict[str, float]:

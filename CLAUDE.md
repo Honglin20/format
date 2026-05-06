@@ -27,6 +27,58 @@
 
 ---
 
+## 架构第一性原理
+
+### 依赖层级（单向，上层依赖下层，永不反向）
+
+```
+工具层 (Tools)          calibration  analysis  pipeline  cost  viz  onnx
+                          ↓ 使用
+驱动层 (Integration)     session   模型生命周期编排 + 模块转换 + inline 拦截
+                          ↓ 驱动
+算子层 (Ops)             ops   QuantizedXxx autograd 算子
+                          ↓ 调用
+数学层 (Math)            quantize(tensor, scheme) → tensor
+                          ↑ 三轴正交组合
+                  format  ×  granularity  ×  transform
+```
+
+### 包边界原则
+
+1. **单一概念**：一个包名 = 一个清晰的概念。禁止 `utils/`、`common/`、`misc/`、`shared/`、`tools/` 作为公共包——这些词没有排除标准，是反模式。
+2. **独立变更驱动**：两个模块因为不同的原因而变更 → 分属不同的包。
+3. **可发现性**：通过"我要做什么概念"找到包，不是"别人把文件放哪了"。
+4. **单文件包是错的**：一个包只有一个文件 → 包边界画错了 → 合并到所属概念。
+5. **私有用下划线**：`_utils/` 带 `_` = 内部辅助，不参与公共 API 约定。`from src._utils import X` 本身就是警告。
+6. **横切关注点独立**：被两个不同层同时依赖的模块（如 observer → 被 ops 和 analysis 依赖）必须独立，不依附于任何一方。
+
+### 量化统一入口
+
+```python
+# quantize() 是数学层唯一的公共量化入口。三步明确可见：
+x_q = quantize(x, scheme)
+#   1. x_t = scheme.transform.forward(x)       变换
+#   2. x_q = scheme.format.quantize(x_t, ...)  量化
+#   3. x_q = scheme.transform.inverse(x_q)     逆变换
+```
+
+- `QuantScheme` = format × granularity × transform — 三轴正交组合，改一个不改其他。
+- `OpQuantConfig` = storage scheme + per-role compute schemes — 算子级二级模型。
+- `quantize_mx()` 是 PER_BLOCK 的快速路径，对用户透明。
+
+### 可扩展性模式
+
+| 扩展需求 | 在哪里改 | 不动任何其他文件 |
+|---------|---------|----------------|
+| 新数值格式 | `formats/` 下新文件，extend `FormatBase` | ✅ |
+| 新 Transform | `transform/` 下新文件，extend `TransformBase` | ✅ |
+| 新粒度模式 | `scheme/granularity.py` 加 `GranularityMode` | 极少发生 |
+| 新量化算子（如 NF4 matmul） | `ops/` 下新文件，复用 `quantize()` + `OpQuantConfig` | ✅ |
+| 新近似计算（如 softmax approx） | `ops/` 下新文件，实现 `torch.autograd.Function` | ✅ |
+| 新工具 | 工具层新目录 | 核心层不感知 |
+
+---
+
 ## 场景 → 读什么
 
 | 我要做什么 | 读哪个文件 |

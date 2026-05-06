@@ -11,13 +11,33 @@ different experiments.
 from __future__ import annotations
 
 import math
+import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 
-from src.viz.save import save_figure
 from src.viz.theme import FALLBACK_CYCLE
+
+
+def save_figure(fig, output_dir: str, name: str) -> str:
+    """Save matplotlib Figure as PNG and PDF.
+
+    Args:
+        fig: matplotlib Figure.
+        output_dir: Output root directory. Figures saved to ``<output_dir>/figures/``.
+        name: Base filename without extension.
+
+    Returns:
+        Path to the saved PNG file.
+    """
+    fig_dir = os.path.join(output_dir, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+    for ext in ("png", "pdf"):
+        fig.savefig(os.path.join(fig_dir, f"{name}.{ext}"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return os.path.join(fig_dir, f"{name}.png")
 
 import torch
 
