@@ -14,7 +14,7 @@ from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.session import QuantSession
 from src.analysis.e2e import Comparator, compare_models, compare_sessions
-from src.mapping.quantize_model import quantize_model
+from src.session import quantize_model
 
 
 def make_cfg():

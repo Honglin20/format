@@ -67,7 +67,7 @@ src/
 - `src/_utils/` — 吸收跨包零散工具函数（`slicing.py` 等）
 
 ### 合并
-- `context/_state.py` + `_stack.py` → `session/_stack.py`
+- `context/_state.py` + `_stack.py` + `quantize_context.py` → `session/_context.py`
 - `cost/defaults.py` + `device.py` → `cost/device.py`
 - `pipeline/protocol.py` → 并入 `pipeline/runner.py`
 - `viz/save.py` → 并入 `viz/figures.py`

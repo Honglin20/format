@@ -16,7 +16,7 @@ from src.formats.base import FormatBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
-from src.mapping.quantize_model import quantize_model
+from src.session import quantize_model
 
 
 def demo_uniform_int8():

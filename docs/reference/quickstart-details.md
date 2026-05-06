@@ -70,7 +70,7 @@ nf4_cfg = OpQuantConfig(weight=nf4_scheme)
 ## 2. 量化模型（一键入口）
 
 ```python
-from src.mapping.quantize_model import quantize_model
+from src.session import quantize_model
 
 # 全模型统一配置
 qmodel = quantize_model(model, cfg=cfg)

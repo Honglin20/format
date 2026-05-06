@@ -29,7 +29,7 @@ from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.session import QuantSession
-from src.mapping.quantize_model import quantize_model
+from src.session import quantize_model
 from src.analysis.e2e import Comparator, compare_models, compare_sessions
 from src.analysis.compare import compare_formats, ComparisonReport
 from src.analysis.eval_performance import evaluate_performance

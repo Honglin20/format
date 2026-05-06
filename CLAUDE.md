@@ -104,7 +104,7 @@ x_q = quantize(x, scheme)
 
 - **Branch**: `feature/refactor-src`（主开发），`claude/<desc>`（单任务），不推 master/main
 - **Commit**: `<type>(<scope>): <描述>` — type: feat/fix/refactor/test/docs/chore
-- **测试门**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`（当前 1,416 passed）
+- **测试门**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`（当前 1,468 passed）
 
 ---
 
