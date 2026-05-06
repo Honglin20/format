@@ -10,6 +10,7 @@ from .granularity import GranularitySpec
 from .transform import TransformBase, IdentityTransform
 
 _VALID_ROUND_MODES = {"nearest", "floor", "even", "dither"}
+_VALID_SCALE_FORMATS = {"fp32", "pot"}
 
 
 def _resolve_format(fmt: Union[str, FormatBase]) -> FormatBase:
@@ -39,6 +40,7 @@ class QuantScheme:
     """Default: PER_TENSOR (single shared scale for the whole tensor)."""
     transform: TransformBase = field(default_factory=IdentityTransform)
     round_mode: str = "nearest"
+    scale_format: str = "fp32"
 
     def __post_init__(self):
         # Coerce string format to FormatBase (supports factory methods accepting str)
@@ -65,6 +67,12 @@ class QuantScheme:
         if self.round_mode not in _VALID_ROUND_MODES:
             raise ValueError(
                 f"Invalid round_mode {self.round_mode!r}. Must be one of {_VALID_ROUND_MODES}"
+            )
+
+        # Validate scale_format
+        if self.scale_format not in _VALID_SCALE_FORMATS:
+            raise ValueError(
+                f"Invalid scale_format {self.scale_format!r}. Must be one of {_VALID_SCALE_FORMATS}"
             )
 
     @staticmethod

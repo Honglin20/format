@@ -83,7 +83,22 @@ def resolve_config(desc: Dict[str, Any]) -> OpQuantConfig:
     fmt = FormatBase.from_str(fmt_name)
     granularity = _resolve_granularity(desc)
     transform = _resolve_transform(desc)
-    scheme = QuantScheme(format=fmt, granularity=granularity, transform=transform)
+
+    # scale_format: "fp32" (default) or "pot"
+    scale_format = desc.get("scale_format", "fp32")
+    if not isinstance(scale_format, str):
+        raise TypeError(
+            f"'scale_format' must be a string, got {type(scale_format).__name__}"
+        )
+    if scale_format not in ("fp32", "pot"):
+        raise ValueError(
+            f"Invalid scale_format {scale_format!r}. Must be 'fp32' or 'pot'"
+        )
+
+    scheme = QuantScheme(
+        format=fmt, granularity=granularity, transform=transform,
+        scale_format=scale_format,
+    )
 
     weight_only = desc.get("weight_only", False)
     if not isinstance(weight_only, bool):
