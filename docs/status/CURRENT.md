@@ -1,10 +1,23 @@
 # Current Task
 
-**Task ID**: Phase 8 — P7 Auto Format Search（未开始）
-**Plan**: 待创建
+**Task ID**: Phase R1 — Architecture Refactor（进行中）
+**Plan**: `docs/plans/2026-05-06-architecture-refactor.md`
+**Design**: `docs/plans/2026-05-06-architecture-refactor-design.md`
 **Branch**: feature/refactor-src
 
 ## Progress
+
+### R1 — Architecture Refactor（进行中）
+
+- [x] 设计文档完成：四层依赖架构（Math → Ops → Integration → Tools）
+- [x] 实现计划完成：7 个任务
+- [ ] Task 1: 打破 formats↔quantize 循环依赖
+- [ ] Task 2: 提取 observer/ 横切包
+- [ ] Task 3: 合并小文件
+- [ ] Task 4: 创建 session/ 驱动层
+- [ ] Task 5: 删除死代码
+- [ ] Task 6: 创建 _utils/ 私有工具
+- [ ] Task 7: 最终验证 + CURRENT.md 更新
 
 ### P1 — Transform 体系 ✅
 
