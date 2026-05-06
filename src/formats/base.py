@@ -94,10 +94,10 @@ class FormatBase(ABC):
         Returns:
             Quantized tensor with same shape as x.
         """
-        from src.quantize.elemwise import _quantize_elemwise_core
+        from src.formats._core import _elemwise_core
         if saturate_normals is None:
             saturate_normals = (self.ebits == 0)
-        return _quantize_elemwise_core(
+        return _elemwise_core(
             x, self.mbits, self.ebits, self.max_norm,
             round_mode=round_mode, allow_denorm=allow_denorm,
             saturate_normals=saturate_normals,
