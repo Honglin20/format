@@ -53,6 +53,20 @@
 
 - [x] `src/pipeline/` + `src/viz/`（52 新测试，分支 `claude/pipeline-refactor` 已合入）
 
+### P8.R2 — Format Study 三层分离 ✅
+
+- [x] `ExperimentResult` dataclass + 简化 `ExperimentRunner`（`runner.py`, 159 行）
+- [x] `StudyReport` 声明式输出层（`report.py`, 新建）
+- [x] `format_study.py` 纯编排层（1086 → 711 行）
+- [x] Config schema 去 `type` 字段，统一为 configs list
+- [x] 4 张表格生成器迁移至 `src/viz/tables.py`
+- [x] `scale_format` 字段（fp32/pot），per-config 独立设置
+- [x] SQ 预处理在编排层（非 Runner 自动检测）
+- [x] Per-Layer Optimal 保留在编排层作为组合能力
+- [x] 增量保存：`on_config_done` 回调
+- [x] `examples/format_study_random.py` — 随机 tensor 验证示例
+- [x] 1,467 passed（-1 测试：旧 `skip_calib_when_none` 行为不再支持）
+
 ### P6 — Coarse Model 性能估算 ✅
 
 - [x] `src/cost/` 包（defaults, device, op_cost, model_cost, report）
@@ -80,12 +94,14 @@
 
 ## 下一步
 
+`examples/format_study_random.py` 可直接运行验证核心结论。后续用户可替换 `build_model`/`make_calib_data`/`eval_fn` 在自己的模型上验证。
+
 P7/P8/P9 推进顺序待用户选定。
 
 ## 最近变更
 
-- 2026-05-06: **架构重构完成**。四层依赖模型：Math (formats/transform/scheme/quantize) → Ops → Integration (session/) → Tools (calibration/analysis/pipeline/cost/viz/onnx)。observer/ 为横切基础设施。删除 config/、mapping/、context/ 三个包。1,468 tests，无 regression。
-- 2026-05-06: 文档体系重构完成。
+- 2026-05-06: **Format Study 三层分离完成**。runner（执行）、report（输出）、format_study（编排）三层职责分离。统一 config schema，声明式输出，scale_format per-config。
+- 2026-05-06: **架构重构完成**。四层依赖模型：Math (formats/transform/scheme/quantize) → Ops → Integration (session/) → Tools (calibration/analysis/pipeline/cost/viz/onnx)。observer/ 为横切基础设施。删除 config/、mapping/、context/ 三个包。
 
 ## 断点续传必读文件
 
@@ -97,7 +113,7 @@ P7/P8/P9 推进顺序待用户选定。
 
 `pytest src/tests/` 有 26 个预存在失败（非本分支引入）：
 - `test_golden_equiv.py` — 26 tests FileNotFoundError（golden data `.pt` 文件未 staging）
-- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,416 passed
+- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,467 passed
 
 ## 关键经验记录
 
