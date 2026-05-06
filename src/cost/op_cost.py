@@ -1,6 +1,6 @@
 """Per-operator cost functions.
 
-Formulas: docs/refs/p6-cost-model-formulas.md §2-§4.
+Formulas: docs/reference/p6-cost-model-formulas.md §2-§4.
 """
 from __future__ import annotations
 from dataclasses import dataclass

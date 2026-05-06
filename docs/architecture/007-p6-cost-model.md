@@ -5,7 +5,7 @@
 为量化模型提供**无需真实硬件部署**的延迟和显存估算。基于 modified roofline model，
 输入为模型图结构 + 量化配置，输出逐层和总计的延迟/显存。
 
-**公式权威来源**：`docs/refs/p6-cost-model-formulas.md`。实现必须与公式文档完全一致。
+**公式权威来源**：`docs/reference/p6-cost-model-formulas.md`。实现必须与公式文档完全一致。
 
 **目标精度**：与真实硬件测量误差 < 50%。
 
@@ -139,7 +139,7 @@ model_cost 遍历 `nn.Module` 树时，通过模块属性推断 op 类型和量�
 
 ### D4: 公式与实现严格对应
 
-`docs/refs/p6-cost-model-formulas.md` 是公式唯一权威来源。`op_cost.py` 中每个函数的 docstring 引用公式文档的具体节号。Review 时逐节对比公式与实现。
+`docs/reference/p6-cost-model-formulas.md` 是公式唯一权威来源。`op_cost.py` 中每个函数的 docstring 引用公式文档的具体节号。Review 时逐节对比公式与实现。
 
 ---
 

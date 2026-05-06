@@ -1,7 +1,7 @@
 # P6 Coarse Cost Model Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-> **Formula authority:** `docs/refs/p6-cost-model-formulas.md` — all calculations must match exactly.
+> **Formula authority:** `docs/reference/p6-cost-model-formulas.md` — all calculations must match exactly.
 > **Architecture:** `docs/architecture/007-p6-cost-model.md`
 
 **Goal:** Build a coarse cost model that estimates latency and memory for quantized models without real deployment.
@@ -21,7 +21,7 @@
 
 **Step 1: Create `src/cost/defaults.py`**
 
-Copy the constants from `docs/refs/p6-cost-model-formulas.md` §5 exactly:
+Copy the constants from `docs/reference/p6-cost-model-formulas.md` §5 exactly:
 
 ```python
 """Tunable constants for the coarse cost model. Adjust for different hardware targets."""
@@ -185,7 +185,7 @@ Expected: FAIL (module not found)
 """Per-operator cost functions.
 
 Each function computes OpCost for one operator type.
-Formulas: docs/refs/p6-cost-model-formulas.md §3-§4.
+Formulas: docs/reference/p6-cost-model-formulas.md §3-§4.
 """
 from __future__ import annotations
 import math

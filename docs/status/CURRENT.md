@@ -71,6 +71,10 @@
 
 从 P7/P8/P9 中选定一个方向，创建实现计划并开始。
 
+## 最近变更
+
+- 2026-05-06: 文档体系重构完成。CLAUDE.md 精简为入口文件，docs/ 按内容类型重组织（principles/standards/workflow/architecture/plans/reviews/reference/verification/status），各级有 INDEX.md。
+
 ## 断点续传必读文件
 
 1. `docs/architecture/007-p6-cost-model.md`（P6 Cost Model 已完成，可参考作为下个 phase 的模板）

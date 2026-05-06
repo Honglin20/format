@@ -62,7 +62,7 @@ print(f"fp32: {result['fp32']}, quant: {result['quant']}, delta: {result['delta'
 session.export_onnx("model.onnx")
 ```
 
-> 更详细的配置方式、分层配置、Transform、QAT、LSQ 等见 [快速开始详解](docs/refs/quickstart-details.md)。
+> 更详细的配置方式、分层配置、Transform、QAT、LSQ 等见 [快速开始详解](docs/reference/quickstart-details.md)。
 
 ## 支持的数值格式
 
@@ -106,9 +106,12 @@ pytest src/tests/ -q
 
 ## 文档索引
 
+→ **[docs/INDEX.md](docs/INDEX.md)** — 完整文档导航
+
 | 文档 | 内容 |
 |---|---|
-| [快速开始详解](docs/refs/quickstart-details.md) | 配置方式、Transform、Calibration、QAT、ONNX 导出、LSQ |
+| [快速开始详解](docs/reference/quickstart-details.md) | 配置方式、Transform、Calibration、QAT、ONNX 导出、LSQ |
 | [架构决策文档](docs/architecture/) | ADR-001 ~ ADR-007（三轴方案、Observer、ONNX、OpQuantConfig 等） |
-| [P6 Cost Model 公式](docs/refs/p6-cost-model-formulas.md) | 延迟/显存估算公式 |
-| [Format Study 实验](docs/refs/format_study_usage.md) | 量化格式精度对比实验 |
+| [P6 Cost Model 公式](docs/reference/p6-cost-model-formulas.md) | 延迟/显存估算公式 |
+| [Format Study 实验](docs/reference/format_study_usage.md) | 量化格式精度对比实验 |
+| [开发规范](docs/INDEX.md) | 开发准则、规范、流程、Phase 计划 |
