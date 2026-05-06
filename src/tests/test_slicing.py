@@ -7,7 +7,7 @@ DYNAMIC_GROUP (stub), and unknown mode error.
 import pytest
 import torch
 
-from src.analysis.slicing import iter_slices, SliceKey
+from src._utils.slicing import iter_slices, SliceKey
 from src.scheme.granularity import GranularitySpec, GranularityMode
 
 

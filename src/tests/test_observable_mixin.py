@@ -13,7 +13,7 @@ import torch
 from src.observer.mixin import ObservableMixin
 from src.observer.events import QuantEvent
 from src.observer import ObserverBase, SliceAwareObserver
-from src.analysis.slicing import SliceKey
+from src._utils.slicing import SliceKey
 from src.scheme.quant_scheme import QuantScheme
 
 
