@@ -1,23 +1,21 @@
 # Current Task
 
-**Task ID**: Phase R1 — Architecture Refactor（进行中）
-**Plan**: `docs/plans/2026-05-06-architecture-refactor.md`
-**Design**: `docs/plans/2026-05-06-architecture-refactor-design.md`
+**Task ID**: Phase 8 — P7 Auto Format Search（未开始）
+**Plan**: 待创建
 **Branch**: feature/refactor-src
 
 ## Progress
 
-### R1 — Architecture Refactor（进行中）
+### R1 — Architecture Refactor ✅
 
-- [x] 设计文档完成：四层依赖架构（Math → Ops → Integration → Tools）
-- [x] 实现计划完成：7 个任务
-- [ ] Task 1: 打破 formats↔quantize 循环依赖
-- [ ] Task 2: 提取 observer/ 横切包
-- [ ] Task 3: 合并小文件
-- [ ] Task 4: 创建 session/ 驱动层
-- [ ] Task 5: 删除死代码
-- [ ] Task 6: 创建 _utils/ 私有工具
-- [ ] Task 7: 最终验证 + CURRENT.md 更新
+- [x] 设计文档：四层依赖架构（Math → Ops → Integration → Tools）
+- [x] Task 1: 打破 formats↔quantize 循环依赖（`formats/_core.py`）
+- [x] Task 2: 提取 observer/ 横切包（`observer/`）
+- [x] Task 3: 合并过小文件（cost/device, pipeline/runner, viz/figures）
+- [x] Task 4: 创建 session/ 驱动层（吸收 session.py + mapping/ + context/）
+- [x] Task 5: 删除死代码（config/, analysis/export.py）
+- [x] Task 6: 创建 _utils/ 私有工具
+- [x] Task 7: 最终验证（1,468 passed, 无 regression）
 
 ### P1 — Transform 体系 ✅
 
@@ -82,17 +80,18 @@
 
 ## 下一步
 
-从 P7/P8/P9 中选定一个方向，创建实现计划并开始。
+P7/P8/P9 推进顺序待用户选定。
 
 ## 最近变更
 
-- 2026-05-06: 文档体系重构完成。CLAUDE.md 精简为入口文件，docs/ 按内容类型重组织（principles/standards/workflow/architecture/plans/reviews/reference/verification/status），各级有 INDEX.md。
+- 2026-05-06: **架构重构完成**。四层依赖模型：Math (formats/transform/scheme/quantize) → Ops → Integration (session/) → Tools (calibration/analysis/pipeline/cost/viz/onnx)。observer/ 为横切基础设施。删除 config/、mapping/、context/ 三个包。1,468 tests，无 regression。
+- 2026-05-06: 文档体系重构完成。
 
 ## 断点续传必读文件
 
-1. `docs/architecture/007-p6-cost-model.md`（P6 Cost Model 已完成，可参考作为下个 phase 的模板）
+1. `docs/architecture/007-p6-cost-model.md`（P6 Cost Model，可参考作为下个 phase 的模板）
 2. `~/.claude/projects/.../memory/format-research-roadmap.md`（优先级全貌）
-3. `src/cost/` 目录（P6 实现，共 5 个文件）
+3. `CLAUDE.md` 架构第一性原理章节（四层依赖模型的权威定义）
 
 ## 已知预存在测试失败
 
