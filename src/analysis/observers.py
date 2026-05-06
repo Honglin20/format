@@ -1,4 +1,7 @@
+from typing import List
+
 import torch
+
 from src.analysis.observer import SliceAwareObserver
 
 
@@ -67,12 +70,60 @@ class QSNRObserver(SliceAwareObserver):
         den = err.pow(2).mean().clamp_min(1e-30)
         return {"qsnr_db": (10 * torch.log10(num / den)).item()}
 
+    def _measure_per_unit(self, fp32_2d, quant_2d):
+        """Vectorized: one kernel per metric over [N, D]."""
+        err = fp32_2d - quant_2d
+        num = fp32_2d.pow(2).mean(dim=1)
+        den = err.pow(2).mean(dim=1).clamp_min(1e-30)
+        qsnr = 10 * torch.log10(num / den)
+        return [{"qsnr_db": v} for v in qsnr.tolist()]
+
+    def _measure_batch(self, fp32_2d, quant_2d, valid_counts=None):
+        """Vectorized per-block aggregate: mean/std/min/max of per-block QSNR.
+
+        QSNR ratio is invariant to the divisor (sum(f²)/k / sum(err²)/k =
+        sum(f²)/sum(err²)), so .mean(dim=1) is correct even for partial blocks.
+        """
+        err = fp32_2d - quant_2d
+        num = fp32_2d.pow(2).mean(dim=1)
+        den = err.pow(2).mean(dim=1).clamp_min(1e-30)
+        qsnr = 10 * torch.log10(num / den)
+        return {
+            "qsnr_db": qsnr.mean().item(),
+            "qsnr_db_std": qsnr.std(unbiased=False).item() if qsnr.numel() > 1 else 0.0,
+            "qsnr_db_min": qsnr.min().item(),
+            "qsnr_db_max": qsnr.max().item(),
+        }
+
 
 class MSEObserver(SliceAwareObserver):
     """Mean squared error per slice."""
 
     def _measure(self, key, fp32, quant):
         return {"mse": (fp32 - quant).pow(2).mean().item()}
+
+    def _measure_per_unit(self, fp32_2d, quant_2d):
+        """Vectorized: one kernel over [N, D]."""
+        mse = (fp32_2d - quant_2d).pow(2).mean(dim=1)
+        return [{"mse": v} for v in mse.tolist()]
+
+    def _measure_batch(self, fp32_2d, quant_2d, valid_counts=None):
+        """Vectorized per-block aggregate: mean/std/min/max of per-block MSE.
+
+        Uses valid_counts for correct partial-block measurement when
+        dim_size % block_size != 0.
+        """
+        err_sq = (fp32_2d - quant_2d).pow(2)
+        if valid_counts is not None:
+            mse = err_sq.sum(dim=1) / valid_counts.clamp_min(1)
+        else:
+            mse = err_sq.mean(dim=1)
+        return {
+            "mse": mse.mean().item(),
+            "mse_std": mse.std(unbiased=False).item() if mse.numel() > 1 else 0.0,
+            "mse_min": mse.min().item(),
+            "mse_max": mse.max().item(),
+        }
 
 
 class HistogramObserver(SliceAwareObserver):

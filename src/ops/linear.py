@@ -63,11 +63,14 @@ class LinearFunction(torch.autograd.Function):
             fp_w = w; w = quantize(w, cfg.weight)
             if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, w, cfg.weight)
 
-        # bias: storage only
+        # bias: storage → compute
         q_bias = b
         if b is not None and cfg.storage is not None:
             fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
             if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if b is not None and cfg.bias is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
         # Save for backward: post-storage if training, raw if STE
         if cfg.is_training:
@@ -84,19 +87,19 @@ class LinearFunction(torch.autograd.Function):
         # matmul
         y = _F_linear(x, w)
 
-        # output step 1 (post-matmul): storage
+        # output step 1 (post-matmul): storage (per-tensor, ignores scale)
         if cfg.storage is not None:
-            fp_y = y; y = quantize(y, cfg.storage, scale=output_scale)
+            fp_y = y; y = quantize(y, cfg.storage)
             if emit_fn: emit_fn("output", 0, "output_post_quant", fp_y, y, cfg.storage)
 
         # bias add + output step 2 (post-bias): storage
         if q_bias is not None:
             y = y + q_bias
             if cfg.storage is not None:
-                fp_y = y; y = quantize(y, cfg.storage, scale=output_scale)
+                fp_y = y; y = quantize(y, cfg.storage)
                 if emit_fn: emit_fn("output", 1, "output_post_quant", fp_y, y, cfg.storage)
 
-        # output compute (applied after all storage steps)
+        # output compute: calibrated scale applies here (per-channel / per-block)
         if cfg.output is not None:
             fp_y = y; y = quantize(y, cfg.output, scale=output_scale)
             if emit_fn: emit_fn("output", 2, "output_post_quant", fp_y, y, cfg.output)
@@ -197,6 +200,8 @@ class LinearFunction(torch.autograd.Function):
         if b is not None:
             if cfg.storage is not None:
                 b = _emit_quantize_node(g, b, cfg.storage)
+            if cfg.bias is not None:
+                b = _emit_quantize_node(g, b, cfg.bias)
             y = g.op("Add", y, b)
             if cfg.storage is not None:
                 y = _emit_quantize_node(g, y, cfg.storage)

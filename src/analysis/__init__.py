@@ -5,8 +5,7 @@ Phase 4: full AnalysisContext + concrete Observers + Report + Distribution taxon
 """
 from .events import QuantEvent
 from .mixin import ObservableMixin
-from .observer import ObserverBase, SliceAwareObserver
-from .slicing import iter_slices, SliceKey
+from .observer import ObserverBase, SliceAwareObserver, SliceKey
 from .observers import DistributionObserver, QSNRObserver, MSEObserver, HistogramObserver
 from .context import AnalysisContext
 

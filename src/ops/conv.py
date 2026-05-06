@@ -97,11 +97,14 @@ class ConvFunction(torch.autograd.Function):
             fp_wt = weight; weight = quantize(weight, cfg.weight)
             if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_wt, weight, cfg.weight)
 
-        # bias: storage only
+        # bias: storage → compute
         q_bias = bias
         if bias is not None and cfg.storage is not None:
             fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
             if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if bias is not None and cfg.bias is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
         # Save for backward
         if cfg.is_training:
@@ -382,11 +385,14 @@ class ConvTransposeFunction(torch.autograd.Function):
             fp_wt = weight; weight = quantize(weight, cfg.weight)
             if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_wt, weight, cfg.weight)
 
-        # bias: storage only
+        # bias: storage → compute
         q_bias = bias
         if bias is not None and cfg.storage is not None:
             fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
             if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if bias is not None and cfg.bias is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
         # Save for backward
         if cfg.is_training:
