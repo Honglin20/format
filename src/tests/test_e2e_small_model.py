@@ -11,7 +11,7 @@ import torch.nn as nn
 import mx
 from mx.specs import apply_mx_specs
 
-from src.mapping.quantize_model import quantize_model
+from src.session import quantize_model
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.tests._compat import op_config_from_mx_specs

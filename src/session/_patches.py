@@ -14,8 +14,8 @@ these patches and cause infinite recursion.
 import torch
 import torch.nn.functional as F
 
-from src.context._state import _ctx_state, _EMPTY_CFG
-from src.context._stack import get_layer_name
+from src.session._context import _ctx_state, _EMPTY_CFG
+from src.session._context import get_layer_name
 
 # Eagerly import Function classes so their module-level _torch_* saves are
 # captured BEFORE apply_patches() is ever called. If these were deferred

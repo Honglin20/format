@@ -19,7 +19,7 @@ from typing import Dict, Optional, Union
 import torch.nn as nn
 
 from src.scheme.op_config import OpQuantConfig
-from src.context.quantize_context import QuantizeContext
+from src.session._context import QuantizeContext
 
 # ---------------------------------------------------------------------------
 # Module type → Quantized constructor + param extractor

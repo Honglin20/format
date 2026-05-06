@@ -66,7 +66,7 @@ class TestLayerwiseScaleOptimizerIntegration:
 
     def test_optimizer_runs_and_produces_scales(self):
         from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
 
         torch.manual_seed(42)
         model = _TinyModel()
@@ -102,7 +102,7 @@ class TestLayerwiseScaleOptimizerIntegration:
     def test_pot_optimization_produces_power_of_two_scales(self):
         """With pot=True, optimized scales should be exact powers of two."""
         from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
 
         torch.manual_seed(42)
         model = _TinyModel()

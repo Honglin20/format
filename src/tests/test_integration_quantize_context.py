@@ -13,7 +13,7 @@ import torch.nn as nn
 import mx
 from mx.specs import apply_mx_specs
 
-from src.context.quantize_context import QuantizeContext
+from src.session import QuantizeContext
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec, GranularityMode
@@ -805,7 +805,7 @@ class TestQuantizeModelUnified:
 
     def test_all_ops_quantized(self):
         """quantize_model(model, cfg) → model(x) quantizes both paths."""
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
@@ -824,7 +824,7 @@ class TestQuantizeModelUnified:
 
     def test_forward_backward_runs(self):
         """quantize_model model can run forward + backward without error."""
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
@@ -842,7 +842,7 @@ class TestQuantizeModelUnified:
     def test_export_onnx(self, tmp_path):
         """model.export_onnx via quantize_model produces valid ONNX."""
         import onnx
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
@@ -859,7 +859,7 @@ class TestQuantizeModelUnified:
 
     def test_identical_to_separate_paths(self):
         """quantize_model result == explicit module replacement + QuantizeContext."""
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         from src.ops.linear import QuantizedLinear
         s = _scheme("int8", GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
@@ -888,7 +888,7 @@ class TestQuantizeModelUnified:
 
     def test_op_cfgs_per_op_override(self):
         """Per-op cfg override works through quantize_model."""
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         default_cfg = OpQuantConfig()       # passthrough (no quant)
         matmul_cfg = _cfg_fw("int8")        # int8 quant
 

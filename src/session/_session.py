@@ -36,7 +36,7 @@ from src.calibration.strategies import MaxScaleStrategy, ScaleStrategy
 from src.analysis.context import AnalysisContext
 from src.analysis.e2e import Comparator, compare_models, _default_accuracy
 from src.analysis.observers import QSNRObserver
-from src.mapping.quantize_model import quantize_model
+from src.session._model import quantize_model
 from src.scheme.op_config import OpQuantConfig
 
 

@@ -32,7 +32,7 @@ def _make_cfg(**roles):
 # Task 2 — _CtxState + _ctx_state
 # ---------------------------------------------------------------------------
 
-from src.context._state import _ctx_state, _CtxState, _EMPTY_CFG
+from src.session._context import _ctx_state, _CtxState, _EMPTY_CFG
 
 
 def test_ctx_state_not_active_by_default():
@@ -67,7 +67,7 @@ def test_ctx_state_resolve_per_op_override():
 # Task 2 — module stack
 # ---------------------------------------------------------------------------
 
-from src.context._stack import install_stack_hooks, remove_stack_hooks, get_layer_name
+from src.session._context import install_stack_hooks, remove_stack_hooks, get_layer_name
 
 
 def test_get_layer_name_empty():
@@ -126,7 +126,7 @@ def test_simd_symbolic_methods_exist():
 # ---------------------------------------------------------------------------
 
 def test_patch_table_has_all_ops():
-    from src.context._patches import _PATCH_TABLE
+    from src.session._patches import _PATCH_TABLE
     expected = {
         ("torch", "matmul"), ("torch", "mm"), ("torch", "bmm"),
         ("torch", "add"), ("torch", "sub"), ("torch", "mul"),
@@ -137,19 +137,19 @@ def test_patch_table_has_all_ops():
 
 
 def test_patched_matmul_passthrough_without_context():
-    from src.context._patches import _patched_matmul
+    from src.session._patches import _patched_matmul
     a, b = torch.randn(3, 4), torch.randn(4, 5)
     assert torch.equal(_patched_matmul(a, b), torch.matmul(a, b))
 
 
 def test_patched_add_passthrough_without_context():
-    from src.context._patches import _patched_add
+    from src.session._patches import _patched_add
     a, b = torch.randn(3, 4), torch.randn(3, 4)
     assert torch.equal(_patched_add(a, b), torch.add(a, b))
 
 
 def test_patched_matmul_quantizes_with_active_context():
-    from src.context._patches import _patched_matmul
+    from src.session._patches import _patched_matmul
     cfg = _make_cfg()
     state = _CtxState(cfg=cfg)
     tok = _ctx_state.set(state)
@@ -163,7 +163,7 @@ def test_patched_matmul_quantizes_with_active_context():
 
 
 def test_patched_F_linear_quantizes_with_active_context():
-    from src.context._patches import _patched_F_linear
+    from src.session._patches import _patched_F_linear
     import torch.nn.functional as F_orig
     cfg = _make_cfg()
     state = _CtxState(cfg=cfg)
@@ -180,7 +180,7 @@ def test_patched_F_linear_quantizes_with_active_context():
 
 def test_patched_add_with_scalar_passthrough():
     """Scalar second argument must not be routed through SIMDAdd."""
-    from src.context._patches import _patched_add
+    from src.session._patches import _patched_add
     a = torch.randn(3, 4)
     state = _CtxState(cfg=_make_cfg())
     tok = _ctx_state.set(state)
@@ -196,7 +196,7 @@ def test_patched_add_with_scalar_passthrough():
 # ---------------------------------------------------------------------------
 
 def test_context_quantizes_torch_matmul():
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(1, 1)  # just needs a module for hook installation
     a, b = torch.randn(3, 4), torch.randn(4, 5)
@@ -209,7 +209,7 @@ def test_context_quantizes_torch_matmul():
 
 
 def test_context_restores_ops_on_exit():
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(1, 1)
     a, b = torch.randn(3, 4), torch.randn(4, 5)
@@ -225,7 +225,7 @@ def test_context_restores_ops_on_exit():
 
 def test_context_intercepts_nn_linear_forward():
     """nn.Linear.forward calls F.linear, which the context intercepts."""
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(8, 4, bias=False)
     x = torch.randn(2, 8)
@@ -238,7 +238,7 @@ def test_context_intercepts_nn_linear_forward():
 
 
 def test_context_intercepts_torch_add():
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(1, 1)
     a, b = torch.randn(3, 4), torch.randn(3, 4)
@@ -252,7 +252,7 @@ def test_context_intercepts_torch_add():
 
 def test_per_op_override_only_quantizes_specified_op():
     """Default cfg = no-quant; only matmul is overridden to int8."""
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     default_cfg = OpQuantConfig()   # no quantization
     matmul_cfg = _make_cfg()
     model = nn.Linear(1, 1)
@@ -270,7 +270,7 @@ def test_per_op_override_only_quantizes_specified_op():
 
 def test_context_no_double_quantization():
     """F.linear inside LinearFunction.forward uses _F_linear, not the patch."""
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(8, 4, bias=False)
     x = torch.randn(2, 8)
@@ -284,7 +284,7 @@ def test_context_no_double_quantization():
 
 def test_context_restores_ops_on_exception():
     """Patches must be removed even when the with-block raises."""
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(1, 1)
     try:
@@ -298,7 +298,7 @@ def test_context_restores_ops_on_exception():
 
 def test_nested_contexts_isolate_cfg():
     """Inner context cfg does not bleed into outer after inner exits."""
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     outer_cfg = OpQuantConfig()        # no quantization
     inner_cfg = _make_cfg()
     model = nn.Linear(1, 1)
@@ -317,7 +317,7 @@ def test_nested_contexts_isolate_cfg():
 
 def test_patched_mm_quantizes_with_active_context():
     """torch.mm should be intercepted and quantized like torch.matmul."""
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(1, 1)
     a, b = torch.randn(3, 4), torch.randn(4, 5)
@@ -331,7 +331,7 @@ def test_patched_mm_quantizes_with_active_context():
 
 def test_patched_mul_scalar_first_passthrough():
     """torch.mul(scalar, tensor) must not crash when context is active."""
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(1, 1)
     t = torch.randn(3, 4)
@@ -343,7 +343,7 @@ def test_patched_mul_scalar_first_passthrough():
 
 
 def test_context_is_not_active_outside_with_block():
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Linear(1, 1)
 
@@ -362,7 +362,7 @@ def test_context_is_not_active_outside_with_block():
 def test_export_onnx_nn_linear(tmp_path):
     """Linear model exports valid ONNX with QDQ nodes."""
     import onnx
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
     cfg = _make_cfg()
     model = nn.Sequential(nn.Linear(8, 4), nn.ReLU())
     x = torch.randn(2, 8)
@@ -379,7 +379,7 @@ def test_export_onnx_nn_linear(tmp_path):
 def test_export_onnx_inline_matmul(tmp_path):
     """Model with inline torch.matmul exports valid ONNX."""
     import onnx
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
 
     class SelfAttnShape(nn.Module):
         def forward(self, x):
@@ -402,7 +402,7 @@ def test_export_onnx_inline_matmul(tmp_path):
 def test_export_onnx_with_add(tmp_path):
     """Model with torch.add exports valid ONNX."""
     import onnx
-    from src.context.quantize_context import QuantizeContext
+    from src.session import QuantizeContext
 
     class Residual(nn.Module):
         def forward(self, x):
