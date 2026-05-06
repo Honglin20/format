@@ -62,6 +62,7 @@
 - [x] 4 张表格生成器迁移至 `src/viz/tables.py`
 - [x] `scale_format` 字段（fp32/pot），per-config 独立设置
 - [x] SQ 预处理在编排层（非 Runner 自动检测）
+- [x] `act_format` 字段 — per-role mixed-precision（wXaY，weight 用 format，input/output 用 act_format）
 - [x] Per-Layer Optimal 保留在编排层作为组合能力
 - [x] 增量保存：`on_config_done` 回调
 - [x] `examples/format_study_random.py` — 随机 tensor 验证示例
@@ -100,7 +101,7 @@ P7/P8/P9 推进顺序待用户选定。
 
 ## 最近变更
 
-- 2026-05-06: **Format Study 三层分离完成**。runner（执行）、report（输出）、format_study（编排）三层职责分离。统一 config schema，声明式输出，scale_format per-config。
+- 2026-05-06: **Format Study 三层分离完成**。runner（执行）、report（输出）、format_study（编排）三层职责分离。统一 config schema，声明式输出，scale_format per-config + act_format wXaY mixed-precision 支持。
 - 2026-05-06: **架构重构完成**。四层依赖模型：Math (formats/transform/scheme/quantize) → Ops → Integration (session/) → Tools (calibration/analysis/pipeline/cost/viz/onnx)。observer/ 为横切基础设施。删除 config/、mapping/、context/ 三个包。
 
 ## 断点续传必读文件
