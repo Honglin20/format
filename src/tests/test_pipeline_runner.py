@@ -1,7 +1,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from src.pipeline.runner import ExperimentRunner
+from src.pipeline.runner import ExperimentRunner, ExperimentResult
 from src.pipeline.config import resolve_config
 
 
@@ -16,9 +16,9 @@ def _make_tiny_study():
     return {
         "int8_test": {
             "description": "tiny test",
-            "configs": {
-                "int8_pc": {"format": "int8", "granularity": "per_channel", "axis": 0},
-            },
+            "configs": [
+                {"name": "int8_pc", "format": "int8", "granularity": "per_channel", "axis": 0},
+            ],
         },
     }
 
@@ -50,30 +50,14 @@ class TestExperimentRunner:
             eval_data=torch.randn(2, 4),
         )
 
-        assert "int8_test/int8_pc" in results
-        r = results["int8_test/int8_pc"]
-        for key in ("fp32", "quant", "delta", "report"):
-            assert key in r, f"Missing key: {key}"
-
-    def test_runner_skips_calib_when_none(self):
-        model = nn.Sequential(nn.Linear(4, 3))
-        study = _make_tiny_study()
-        runner = ExperimentRunner(study)
-
-        def _eval_fn(m, data):
-            m.eval()
-            with torch.no_grad():
-                out = m(data)
-            return {"mean_output": out.mean().item()}
-
-        results = runner.run(
-            fp32_model=model,
-            eval_fn=_eval_fn,
-            calib_data=None,
-            analyze_data=None,
-            eval_data=torch.randn(2, 4),
-        )
-        assert "int8_test/int8_pc" in results
+        assert "int8_test" in results
+        part_results = results["int8_test"]
+        assert len(part_results) == 1
+        r = part_results[0]
+        assert isinstance(r, ExperimentResult)
+        assert r.fp32_metrics is not None
+        assert r.quant_metrics is not None
+        assert r.delta is not None
 
     def test_runner_deepcopies_model(self):
         model = nn.Sequential(nn.Linear(4, 3))

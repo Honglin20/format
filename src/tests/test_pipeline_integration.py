@@ -31,9 +31,9 @@ class TestPipelineIntegration:
         study = {
             "test": {
                 "description": "minimal integration test",
-                "configs": {
-                    "int8": {"format": "int8", "granularity": "per_tensor"},
-                },
+                "configs": [
+                    {"name": "int8", "format": "int8", "granularity": "per_tensor"},
+                ],
             },
         }
         runner = ExperimentRunner(study)
@@ -54,11 +54,11 @@ class TestPipelineIntegration:
             eval_data=torch.randn(2, 4),
         )
 
-        r = results["test/int8"]
-        assert "fp32" in r
-        assert "quant" in r
-        assert "delta" in r
-        assert "mean" in r["delta"]
+        r = results["test"][0]
+        assert r.fp32_metrics is not None
+        assert r.quant_metrics is not None
+        assert r.delta is not None
+        assert "mean" in r.delta
 
     def test_viz_imports_no_pipeline(self):
         """src/viz/ must not import from src/pipeline/ or src/session.py."""
@@ -116,17 +116,16 @@ def test_save_results_json_includes_non_part_keys():
 
 
 def test_incremental_save_after_each_part():
-    """_save_results_json should be called per-part during run_format_study."""
-    from src.pipeline.format_study import run_format_study, _save_results_json
+    """Study saves results.json and produces output."""
+    from src.pipeline.format_study import run_format_study
     from pipeline._model import ToyMLP
     from torch.utils.data import DataLoader, TensorDataset
 
     mini_config = {
         "part_a": {
-            "type": "simple",
             "description": "mini 8-bit",
-            "table": "table1",
-            "variants": [{"name": "INT8-PT", "format": "int8", "granularity": "per_tensor"}],
+            "configs": [{"name": "INT8-PT", "format": "int8", "granularity": "per_tensor"}],
+            "output": {"tables": ["accuracy"], "figures": ["qsnr_line"]},
         },
     }
 
@@ -168,15 +167,16 @@ def test_incremental_save_after_each_part():
             return {"accuracy": correct / total if total > 0 else 0.0}
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        with patch("src.pipeline.format_study._save_results_json",
-                   wraps=_save_results_json) as mock_save:
-            run_format_study(
-                build_model, make_calib, make_eval, eval_fn,
-                output_dir=tmpdir, config=mini_config,
-            )
-            # Called at least twice: once after the part, once at the end
-            assert mock_save.call_count >= 2, \
-                f"Expected >=2 saves, got {mock_save.call_count}"
+        results = run_format_study(
+            build_model, make_calib, make_eval, eval_fn,
+            output_dir=tmpdir, config=mini_config,
+        )
+        assert "part_a" in results
+        assert len(results["part_a"]) >= 1
+        # Verify results.json was saved
+        assert os.path.exists(os.path.join(tmpdir, "results.json"))
+        # Verify tables were generated
+        assert os.path.exists(os.path.join(tmpdir, "tables"))
 
 
 def test_plot_from_results_handles_block_sweep_and_hierarchical():

@@ -5,7 +5,7 @@ Format Study Configuration
 修改实验只需改动此文件中的 ``STUDY_CONFIG`` 字典，无需修改 runner 代码。
 
 ----
-每个 variant 支持的字段
+每个 config dict 支持的字段
 ----
 
 ============================  ========  ====================================================
@@ -21,6 +21,7 @@ Format Study Configuration
 ``lsq_steps``                 否        LSQ 优化步数（0 = 不做 LSQ）
 ``lsq_pot``                   否        LSQ 约束 power-of-two
 ``lsq_lr``                    否        LSQ 学习率（默认 1e-3）
+``scale_format``              否        缩放格式：``"fp32"``（默认） | ``"pot"``
 ============================  ========  ====================================================
 
 ----
@@ -36,21 +37,28 @@ Format Study Configuration
 添加新实验
 ----
 
-**加一个 variant**：在对应 part 的 ``variants`` 列表里加一个 dict。
+**加一个 config**：在对应 part 的 ``configs`` 列表里加一个 dict。
 **加一个新 part**：在 ``STUDY_CONFIG`` 里新增一个 key，结构仿照已有 part。
 **跳过某个 part**：把该 part 的 key 注释掉或删除即可。
 
 ----
-Part 类型说明
+Part output 声明
 ----
 
-================  ==============================================================
-``"simple"``      基础对比实验：遍历 variants，每个跑一次 quantize→calibrate→analyze→evaluate
-``"transform"``   变换研究：对每个 format 跑 None / Hadamard / SmoothQuant 三组对比，
-                  然后自动选出 per-layer 最优变换组合
-``"pot_scaling"`` PoT 缩放对比：每个 variant 跑两次（pot=False + pot=True），启用 LSQ
-``"block_sweep"`` 块大小扫描：对指定 format 扫描 [16, 32, 64, 128] 四个块大小
-================  ==============================================================
+每个 part 可以声明 ``output``，指定要生成的表格和图表类型：
+
+.. code-block:: python
+
+   "output": {
+       "tables": ["accuracy", "pot_delta", "transform_matrix"],
+       "figures": ["qsnr_line", "mse_box"],
+   }
+
+可用表格 key: ``accuracy``, ``pot_delta``, ``transform_matrix``,
+``transform_distribution``, ``sensitivity``
+可用图表 key: ``qsnr_line``, ``mse_box``, ``pot_delta_bar``, ``transform_heatmap``,
+``transform_pie``, ``transform_delta``, ``histogram``, ``error_vs_dist``,
+``layer_type_qsnr``, ``block_sweep``, ``hierarchical_delta``
 """
 
 from __future__ import annotations
@@ -64,87 +72,102 @@ STUDY_CONFIG: dict = {
     # Part A: 8-bit 格式对比
     # =====================================================================
     "part_a": {
-        "type": "simple",
         "description": "8-bit Format Comparison",
-        "table": "table1",
-        "variants": [
+        "configs": [
             {"name": "MXINT-8", "format": "int8",     "granularity": "per_block",   "block_size": 32},
             {"name": "MXFP-8",  "format": "fp8_e4m3", "granularity": "per_block",   "block_size": 32},
-            {"name": "INT8-PC", "format": "int8",     "granularity": "per_channel", "axis": -1},
+            {"name": "INT8-PC", "format": "int8",     "granularity": "per_channel", "axis": -1, "scale_format": "fp32"},
         ],
+        "output": {"tables": ["accuracy"], "figures": ["qsnr_line", "mse_box"]},
     },
 
     # =====================================================================
     # Part B: 4-bit 格式对比
     # =====================================================================
     "part_b": {
-        "type": "simple",
         "description": "4-bit Format Comparison",
-        "table": "table2",
-        "variants": [
+        "configs": [
             {"name": "MXINT-4", "format": "int4",     "granularity": "per_block",   "block_size": 32},
             {"name": "MXFP-4",  "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32},
-            {"name": "INT4-PC", "format": "int4",     "granularity": "per_channel", "axis": -1},
-            {"name": "NF4-PC",  "format": "nf4",      "granularity": "per_channel", "axis": -1, "weight_only": True},
+            {"name": "INT4-PC", "format": "int4",     "granularity": "per_channel", "axis": -1, "scale_format": "fp32"},
+            {"name": "NF4-PC",  "format": "nf4",      "granularity": "per_channel", "axis": -1, "weight_only": True, "scale_format": "fp32"},
         ],
+        "output": {"tables": ["accuracy"], "figures": ["qsnr_line", "mse_box"]},
     },
 
     # =====================================================================
     # Part C: FP32 vs PoT 缩放对比（LSQ 优化）
     # =====================================================================
     "part_c": {
-        "type": "pot_scaling",
         "description": "FP32 vs PoT Scaling",
-        "table": "table3",
-        "lsq_steps": 100,
-        "variants": [
-            {"name": "INT8-PC", "format": "int8", "granularity": "per_channel", "axis": -1},
-            {"name": "INT4-PC", "format": "int4", "granularity": "per_channel", "axis": -1},
+        "configs": [
+            {"name": "INT8-PC-FP32", "format": "int8", "granularity": "per_channel", "axis": -1, "scale_format": "fp32",
+             "lsq_steps": 100, "lsq_pot": False},
+            {"name": "INT8-PC-PoT",  "format": "int8", "granularity": "per_channel", "axis": -1, "scale_format": "pot",
+             "lsq_steps": 100, "lsq_pot": True},
+            {"name": "INT4-PC-FP32", "format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "fp32",
+             "lsq_steps": 100, "lsq_pot": False},
+            {"name": "INT4-PC-PoT",  "format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "pot",
+             "lsq_steps": 100, "lsq_pot": True},
         ],
+        "output": {"tables": ["accuracy", "pot_delta"], "figures": ["pot_delta_bar"]},
     },
 
     # =====================================================================
     # Part D: 4-bit 变换研究（None / Hadamard / SmoothQuant / PerLayerOpt）
     # =====================================================================
     "part_d": {
-        "type": "transform",
         "description": "Transform Study at 4-bit (MLP)",
-        "table": "table4",
-        "variants": [
-            {"name": "MXINT-4", "format": "int4",     "granularity": "per_block",   "block_size": 32},
-            {"name": "MXFP-4",  "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32},
-            {"name": "INT4-PC", "format": "int4",     "granularity": "per_channel", "axis": -1},
-            {"name": "NF4-PC",  "format": "nf4",      "granularity": "per_channel", "axis": -1, "weight_only": True},
+        "configs": [
+            # MXINT-4 variants
+            {"name": "MXINT-4-None",         "format": "int4",     "granularity": "per_block",   "block_size": 32, "transform": "none"},
+            {"name": "MXINT-4-Hadamard",     "format": "int4",     "granularity": "per_block",   "block_size": 32, "transform": "hadamard"},
+            {"name": "MXINT-4-SmoothQuant",  "format": "int4",     "granularity": "per_block",   "block_size": 32, "transform": "smoothquant"},
+            # MXFP-4 variants
+            {"name": "MXFP-4-None",          "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32, "transform": "none"},
+            {"name": "MXFP-4-Hadamard",      "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32, "transform": "hadamard"},
+            {"name": "MXFP-4-SmoothQuant",   "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32, "transform": "smoothquant"},
+            # INT4-PC variants
+            {"name": "INT4-PC-None",         "format": "int4",     "granularity": "per_channel", "axis": -1,       "transform": "none", "scale_format": "fp32"},
+            {"name": "INT4-PC-Hadamard",     "format": "int4",     "granularity": "per_channel", "axis": -1,       "transform": "hadamard", "scale_format": "fp32"},
+            {"name": "INT4-PC-SmoothQuant",  "format": "int4",     "granularity": "per_channel", "axis": -1,       "transform": "smoothquant", "scale_format": "fp32"},
+            # NF4-PC variants (weight-only)
+            {"name": "NF4-PC-None",          "format": "nf4",      "granularity": "per_channel", "axis": -1,       "weight_only": True, "transform": "none", "scale_format": "fp32"},
+            {"name": "NF4-PC-Hadamard",      "format": "nf4",      "granularity": "per_channel", "axis": -1,       "weight_only": True, "transform": "hadamard", "scale_format": "fp32"},
+            {"name": "NF4-PC-SmoothQuant",   "format": "nf4",      "granularity": "per_channel", "axis": -1,       "weight_only": True, "transform": "smoothquant", "scale_format": "fp32"},
         ],
+        "output": {"tables": ["accuracy", "transform_matrix", "transform_distribution"], "figures": ["qsnr_line", "transform_heatmap", "transform_pie", "transform_delta"]},
     },
 
     # =====================================================================
     # Block Size 扫描
     # =====================================================================
     "block_sweep": {
-        "type": "block_sweep",
         "description": "Block size sensitivity sweep (int8)",
-        "format": "int8",
-        "block_sizes": [16, 32, 64, 128],
+        "configs": [
+            {"name": "int8-blk16", "format": "int8", "granularity": "per_block", "block_size": 16},
+            {"name": "int8-blk32", "format": "int8", "granularity": "per_block", "block_size": 32},
+            {"name": "int8-blk64", "format": "int8", "granularity": "per_block", "block_size": 64},
+            {"name": "int8-blk128", "format": "int8", "granularity": "per_block", "block_size": 128},
+        ],
+        "output": {"tables": ["accuracy"], "figures": ["block_sweep"]},
     },
 
     # =====================================================================
     # Hierarchical Pre-Scale Study (pot pre-scale + MX per-block)
     # =====================================================================
     "part_hierarchical": {
-        "type": "hierarchical",
         "description": "Hierarchical Pre-Scale Study (pot pre-scale + MX per-block)",
-        "pre_scale": {
-            "init": "pot_amax",
-            "pot": True,
-            "granularity": "per_tensor",
-            "trainable": False,
-        },
-        "variants": [
-            {"name": "MXINT-8-HIER", "format": "int8",     "granularity": "per_block", "block_size": 32},
-            {"name": "MXFP-8-HIER",  "format": "fp8_e4m3", "granularity": "per_block", "block_size": 32},
-            {"name": "MXINT-4-HIER", "format": "int4",     "granularity": "per_block", "block_size": 32},
-            {"name": "MXFP-4-HIER",  "format": "fp4_e2m1", "granularity": "per_block", "block_size": 32},
+        "configs": [
+            {"name": "MXINT-8-HIER", "format": "int8",     "granularity": "per_block", "block_size": 32,
+             "lsq_steps": 0, "pre_scale_init": "pot_amax", "pre_scale_pot": True},
+            {"name": "MXFP-8-HIER",  "format": "fp8_e4m3", "granularity": "per_block", "block_size": 32,
+             "lsq_steps": 0, "pre_scale_init": "pot_amax", "pre_scale_pot": True},
+            {"name": "MXINT-4-HIER", "format": "int4",     "granularity": "per_block", "block_size": 32,
+             "lsq_steps": 0, "pre_scale_init": "pot_amax", "pre_scale_pot": True},
+            {"name": "MXFP-4-HIER",  "format": "fp4_e2m1", "granularity": "per_block", "block_size": 32,
+             "lsq_steps": 0, "pre_scale_init": "pot_amax", "pre_scale_pot": True},
         ],
+        "output": {"tables": ["accuracy"], "figures": ["hierarchical_delta"]},
     },
 }

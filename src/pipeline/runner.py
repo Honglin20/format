@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 
 import torch.nn as nn
 
@@ -11,24 +12,33 @@ from src.calibration.strategies import MSEScaleStrategy
 from src.analysis.observers import QSNRObserver, MSEObserver
 
 
-class EvalFn(Protocol):
-    """User-provided evaluation function.
+@dataclass
+class ExperimentResult:
+    """Result of a single quantization experiment (one config)."""
+    name: str
+    fp32_metrics: Optional[Dict[str, float]] = None
+    quant_metrics: Optional[Dict[str, float]] = None
+    delta: Optional[Dict[str, float]] = None
+    qsnr_per_layer: Dict[str, float] = field(default_factory=dict)
+    mse_per_layer: Dict[str, float] = field(default_factory=dict)
+    cost: Any = None
+    cost_fp32: Any = None
 
-    Called by ExperimentRunner in three contexts:
-    - Calibration: forward side-effects trigger hooks, return value ignored
-    - Analysis: forward side-effects trigger observer hooks, return value ignored
-    - Evaluation: return value used for fp32 vs quant delta computation
-    """
+    @property
+    def avg_qsnr(self) -> float:
+        if not self.qsnr_per_layer:
+            return float("nan")
+        return sum(self.qsnr_per_layer.values()) / len(self.qsnr_per_layer)
 
-    def __call__(self, model: nn.Module, data: Any) -> Dict[str, float]: ...
+    @property
+    def avg_mse(self) -> float:
+        if not self.mse_per_layer:
+            return float("nan")
+        return sum(self.mse_per_layer.values()) / len(self.mse_per_layer)
 
 
 def extract_metric_per_layer(report, metric: str) -> Dict[str, float]:
-    """Extract per-layer average of a metric from Report.
-
-    Handles both list-of-dicts (pandas not installed) and DataFrame
-    (pandas available) return types from ``report.to_dataframe()``.
-    """
+    """Extract per-layer average of a metric from Report."""
     df = report.to_dataframe()
     if isinstance(df, list):
         result: Dict[str, list] = {}
@@ -39,119 +49,111 @@ def extract_metric_per_layer(report, metric: str) -> Dict[str, float]:
                 result.setdefault(name, []).append(val)
         return {k: sum(v) / len(v) for k, v in result.items()}
     else:
-        # DataFrame — use groupby for proper aggregation
         grouped = df.groupby("layer")[metric].mean()
         return grouped.to_dict()
 
 
 class ExperimentRunner:
-    """Thin grid-search scheduler over a search space of quantization configs.
+    """Execute a search space of quantization configs against a model.
 
-    Iterates over every config in the search space, quantizes the model,
-    runs calibration/analysis/evaluation via a single user-provided eval_fn,
-    and returns structured results.
-
-    The runner does NOT own the inference loop -- eval_fn controls all
-    model interaction.  This makes the runner compatible with arbitrary
-    model architectures and inference patterns.
+    For each config: resolve -> create Session -> calibrate -> (LSQ) -> analyze -> evaluate.
+    Pure execution - no print, no file I/O.
     """
 
-    def __init__(self, search_space: dict):
+    def __init__(self, search_space: dict, *, skip_parts: Optional[set] = None):
         self._search_space = search_space
+        self._skip = skip_parts or set()
 
     def run(
         self,
         fp32_model: nn.Module,
         *,
-        eval_fn: Callable[[nn.Module, Any], Dict[str, float]],
-        calib_data: Any = None,
-        analyze_data: Any = None,
+        eval_fn: Callable,
+        calib_data: Any,
         eval_data: Any = None,
         observers: list | None = None,
-    ) -> Dict[str, dict]:
-        """Execute the full quantize -> calibrate -> analyze -> evaluate flow.
-
-        Args:
-            fp32_model: Reference FP32 model (deep-copied, not mutated).
-            eval_fn: ``(model, data) -> dict[str, float]``. Called in all
-                three phases.  During calibration/analysis only forward
-                side-effects are used (return value ignored).  During
-                evaluation the returned dict is used for delta computation.
-            calib_data: Data passed to eval_fn for calibration forward passes.
-                None skips calibration.
-            analyze_data: Data passed to eval_fn for analysis forward passes.
-                Defaults to calib_data if both are needed. None skips analysis.
-            eval_data: Data passed to eval_fn for fp32 vs quant metric comparison.
-                None skips evaluation (fp32/quant/delta set to None).
-            observers: Observer instances for analysis. Default: QSNR + MSE.
-
-        Returns:
-            Dict mapping config_name to dict with keys:
-            fp32, quant, delta, report, qsnr_per_layer, mse_per_layer.
-        """
+        on_config_done: Optional[Callable] = None,
+        model_for_part: Optional[Callable[[str], nn.Module]] = None,
+    ) -> Dict[str, List[ExperimentResult]]:
         if observers is None:
             observers = [QSNRObserver(), MSEObserver()]
+        if eval_data is None:
+            eval_data = calib_data
 
-        results = {}
-        for part_name, part_def in self._search_space.items():
-            configs = part_def.get("configs", {})
-            for cfg_name, cfg_desc in configs.items():
-                full_name = f"{part_name}/{cfg_name}"
+        all_results: Dict[str, List[ExperimentResult]] = {}
 
-                # Resolve descriptor to OpQuantConfig
-                if isinstance(cfg_desc, dict):
-                    cfg = resolve_config(cfg_desc)
+        for part_name, part_cfg in self._search_space.items():
+            if part_name in self._skip:
+                continue
+
+            configs = part_cfg.get("configs", [])
+            part_results: List[ExperimentResult] = []
+
+            for cfg_desc in configs:
+                op_cfg = resolve_config(cfg_desc)
+
+                if model_for_part is not None:
+                    model = model_for_part(part_name)
                 else:
-                    cfg = cfg_desc  # Already an OpQuantConfig
+                    model = copy.deepcopy(fp32_model)
 
-                # Quantize -- deepcopy model to avoid mutating fp32 reference
                 session = QuantSession(
-                    copy.deepcopy(fp32_model), cfg,
+                    model, op_cfg,
                     calibrator=MSEScaleStrategy(),
                     keep_fp32=True,
                 )
 
-                # Phase 1: Calibrate
-                if calib_data is not None:
-                    with session.calibrate():
-                        eval_fn(session, calib_data)
+                # Phase 1: LSQ (optional)
+                lsq_steps = cfg_desc.get("lsq_steps", 0)
+                if lsq_steps > 0:
+                    from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+                    session.initialize_pre_scales(
+                        calib_data,
+                        init=cfg_desc.get("lsq_init", "ones"),
+                        pot=cfg_desc.get("lsq_pot", False),
+                    )
+                    opt = LayerwiseScaleOptimizer(
+                        num_steps=lsq_steps,
+                        num_batches=len(calib_data) if isinstance(calib_data, list) else 1,
+                        optimizer="adam",
+                        lr=cfg_desc.get("lsq_lr", 1e-3),
+                        pot=cfg_desc.get("lsq_pot", False),
+                    )
+                    session.optimize_scales(opt, calib_data, eval_fn=eval_fn)
 
-                # Phase 2: Analyze
-                report = None
-                analyze_input = analyze_data if analyze_data is not None else calib_data
-                if analyze_input is not None:
-                    with session.analyze(observers=observers) as ctx:
-                        eval_fn(session, analyze_input)
-                    report = ctx.report()
+                # Phase 2: Calibrate
+                with session.calibrate():
+                    eval_fn(session, calib_data)
 
-                # Phase 3: Evaluate
-                if eval_data is not None:
-                    fp32_model_copy = copy.deepcopy(fp32_model)
-                    fp32_metrics = eval_fn(fp32_model_copy, eval_data)
-                    quant_metrics = eval_fn(session, eval_data)
-                    delta = {k: quant_metrics.get(k, 0.0) - fp32_metrics.get(k, 0.0)
-                             for k in fp32_metrics}
-                else:
-                    fp32_metrics = None
-                    quant_metrics = None
-                    delta = None
+                # Phase 3: Analyze
+                with session.analyze(observers=observers) as ctx:
+                    eval_fn(session, calib_data)
+                report = ctx.report()
 
-                # Cost estimation (P6)
-                cost = session.estimate_cost()
-                cost_fp32 = session.estimate_cost(fp32=True)
-
-                entry = {
-                    "fp32": fp32_metrics,
-                    "quant": quant_metrics,
-                    "delta": delta,
-                    "cost": cost,
-                    "cost_fp32": cost_fp32,
+                # Phase 4: Evaluate
+                fp32_copy = copy.deepcopy(fp32_model)
+                fp32_metrics = eval_fn(fp32_copy, eval_data)
+                quant_metrics = eval_fn(session, eval_data)
+                delta = {
+                    k: quant_metrics.get(k, 0.0) - fp32_metrics.get(k, 0.0)
+                    for k in fp32_metrics
                 }
-                if report is not None:
-                    entry["report"] = report
-                    entry["qsnr_per_layer"] = extract_metric_per_layer(report, "qsnr_db")
-                    entry["mse_per_layer"] = extract_metric_per_layer(report, "mse")
 
-                results[full_name] = entry
+                result = ExperimentResult(
+                    name=cfg_desc["name"],
+                    fp32_metrics=fp32_metrics,
+                    quant_metrics=quant_metrics,
+                    delta=delta,
+                    qsnr_per_layer=extract_metric_per_layer(report, "qsnr_db"),
+                    mse_per_layer=extract_metric_per_layer(report, "mse"),
+                    cost=session.estimate_cost(),
+                    cost_fp32=session.estimate_cost(fp32=True),
+                )
+                part_results.append(result)
 
-        return results
+                if on_config_done:
+                    on_config_done(result)
+
+            all_results[part_name] = part_results
+
+        return all_results
