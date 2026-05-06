@@ -63,6 +63,9 @@ def resolve_config(desc: Dict[str, Any]) -> OpQuantConfig:
     Args:
         desc: Dict with keys:
             - format (str): Format name e.g. "int8", "fp8_e4m3", "nf4"
+            - act_format (str, optional): Activation format for input/output.
+              When set, ``format`` applies to weight only and ``act_format``
+              applies to input/output. Enables wXaY mixed-precision configs.
             - granularity (str): "per_tensor" | "per_channel" | "per_block"
             - axis (int): Channel/block axis (default -1)
             - block_size (int): Required for per_block
@@ -95,10 +98,25 @@ def resolve_config(desc: Dict[str, Any]) -> OpQuantConfig:
             f"Invalid scale_format {scale_format!r}. Must be 'fp32' or 'pot'"
         )
 
-    scheme = QuantScheme(
+    weight_scheme = QuantScheme(
         format=fmt, granularity=granularity, transform=transform,
         scale_format=scale_format,
     )
+
+    # act_format: optional per-role format override for input/output
+    act_format = desc.get("act_format")
+    if act_format is not None:
+        if not isinstance(act_format, str):
+            raise TypeError(
+                f"'act_format' must be a string, got {type(act_format).__name__}"
+            )
+        act_fmt = FormatBase.from_str(act_format)
+        act_scheme = QuantScheme(
+            format=act_fmt, granularity=granularity, transform=transform,
+            scale_format=scale_format,
+        )
+    else:
+        act_scheme = weight_scheme
 
     weight_only = desc.get("weight_only", False)
     if not isinstance(weight_only, bool):
@@ -106,5 +124,9 @@ def resolve_config(desc: Dict[str, Any]) -> OpQuantConfig:
             f"'weight_only' must be a bool, got {type(weight_only).__name__}"
         )
     if weight_only:
-        return OpQuantConfig(weight=scheme)
-    return OpQuantConfig(input=scheme, weight=scheme, output=scheme)
+        if act_format is not None:
+            raise ValueError(
+                "'act_format' cannot be used with 'weight_only=True'"
+            )
+        return OpQuantConfig(weight=weight_scheme)
+    return OpQuantConfig(input=act_scheme, weight=weight_scheme, output=act_scheme)

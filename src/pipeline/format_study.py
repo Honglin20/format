@@ -81,14 +81,35 @@ def make_op_cfg(
     granularity: GranularitySpec,
     *,
     transform: Optional[TransformBase] = None,
+    act_format: Optional[str] = None,
+    scale_format: str = "fp32",
 ) -> OpQuantConfig:
-    """Inference-only config: input / weight / output all share the same scheme."""
+    """Build an OpQuantConfig from format name + granularity.
+
+    Args:
+        fmt_name: Format name for weight (and input/output if act_format not set).
+        granularity: GranularitySpec for all roles.
+        transform: Optional TransformBase (default Identity).
+        act_format: Optional activation format for input/output. When set,
+            ``fmt_name`` applies to weight only. Enables wXaY mixed-precision.
+        scale_format: Scale storage format — ``"fp32"`` (default) or ``"pot"``.
+    """
     fmt = FormatBase.from_str(fmt_name)
     scheme = QuantScheme(
         format=fmt,
         granularity=granularity,
         transform=transform or IdentityTransform(),
+        scale_format=scale_format,
     )
+    if act_format is not None:
+        act_fmt = FormatBase.from_str(act_format)
+        act_scheme = QuantScheme(
+            format=act_fmt,
+            granularity=granularity,
+            transform=transform or IdentityTransform(),
+            scale_format=scale_format,
+        )
+        return OpQuantConfig(input=act_scheme, weight=scheme, output=act_scheme)
     return OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
 
@@ -97,6 +118,7 @@ def make_op_cfg_weight_only(
     granularity: GranularitySpec,
     *,
     transform: Optional[TransformBase] = None,
+    scale_format: str = "fp32",
 ) -> OpQuantConfig:
     """Weight-only config (input / output not quantized). Used for NF4."""
     fmt = FormatBase.from_str(fmt_name)
@@ -104,6 +126,7 @@ def make_op_cfg_weight_only(
         format=fmt,
         granularity=granularity,
         transform=transform or IdentityTransform(),
+        scale_format=scale_format,
     )
     return OpQuantConfig(weight=scheme)
 
@@ -113,15 +136,17 @@ def _make_sq_op_cfg(
     granularity: GranularitySpec,
     sq_transform: TransformBase,
     weight_only: bool,
+    *,
+    scale_format: str = "fp32",
 ) -> OpQuantConfig:
     """Build per-layer OpQuantConfig with SmoothQuant on input."""
     fmt = FormatBase.from_str(fmt_name)
     no_tx = IdentityTransform()
-    input_scheme = QuantScheme(format=fmt, granularity=granularity, transform=sq_transform)
-    weight_scheme = QuantScheme(format=fmt, granularity=granularity, transform=no_tx)
+    input_scheme = QuantScheme(format=fmt, granularity=granularity, transform=sq_transform, scale_format=scale_format)
+    weight_scheme = QuantScheme(format=fmt, granularity=granularity, transform=no_tx, scale_format=scale_format)
     if weight_only:
         return OpQuantConfig(input=input_scheme, weight=weight_scheme)
-    output_scheme = QuantScheme(format=fmt, granularity=granularity, transform=no_tx)
+    output_scheme = QuantScheme(format=fmt, granularity=granularity, transform=no_tx, scale_format=scale_format)
     return OpQuantConfig(input=input_scheme, weight=weight_scheme, output=output_scheme)
 
 
@@ -261,6 +286,8 @@ def _build_per_layer_optimal_cfg(
     gran: GranularitySpec,
     cfg_builder: Callable,
     weight_only: bool = False,
+    *,
+    scale_format: str = "fp32",
 ) -> dict:
     """Build per-layer OpQuantConfig dict choosing best transform per layer by QSNR.
 
@@ -276,6 +303,7 @@ def _build_per_layer_optimal_cfg(
         gran: ``GranularitySpec`` for the config builder.
         cfg_builder: ``make_op_cfg`` or ``make_op_cfg_weight_only``.
         weight_only: Whether the format is weight-only (NF4, INT4-PC).
+        scale_format: Scale storage format — ``"fp32"`` or ``"pot"``.
 
     Returns:
         Dict mapping layer name to ``OpQuantConfig``.
@@ -295,9 +323,9 @@ def _build_per_layer_optimal_cfg(
             if sq_tx is None:
                 print(f"  Warning: {layer} selected SmoothQuant but no transform found, falling back to Identity")
                 sq_tx = IdentityTransform()
-            per_layer_cfg[layer] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only)
+            per_layer_cfg[layer] = _make_sq_op_cfg(fmt_str, gran, sq_tx, weight_only, scale_format=scale_format)
         else:
-            per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name])
+            per_layer_cfg[layer] = cfg_builder(fmt_str, gran, transform=tx_map[tx_name], scale_format=scale_format)
 
     return per_layer_cfg
 
@@ -566,9 +594,11 @@ def run_format_study(
             gran = _resolve_granularity(v_config)
             weight_only = v_config.get("weight_only", False)
             builder = make_op_cfg_weight_only if weight_only else make_op_cfg
+            sf = v_config.get("scale_format", "fp32")
 
             per_layer_cfg = _build_per_layer_optimal_cfg(
                 variant_results, sq_transforms, fmt_str, gran, builder, weight_only,
+                scale_format=sf,
             )
 
             # Determine which layers got SQ

@@ -119,6 +119,24 @@ STUDY_CONFIG = {
         },
     },
 
+    # ── Mixed-precision wXaY (weight + activation different formats) ──
+    "mixed_precision": {
+        "description": "Mixed-Precision: Weight vs Activation format",
+        "configs": [
+            {"name": "W4A4", "format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "fp32"},
+            {"name": "W4A8", "format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "fp32",
+             "act_format": "int8"},
+            {"name": "W8A4", "format": "int8", "granularity": "per_channel", "axis": -1, "scale_format": "fp32",
+             "act_format": "int4"},
+            {"name": "W4A8-FP", "format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "fp32",
+             "act_format": "fp8_e4m3"},
+        ],
+        "output": {
+            "tables": ["accuracy"],
+            "figures": ["qsnr_line", "mse_box"],
+        },
+    },
+
     # ── Hadamard transform effect at 4-bit ──
     "4bit_transform": {
         "description": "Hadamard transform effect on 4-bit formats",
