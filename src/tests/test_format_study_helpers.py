@@ -127,3 +127,89 @@ class TestBuildPerLayerOptimalCfg:
         )
         assert "fc1" in result
         assert result["fc1"].input is not None  # Hadamard applies to input
+
+    def test_scale_format_threads_through(self):
+        variant_results = {
+            "None": {"qsnr_per_layer": {"fc1": 10.0}},
+        }
+        sq_transforms = {}
+        gran = GranularitySpec.per_tensor()
+        result = _build_per_layer_optimal_cfg(
+            variant_results, sq_transforms, "int8", gran, make_op_cfg,
+            weight_only=False, scale_format="pot",
+        )
+        assert result["fc1"].weight.scale_format == "pot"
+
+    def test_scale_format_threads_through_smoothquant(self):
+        variant_results = {
+            "SmoothQuant": {"qsnr_per_layer": {"fc1": 10.0}},
+        }
+        sq_transforms = {"fc1": SmoothQuantTransform(torch.ones(16))}
+        gran = GranularitySpec.per_tensor()
+        result = _build_per_layer_optimal_cfg(
+            variant_results, sq_transforms, "int8", gran, make_op_cfg,
+            weight_only=False, scale_format="pot",
+        )
+        assert result["fc1"].weight.scale_format == "pot"
+        assert result["fc1"].input.scale_format == "pot"
+
+
+class TestMakeOpCfg:
+    def test_basic_int8_per_tensor(self):
+        cfg = make_op_cfg("int8", GranularitySpec.per_tensor())
+        assert cfg.weight.format.name == "int8"
+        assert cfg.input.format.name == "int8"
+        assert cfg.output.format.name == "int8"
+
+    def test_with_transform(self):
+        from src.transform.hadamard import HadamardTransform
+        cfg = make_op_cfg("int4", GranularitySpec.per_tensor(), transform=HadamardTransform())
+        assert isinstance(cfg.weight.transform, HadamardTransform)
+
+    def test_act_format_w4a8(self):
+        cfg = make_op_cfg("int4", GranularitySpec.per_channel(axis=-1), act_format="int8")
+        assert cfg.weight.format.name == "int4"
+        assert cfg.input.format.name == "int8"
+        assert cfg.output.format.name == "int8"
+
+    def test_act_format_same_granularity(self):
+        cfg = make_op_cfg("int4", GranularitySpec.per_block(size=32), act_format="fp8_e4m3")
+        assert cfg.weight.granularity.mode == GranularitySpec.per_block(32).mode
+        assert cfg.input.granularity.block_size == 32
+
+    def test_scale_format_fp32_default(self):
+        cfg = make_op_cfg("int8", GranularitySpec.per_tensor())
+        assert cfg.weight.scale_format == "fp32"
+
+    def test_scale_format_pot(self):
+        cfg = make_op_cfg("int4", GranularitySpec.per_channel(axis=-1), scale_format="pot")
+        assert cfg.weight.scale_format == "pot"
+        assert cfg.input.scale_format == "pot"
+
+    def test_act_format_with_pot_scale(self):
+        cfg = make_op_cfg("int4", GranularitySpec.per_tensor(), act_format="int8", scale_format="pot")
+        assert cfg.weight.scale_format == "pot"
+        assert cfg.input.scale_format == "pot"
+        assert cfg.weight.format.name == "int4"
+        assert cfg.input.format.name == "int8"
+
+    def test_without_act_format_all_roles_identical(self):
+        cfg = make_op_cfg("int8", GranularitySpec.per_tensor())
+        # All three roles share the same scheme object when no act_format
+        assert cfg.weight.format.name == cfg.input.format.name == cfg.output.format.name
+
+
+class TestMakeOpCfgWeightOnly:
+    def test_basic_weight_only(self):
+        cfg = make_op_cfg_weight_only("nf4", GranularitySpec.per_channel(axis=0))
+        assert cfg.weight is not None
+        assert cfg.input is None
+        assert cfg.output is None
+
+    def test_scale_format_default(self):
+        cfg = make_op_cfg_weight_only("int4", GranularitySpec.per_tensor())
+        assert cfg.weight.scale_format == "fp32"
+
+    def test_scale_format_pot(self):
+        cfg = make_op_cfg_weight_only("int4", GranularitySpec.per_tensor(), scale_format="pot")
+        assert cfg.weight.scale_format == "pot"

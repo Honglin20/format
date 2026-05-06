@@ -103,6 +103,7 @@ P7/P8/P9 推进顺序待用户选定。
 
 - 2026-05-06: **Format Study 三层分离完成**。runner（执行）、report（输出）、format_study（编排）三层职责分离。统一 config schema，声明式输出，scale_format per-config + act_format wXaY mixed-precision 支持。
 - 2026-05-06: **架构重构完成**。四层依赖模型：Math (formats/transform/scheme/quantize) → Ops → Integration (session/) → Tools (calibration/analysis/pipeline/cost/viz/onnx)。observer/ 为横切基础设施。删除 config/、mapping/、context/ 三个包。
+- 2026-05-07: **act_format 完善**。`resolve_config` + `make_op_cfg` 支持 `act_format` 字段实现 wXaY mixed-precision。新增 27 测试（scale_format 5 + act_format 10 + helpers 12），全量 1,494 passed。
 
 ## 断点续传必读文件
 

@@ -99,3 +99,100 @@ class TestResolveConfig:
     def test_transform_type_error(self):
         with pytest.raises(TypeError, match="'transform' must be a string"):
             resolve_config({"format": "int8", "granularity": "per_tensor", "transform": 42})
+
+    # ── scale_format ──────────────────────────────────────────────────
+
+    def test_scale_format_default_fp32(self):
+        cfg = resolve_config({"format": "int8", "granularity": "per_tensor"})
+        assert cfg.weight.scale_format == "fp32"
+        assert cfg.input.scale_format == "fp32"
+
+    def test_scale_format_pot(self):
+        cfg = resolve_config({"format": "int8", "granularity": "per_tensor", "scale_format": "pot"})
+        assert cfg.weight.scale_format == "pot"
+        assert cfg.input.scale_format == "pot"
+
+    def test_scale_format_per_channel_pot(self):
+        cfg = resolve_config({"format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "pot"})
+        assert cfg.weight.scale_format == "pot"
+        assert cfg.weight.granularity.mode == GranularityMode.PER_CHANNEL
+
+    def test_scale_format_must_be_string(self):
+        with pytest.raises(TypeError, match="'scale_format' must be a string"):
+            resolve_config({"format": "int8", "granularity": "per_tensor", "scale_format": 42})
+
+    def test_scale_format_invalid_value_raises(self):
+        with pytest.raises(ValueError, match="Invalid scale_format"):
+            resolve_config({"format": "int8", "granularity": "per_tensor", "scale_format": "float16"})
+
+    # ── act_format (mixed-precision wXaY) ─────────────────────────────
+
+    def test_act_format_w4a8_weight_vs_activation(self):
+        cfg = resolve_config({
+            "format": "int4", "act_format": "int8",
+            "granularity": "per_channel", "axis": -1,
+        })
+        assert cfg.weight.format.name == "int4"
+        assert cfg.input.format.name == "int8"
+        assert cfg.output.format.name == "int8"
+
+    def test_act_format_with_fp_activation(self):
+        cfg = resolve_config({
+            "format": "int4", "act_format": "fp8_e4m3",
+            "granularity": "per_block", "block_size": 32,
+        })
+        assert cfg.weight.format.name == "int4"
+        assert cfg.input.format.name == "fp8_e4m3"
+        assert cfg.output.format.name == "fp8_e4m3"
+
+    def test_act_format_same_granularity_as_weight(self):
+        cfg = resolve_config({
+            "format": "int4", "act_format": "int8",
+            "granularity": "per_channel", "axis": 0,
+        })
+        assert cfg.weight.granularity.channel_axis == 0
+        assert cfg.input.granularity.channel_axis == 0
+
+    def test_act_format_inherits_scale_format(self):
+        cfg = resolve_config({
+            "format": "int4", "act_format": "int8",
+            "granularity": "per_tensor", "scale_format": "pot",
+        })
+        assert cfg.weight.scale_format == "pot"
+        assert cfg.input.scale_format == "pot"
+
+    def test_act_format_inherits_transform(self):
+        cfg = resolve_config({
+            "format": "int4", "act_format": "int8",
+            "granularity": "per_tensor", "transform": "hadamard",
+        })
+        assert isinstance(cfg.weight.transform, HadamardTransform)
+        assert isinstance(cfg.input.transform, HadamardTransform)
+
+    def test_act_format_with_weight_only_raises(self):
+        with pytest.raises(ValueError, match="'act_format' cannot be used with 'weight_only=True'"):
+            resolve_config({
+                "format": "int4", "act_format": "int8",
+                "granularity": "per_channel", "axis": 0,
+                "weight_only": True,
+            })
+
+    def test_act_format_must_be_string(self):
+        with pytest.raises(TypeError, match="'act_format' must be a string"):
+            resolve_config({
+                "format": "int4", "act_format": 42,
+                "granularity": "per_tensor",
+            })
+
+    def test_act_format_unknown_raises(self):
+        with pytest.raises(ValueError, match="Unknown format"):
+            resolve_config({
+                "format": "int4", "act_format": "no_such_fmt",
+                "granularity": "per_tensor",
+            })
+
+    def test_without_act_format_all_roles_same(self):
+        cfg = resolve_config({"format": "int8", "granularity": "per_tensor"})
+        assert cfg.weight.format.name == "int8"
+        assert cfg.input.format.name == "int8"
+        assert cfg.output.format.name == "int8"
