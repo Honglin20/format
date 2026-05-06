@@ -120,6 +120,8 @@ def _make_sq_op_cfg(
 def _make_smoothquant_transforms(
     fp32_model: nn.Module,
     calib_data: List[torch.Tensor],
+    *,
+    eval_fn: Optional[Callable] = None,
 ) -> Dict[str, TransformBase]:
     """Create per-layer SmoothQuantTransform dict from a single calibration pass.
 
@@ -133,7 +135,10 @@ def _make_smoothquant_transforms(
 
     Args:
         fp32_model: FP32 reference model (not mutated).
-        calib_data: List of calibration batches (first batch used).
+        calib_data: List of calibration batches.
+        eval_fn: ``(model, data) -> Any``. Controls how the model is called
+            during activation capture. When None, falls back to
+            ``fp32_model(calib_data[0])`` (single-batch direct inference).
 
     Returns:
         Dict mapping layer name to ``SmoothQuantTransform`` (or
@@ -167,7 +172,10 @@ def _make_smoothquant_transforms(
     with torch.no_grad():
         fp32_model.eval()
         try:
-            fp32_model(calib_data[0])
+            if eval_fn is not None:
+                eval_fn(fp32_model, calib_data)
+            else:
+                fp32_model(calib_data[0])
         finally:
             for h in hooks:
                 h.remove()
@@ -504,7 +512,7 @@ def _run_transform_part(part_cfg: dict, fp32_model, calib_data, eval_loader, eva
     t0 = time.time()
     print(f"  [{_now()}] Computing SmoothQuant scales...", end="", flush=True)
     sq_t0 = time.time()
-    sq_transforms = _make_smoothquant_transforms(fp32_model, calib_data)
+    sq_transforms = _make_smoothquant_transforms(fp32_model, calib_data, eval_fn=eval_fn)
     sq_fp32_model = _fuse_smoothquant_weights(fp32_model, sq_transforms)
     print(f" done ({time.time() - sq_t0:.1f}s)  [{len(sq_transforms)} layer(s) calibrated]")
 
@@ -669,6 +677,7 @@ def _run_hierarchical_part(part_cfg: dict, fp32_model, calib_data, eval_loader, 
                 granularity=pre_scale_cfg.get("granularity", "per_tensor"),
                 trainable=pre_scale_cfg.get("trainable", False),
                 channel_axis=pre_scale_cfg.get("channel_axis", -1),
+                eval_fn=eval_fn,
             )
 
         # Delegate to run_experiment with pre-configured session

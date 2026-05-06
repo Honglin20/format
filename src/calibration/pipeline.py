@@ -14,7 +14,7 @@ Design:
 
   Scales can also be inspected mid-collection via :meth:`scales`.
 """
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -236,19 +236,28 @@ class CalibrationPipeline(CalibrationSession):
         super().__init__(model, strategy, axis=axis, assign=False)
         self.num_batches = num_batches
 
-    def calibrate(self, dataloader) -> Dict[str, torch.Tensor]:
+    def calibrate(self, dataloader, *, eval_fn: Optional[Callable] = None) -> Dict[str, torch.Tensor]:
         """Run calibration over *dataloader* and return per-layer scales.
 
         Legacy wrapper — opens a context-manager session internally.
+
+        Args:
+            dataloader: Iterable of batches.
+            eval_fn: ``(model, data) -> Any``. Controls how the model is
+                called during calibration. When None, falls back to
+                ``self.model(inputs)`` for each batch.
         """
         with self:
             with torch.no_grad():
-                for i, batch in enumerate(dataloader):
-                    if i >= self.num_batches:
-                        break
-                    if isinstance(batch, (list, tuple)):
-                        inputs = batch[0]
-                    else:
-                        inputs = batch
-                    self.model(inputs)
+                if eval_fn is not None:
+                    eval_fn(self.model, dataloader)
+                else:
+                    for i, batch in enumerate(dataloader):
+                        if i >= self.num_batches:
+                            break
+                        if isinstance(batch, (list, tuple)):
+                            inputs = batch[0]
+                        else:
+                            inputs = batch
+                        self.model(inputs)
         return self.scales()

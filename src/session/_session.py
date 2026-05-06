@@ -308,6 +308,7 @@ class QuantSession:
         granularity: str = "per_tensor",
         trainable: bool = False,
         channel_axis: int = -1,
+        eval_fn: Optional[Callable] = None,
     ) -> int:
         """Initialize ``_pre_scale`` tensors on all quantized modules.
 
@@ -331,6 +332,10 @@ class QuantSession:
                 optimisation). If False, register as a buffer.
             channel_axis: Which dimension is the channel axis for per-channel
                 broadcasting (default -1, the last dim).
+            eval_fn: ``(model, data) -> Any``. Controls how the model is
+                called during amax collection (when ``init`` is ``"amax"``
+                or ``"pot_amax"``). When None, falls back to direct
+                ``model(batch)`` calls.
 
         Returns:
             Number of modules that received pre-scale tensors.
@@ -355,6 +360,7 @@ class QuantSession:
                 calib_data, self.qmodel,
                 channel_axis=channel_axis,
                 granularity=granularity,
+                eval_fn=eval_fn,
             )
 
         count = 0
@@ -446,6 +452,7 @@ class QuantSession:
         *,
         channel_axis: int = -1,
         granularity: str = "per_tensor",
+        eval_fn: Optional[Callable] = None,
     ) -> Dict[str, torch.Tensor]:
         """Collect per-module input activation max-abs via forward hooks.
 
@@ -458,6 +465,9 @@ class QuantSession:
             channel_axis: Which dim is the channel (default -1, last dim).
             granularity: ``"per_tensor"`` — scalar amax per module;
                          ``"per_channel"`` — 1D amax along channel_axis.
+            eval_fn: ``(model, data) -> Any``. Controls how the model is
+                called during activation capture. When None, falls back to
+                ``for batch in calib_data: model(batch)``.
 
         Returns:
             Dict mapping module name → amax tensor (shape ``()`` for
@@ -489,8 +499,11 @@ class QuantSession:
 
         try:
             with torch.no_grad():
-                for batch in calib_data:
-                    model(batch)
+                if eval_fn is not None:
+                    eval_fn(model, calib_data)
+                else:
+                    for batch in calib_data:
+                        model(batch)
         finally:
             for h in handles:
                 h.remove()
