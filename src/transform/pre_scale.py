@@ -53,6 +53,8 @@ class PreScaleTransform(TransformBase):
                 f"tensor with ndim={x.ndim}"
             )
         s = self.scale
+        if s.device != x.device:
+            s = s.to(device=x.device)
         if self.pot:
             s = _pot_scale(s)
         shape = [1] * x.ndim

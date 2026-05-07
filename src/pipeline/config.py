@@ -48,6 +48,8 @@ def _resolve_transform(desc: Dict[str, Any]) -> TransformBase:
     if isinstance(tx, TransformBase):
         return tx
     if isinstance(tx, str):
+        if tx.lower() == "none":
+            return IdentityTransform()
         if tx == "hadamard":
             return HadamardTransform()
         raise ValueError(f"Unknown transform: {tx}")
