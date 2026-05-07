@@ -105,8 +105,8 @@ def test_pipeline_collects_stats():
     assert isinstance(scales, dict)
     assert "linear" in scales
     assert isinstance(scales["linear"], torch.Tensor)
-    # axis=-1 for output shape (4, 8) → running amax shape (4, 1)
-    assert scales["linear"].shape == (4, 1)
+    # PER_TENSOR mode (empty OpQuantConfig) → scalar amax
+    assert scales["linear"].shape == ()
     assert (scales["linear"] > 0).all()
 
 
@@ -176,13 +176,12 @@ def test_pipeline_max_strategy_scales():
     dataloader = DataLoader(dataset, batch_size=2)
 
     # Expected output: F.linear(x, w, b) with w=1 → each output = 3*4 = 12.0
-    # running_amax along axis=-1 for shape (2, 8): (2, 1) all 12.0
-    # MaxScaleStrategy.compute → clamp(running_amax, 1e-12)
+    # PER_TENSOR mode → scalar amax = 12.0
     pipeline = CalibrationPipeline(model, MaxScaleStrategy(), num_batches=1, axis=-1)
     scales = pipeline.calibrate(dataloader)
 
-    assert scales["linear"].shape == (2, 1)
-    expected = torch.ones(2, 1) * 12.0
+    assert scales["linear"].shape == ()
+    expected = torch.tensor(12.0)
     assert torch.allclose(scales["linear"], expected, atol=1e-6)
 
 
@@ -209,9 +208,9 @@ def test_pipeline_max_strategy_multiple_batches():
     pipeline = CalibrationPipeline(model, MaxScaleStrategy(), num_batches=2, axis=-1)
     scales = pipeline.calibrate(dataloader)
 
-    # running_amax should capture the max: 20.0
-    assert scales["linear"].shape == (2, 1)
-    expected = torch.ones(2, 1) * 20.0
+    # running_amax should capture the max: 20.0 (scalar for PER_TENSOR)
+    assert scales["linear"].shape == ()
+    expected = torch.tensor(20.0)
     assert torch.allclose(scales["linear"], expected, atol=1e-6)
 
 
@@ -225,10 +224,10 @@ def test_pipeline_different_strategies():
 
     # Fresh model + dataloader for each strategy to avoid iterator exhaustion
     strategies = [
-        (MaxScaleStrategy(), (4, 1)),
-        (PercentileScaleStrategy(q=99.0), (4, 1)),
-        (MSEScaleStrategy(n_steps=5), (4, 1)),
-        (KLScaleStrategy(n_bins=32, n_steps=5), (1, 1)),
+        (MaxScaleStrategy(), ()),
+        (PercentileScaleStrategy(q=99.0), ()),
+        (MSEScaleStrategy(n_steps=5), ()),
+        (KLScaleStrategy(n_bins=32, n_steps=5), ()),
     ]
 
     for strategy, expected_shape in strategies:

@@ -94,6 +94,7 @@ def quantize(x, scheme=None, allow_denorm=True, scale=None):
         return x
     x_t = scheme.transform.forward(x)
     x_q = scheme.format.quantize(x_t, scheme.granularity, scheme.round_mode,
-                                  allow_denorm=allow_denorm, scale=scale)
+                                  allow_denorm=allow_denorm, scale=scale,
+                                  scale_format=scheme.scale_format)
     return scheme.transform.inverse(x_q)
 

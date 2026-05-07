@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from src.calibration.strategies import ScaleStrategy
+from src.scheme.granularity import GranularityMode
 
 
 class CalibrationSession:
@@ -83,10 +84,14 @@ class CalibrationSession:
 
         Can be called inside or after the ``with`` block.  Each call
         re-computes from the current running-amax state.
+
+        The running amax is already correctly shaped (scalar for PER_TENSOR,
+        (C,) for PER_CHANNEL).  Strategies are not re-applied here because
+        they expect raw-data tensors, not pre-computed amax.
         """
         scales: Dict[str, torch.Tensor] = {}
         for name, amax in self._running_amax.items():
-            scales[name] = self.strategy.compute(amax, self.axis)
+            scales[name] = amax.clamp(min=1e-12)
         return scales
 
     def assign_scales(self, scales: Optional[Dict[str, torch.Tensor]] = None) -> List[str]:
@@ -181,7 +186,22 @@ class CalibrationSession:
     def _make_hook(self, name: str):
         def _hook(module, _input, output):
             x = output.detach()
-            amax = torch.amax(torch.abs(x), dim=self.axis, keepdim=True)
+            # Compute amax with shape determined by output granularity.
+            # PER_TENSOR: scalar. PER_CHANNEL: (C,) — reduce all dims
+            # except channel_axis so each channel has its own scale.
+            mode, channel_axis = self._output_granularity(module)
+            if mode == GranularityMode.PER_TENSOR:
+                amax = torch.amax(torch.abs(x))
+            elif mode == GranularityMode.PER_CHANNEL:
+                ax = channel_axis if channel_axis >= 0 else x.ndim + channel_axis
+                dims_to_reduce = [i for i in range(x.ndim) if i != ax]
+                amax = torch.amax(
+                    torch.abs(x), dim=tuple(dims_to_reduce), keepdim=True,
+                )
+            else:
+                # PER_BLOCK / DYNAMIC_GROUP: per-element or caller-driven
+                amax = torch.amax(torch.abs(x), dim=self.axis, keepdim=True)
+
             if name in self._running_amax:
                 self._running_amax[name] = torch.max(
                     self._running_amax[name], amax
@@ -189,6 +209,14 @@ class CalibrationSession:
             else:
                 self._running_amax[name] = amax
         return _hook
+
+    @staticmethod
+    def _output_granularity(module):
+        """Return (mode, channel_axis) for the module's output quant scheme."""
+        if hasattr(module, "cfg") and module.cfg.output is not None:
+            g = module.cfg.output.granularity
+            return g.mode, g.channel_axis
+        return GranularityMode.PER_TENSOR, 0
 
 
 # ------------------------------------------------------------------

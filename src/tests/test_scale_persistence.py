@@ -29,8 +29,9 @@ def test_quantize_scale_kwarg_per_channel_matches_autocompute():
     # Compute expected: quantize without scale (auto-computes amax)
     expected = quantize(x, scheme)
 
-    # Compute amax separately
-    amax = torch.amax(torch.abs(x), dim=-1, keepdim=True).clamp(min=1e-12)
+    # Compute per-channel amax: reduce over all dims EXCEPT channel_axis (-1 → dim=1)
+    dims_to_reduce = tuple(i for i in range(x.ndim) if i != (x.ndim - 1))
+    amax = torch.amax(torch.abs(x), dim=dims_to_reduce, keepdim=True).clamp(min=1e-12)
 
     # Quantize with pre-computed scale
     result = quantize(x, scheme, scale=amax)
@@ -46,7 +47,8 @@ def test_quantize_scale_kwarg_per_channel_different_scale():
 
     auto_result = quantize(x, scheme)
     # Use double the amax → less clamping
-    amax = torch.amax(torch.abs(x), dim=-1, keepdim=True).clamp(min=1e-12)
+    dims_to_reduce = tuple(i for i in range(x.ndim) if i != (x.ndim - 1))
+    amax = torch.amax(torch.abs(x), dim=dims_to_reduce, keepdim=True).clamp(min=1e-12)
     result_scaled = quantize(x, scheme, scale=amax * 2.0)
 
     assert not torch.equal(result_scaled, auto_result), "different scale should differ"

@@ -35,6 +35,7 @@ def _replace_transform(cfg: OpQuantConfig, transform) -> OpQuantConfig:
                 granularity=old.granularity,
                 transform=transform,
                 round_mode=old.round_mode,
+                scale_format=old.scale_format,
             )
         else:
             fields[f_name] = old
@@ -70,6 +71,7 @@ def _replace_transform_activation_only(
                 granularity=old.granularity,
                 transform=transform,
                 round_mode=old.round_mode,
+                scale_format=old.scale_format,
             )
         else:
             fields[f_name] = old

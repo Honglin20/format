@@ -105,7 +105,7 @@ class FormatBase(ABC):
 
     @abstractmethod
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None):
+                 scale=None, scale_format="fp32"):
         """Quantize tensor x to this format.
 
         Declared @abstractmethod to force subclasses to explicitly decide
@@ -119,6 +119,8 @@ class FormatBase(ABC):
             allow_denorm: If False, flush subnormal values to zero (float formats only).
             scale: Optional pre-computed scale tensor.  If provided, skips
                 on-the-fly scale computation and uses this directly.
+            scale_format: "fp32" (default) or "pot".  When "pot", per-channel
+                amax values are rounded to the nearest power of 2.
 
         Returns:
             Quantized tensor with same shape as x.
@@ -130,25 +132,31 @@ class FormatBase(ABC):
         from src.scheme.granularity import GranularityMode
         mode = granularity.mode
         if mode == GranularityMode.PER_TENSOR:
-            return self._quantize_per_tensor(x, round_mode, allow_denorm, scale=scale)
+            return self._quantize_per_tensor(x, round_mode, allow_denorm, scale=scale,
+                                              scale_format=scale_format)
         elif mode == GranularityMode.PER_CHANNEL:
             return self._quantize_per_channel(x, granularity, round_mode, allow_denorm,
-                                              scale=scale)
+                                              scale=scale, scale_format=scale_format)
         elif mode == GranularityMode.PER_BLOCK:
-            return self._quantize_per_block(x, granularity, round_mode, scale=scale)
+            return self._quantize_per_block(x, granularity, round_mode,
+                                              scale=scale, scale_format=scale_format)
         raise ValueError(f"Unknown granularity mode: {mode}")
 
-    def _quantize_per_tensor(self, x, round_mode, allow_denorm=True, scale=None):
+    def _quantize_per_tensor(self, x, round_mode, allow_denorm=True, scale=None,
+                              scale_format="fp32"):
         """Default per-tensor quantization: element-wise only (no scaling)."""
         return self.quantize_elemwise(x, round_mode=round_mode,
                                       allow_denorm=allow_denorm)
 
     def _quantize_per_channel(self, x, granularity, round_mode, allow_denorm=True,
-                              scale=None):
+                              scale=None, scale_format="fp32"):
         """Default per-channel quantization: compute per-channel scale, then elemwise.
 
         If ``scale`` is provided, it is used directly as ``amax``, skipping
         the on-the-fly ``torch.amax(torch.abs(x))`` computation.
+
+        When ``scale_format="pot"``, the amax is rounded to the nearest power
+        of 2 before normalization.
         """
         if scale is not None:
             amax = scale
@@ -161,8 +169,13 @@ class FormatBase(ABC):
                     f"channel_axis={granularity.channel_axis} out of range "
                     f"for tensor with ndim={x.ndim}"
                 )
-            amax = torch.amax(torch.abs(x), dim=axis, keepdim=True)
+            # Reduce all dims EXCEPT channel_axis to get per-channel amax.
+            dims_to_reduce = [i for i in range(x.ndim) if i != axis]
+            amax = torch.amax(torch.abs(x), dim=tuple(dims_to_reduce), keepdim=True)
             amax = amax.clamp(min=1e-12)
+
+        if scale_format == "pot":
+            amax = 2 ** torch.round(torch.log2(amax))
 
         # Normalize to [-1, 1], quantize, then rescale
         x_norm = x / amax
@@ -170,7 +183,8 @@ class FormatBase(ABC):
                                      allow_denorm=allow_denorm)
         return x_q * amax
 
-    def _quantize_per_block(self, x, granularity, round_mode, scale=None):
+    def _quantize_per_block(self, x, granularity, round_mode, scale=None,
+                              scale_format="fp32"):
         """Default per-block quantization: delegate to _quantize_mx.
 
         During JIT tracing (ONNX export), return x unchanged — the Function's
@@ -185,6 +199,9 @@ class FormatBase(ABC):
             PER_CHANNEL, not shared exponents; passing them to ``_quantize_mx``
             would cause a semantic mismatch (amax vs shared exponent) and
             produce shape incompatibilities.
+
+            The ``scale_format`` parameter does not apply to PER_BLOCK — MX
+            shared exponents are always integer (power-of-2) by design.
         """
         if torch.jit.is_tracing():
             return x
