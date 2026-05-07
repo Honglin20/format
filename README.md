@@ -21,48 +21,41 @@ pip install -r requirements.txt
 ## 快速开始
 
 ```python
-from src.session import QuantSession
-from src.formats.base import FormatBase
-from src.scheme.quant_scheme import QuantScheme
-from src.scheme.granularity import GranularitySpec
-from src.scheme.op_config import OpQuantConfig
-from src.analysis.observers import QSNRObserver, MSEObserver
-from src.calibration.strategies import PercentileScaleStrategy
+from src.session import Session, QuantConfig
 
-# 1. 定义配置
-scheme = QuantScheme(
-    format=FormatBase.from_str("int8"),
-    granularity=GranularitySpec.per_tensor(),
-)
-cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
-
-# 2. 初始化 Session（自动量化模型）
-session = QuantSession(
-    model, cfg,
-    calibrator=PercentileScaleStrategy(q=99.0),
-    observers=[QSNRObserver(), MSEObserver()],
+# 1. 定义配置（一个 dataclass，IDE 自动补全）
+cfg = QuantConfig(
+    name="int8-pc",
+    w_format="int8",
+    w_granularity="per_channel",
+    calibrator="percentile",
 )
 
-# 3. 校准
-with session.calibrate():
-    for batch in calib_loader:
-        session(batch)
+# 2. 运行 Session（一行完成 calibrate → analyze → evaluate）
+result = Session(model, cfg).run(calib_data, eval_fn=my_eval)
+print(f"fp32: {result.fp32_metrics}, quant: {result.quant_metrics}")
 
-# 4. 层级误差分析
-with session.analyze() as ctx:
-    for batch in eval_loader:
-        session(batch)
-report = ctx.report()
-
-# 5. 端到端精度对比
-result = session.compare(eval_loader, my_eval_fn)
-print(f"fp32: {result['fp32']}, quant: {result['quant']}, delta: {result['delta']}")
-
-# 6. ONNX 导出
-session.export_onnx("model.onnx")
+# 3. 多配置对比
+from src.session import Study
+study = Study([cfg_a, cfg_b, cfg_c], model=model)
+report = study.run(calib_data, eval_fn=my_eval, outputs="all")
+report.save("results/")
 ```
 
-> 更详细的配置方式、分层配置、Transform、QAT、LSQ 等见 [快速开始详解](docs/reference/quickstart-details.md)。
+### 低层精细控制
+
+```python
+from src.session import QuantSession
+from src.scheme.op_config import OpQuantConfig
+
+qs = QuantSession(model, cfg.to_op_config(), calibrator=PercentileScaleStrategy(q=99.0))
+with qs.calibrate():
+    for batch in calib_loader:
+        qs(batch)
+qs.export_onnx("model.onnx")
+```
+
+> 详细配置方式、Transform、LSQ、ONNX 导出等见 [快速开始详解](docs/reference/quickstart-details.md)。
 
 ## 支持的数值格式
 
@@ -85,21 +78,23 @@ src/
 ├── scheme/          # QuantScheme、GranularitySpec、OpQuantConfig
 ├── quantize/        # 核心量化函数
 ├── ops/             # 量化算子（Linear / Conv / Norm / Activation 等）
-├── analysis/        # 误差分析（AnalysisContext / Observer / e2e comparison）
-├── mapping/         # quantize_model 一键量化入口
+├── session/         # 驱动层：QuantConfig / Session / Study / quantize_model
 ├── calibration/     # Calibration 管线（策略 + Session + LSQ）
+├── analysis/        # 误差分析（AnalysisContext / Observer / e2e comparison）
+├── observer/        # Observer 横切基础设施
 ├── transform/       # Hadamard / SmoothQuant / PreScale 变换
-├── onnx/            # ONNX 导出
-├── context/         # QuantizeContext（inline op 截获）
-└── session.py       # QuantSession 统一 API
+├── report/          # 输出层：SessionReport / StudyReport（output-driven）
+├── cost/            # Coarse Model 性能估算
+├── viz/             # 可视化（图表 / 表格）
+└── onnx/            # ONNX 导出
 mx/                  # 原始 microsoft/microxcaling（只读）
 ```
 
 ## 测试
 
 ```bash
-pytest src/tests/ -q
-# 1305 passed, 0 xfail
+pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q
+# 1671 passed
 ```
 
 所有等价性测试使用 `torch.equal`（bit-exact）。
@@ -111,7 +106,7 @@ pytest src/tests/ -q
 | 文档 | 内容 |
 |---|---|
 | [快速开始详解](docs/reference/quickstart-details.md) | 配置方式、Transform、Calibration、QAT、ONNX 导出、LSQ |
-| [架构决策文档](docs/architecture/) | ADR-001 ~ ADR-007（三轴方案、Observer、ONNX、OpQuantConfig 等） |
+| [架构决策文档](docs/architecture/) | ADR-001 ~ ADR-008（三轴方案、Observer、ONNX、OpQuantConfig、Session 统一入口 等） |
 | [P6 Cost Model 公式](docs/reference/p6-cost-model-formulas.md) | 延迟/显存估算公式 |
 | [Format Study 实验](docs/reference/format_study_usage.md) | 量化格式精度对比实验 |
 | [开发规范](docs/INDEX.md) | 开发准则、规范、流程、Phase 计划 |
