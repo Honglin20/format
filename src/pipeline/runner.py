@@ -112,9 +112,11 @@ class ExperimentRunner:
                         init=cfg_desc.get("lsq_init", "ones"),
                         pot=cfg_desc.get("lsq_pot", False),
                     )
+                    # num_batches only used when eval_fn is None — runner always
+                    # provides eval_fn, so num_batches is a passthrough default.
                     opt = LayerwiseScaleOptimizer(
                         num_steps=lsq_steps,
-                        num_batches=len(calib_data) if isinstance(calib_data, list) else 1,
+                        num_batches=8,
                         optimizer="adam",
                         lr=cfg_desc.get("lsq_lr", 1e-3),
                         pot=cfg_desc.get("lsq_pot", False),

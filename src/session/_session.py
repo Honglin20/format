@@ -301,7 +301,7 @@ class QuantSession:
 
     def initialize_pre_scales(
         self,
-        calib_data: List[torch.Tensor],
+        calib_data: Any,
         *,
         init: str = "ones",
         pot: bool = False,
@@ -313,9 +313,11 @@ class QuantSession:
         """Initialize ``_pre_scale`` tensors on all quantized modules.
 
         Args:
-            calib_data: List of input tensors from calibration (used when
-                ``init`` is ``"amax"`` or ``"pot_amax"`` to collect
-                per-module activation statistics).
+            calib_data: Calibration data passed through to ``eval_fn`` (only
+                used when ``init`` is ``"amax"`` or ``"pot_amax"``).
+                When ``eval_fn`` is None, must be ``List[Tensor]``.
+                When ``eval_fn`` is provided, can be any type the user's
+                function accepts.
             init: Initialization method:
 
                 - ``"ones"`` — identity (all ones), for LSQ optimisation.
@@ -408,7 +410,7 @@ class QuantSession:
     def optimize_scales(
         self,
         optimizer: "LayerwiseScaleOptimizer",
-        calib_data: List[torch.Tensor],
+        calib_data: Any,
         *,
         eval_fn: Optional[Callable] = None,
     ) -> Dict[str, torch.Tensor]:
@@ -416,9 +418,12 @@ class QuantSession:
 
         Args:
             optimizer: Configured ``LayerwiseScaleOptimizer`` instance.
-            calib_data: List of input tensors from calibration data.
+            calib_data: Calibration data passed through to ``eval_fn``.
+                When ``eval_fn`` is None, must be ``List[Tensor]``.
+                When ``eval_fn`` is provided, can be any type.
             eval_fn: ``(model, data) -> Any``. Controls model interaction
-                during LSQ. When None, falls back to ``model(data)``.
+                during LSQ. When None, falls back to iterating
+                ``model(batch) for batch in calib_data``.
 
         Returns:
             Dict mapping module name → optimized pre_scale tensor.
@@ -447,7 +452,7 @@ class QuantSession:
 
     @staticmethod
     def _collect_input_amax(
-        calib_data: List[torch.Tensor],
+        calib_data: Any,
         model: nn.Module,
         *,
         channel_axis: int = -1,
@@ -460,7 +465,9 @@ class QuantSession:
         every quantized module's input to compute amax.
 
         Args:
-            calib_data: List of input tensors to run forward.
+            calib_data: Calibration data passed through to ``eval_fn``.
+                When ``eval_fn`` is None, must be ``List[Tensor]``.
+                When ``eval_fn`` is provided, can be any type.
             model: Quantized model.
             channel_axis: Which dim is the channel (default -1, last dim).
             granularity: ``"per_tensor"`` — scalar amax per module;

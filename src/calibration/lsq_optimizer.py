@@ -5,7 +5,7 @@ For each layer, runs the partially-quantized model to get true inputs,
 then optimizes pre-scale via gradient descent to minimize MSE against
 fp32 layer output.
 """
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -87,7 +87,10 @@ class LayerwiseScaleOptimizer:
 
     Args:
         num_steps: Optimization steps per layer (default: 100).
-        num_batches: Number of calibration batches to use (default: 8).
+        num_batches: Number of calibration batches to use. Only used when
+            ``eval_fn`` is None (direct fallback path). When ``eval_fn`` is
+            provided, the user controls batching entirely via their function
+            (default: 8).
         optimizer: Optimizer name — "adam" or "sgd" (default: "adam").
         lr: Learning rate (default: 1e-3).
         loss: Loss function — "mse" (default: "mse").
@@ -133,7 +136,7 @@ class LayerwiseScaleOptimizer:
         self,
         qmodel: nn.Module,
         fp32_model: nn.Module,
-        calib_batches: List[torch.Tensor],
+        calib_data: Any,
         *,
         eval_fn: Optional[Callable] = None,
     ) -> Dict[str, torch.Tensor]:
@@ -142,20 +145,23 @@ class LayerwiseScaleOptimizer:
         Args:
             qmodel: Quantized model (from quantize_model).
             fp32_model: Original fp32 model.
-            calib_batches: List of input tensors from calibration.
+            calib_data: Calibration data passed through to ``eval_fn``.
+                When ``eval_fn`` is None, must be ``List[Tensor]`` for
+                direct model iteration. When ``eval_fn`` is provided,
+                can be any type the user's function accepts.
             eval_fn: ``(model, data) -> Any``. Controls model interaction
-                during LSQ. When None, falls back to ``model(data)``.
+                during LSQ. When None, falls back to iterating
+                ``model(batch) for batch in calib_data``.
 
         Returns:
             Dict mapping module name -> optimized pre_scale tensor.
         """
         modules = _get_quantized_modules(qmodel)
-        batches = calib_batches[:self.num_batches]
         optimized_scales: Dict[str, torch.Tensor] = {}
 
         # Collect fp32 targets for all layers in one pass
         fp32_targets = self._collect_fp32_targets(
-            qmodel, fp32_model, modules, batches, eval_fn=eval_fn,
+            qmodel, fp32_model, modules, calib_data, eval_fn=eval_fn,
         )
 
         for layer_idx, (name, module) in enumerate(modules):
@@ -173,7 +179,7 @@ class LayerwiseScaleOptimizer:
             pre_scale = nn.Parameter(init_scale)
 
             # Get real inputs from partially-quantized model
-            real_inputs = self._get_layer_inputs(qmodel, module, batches, eval_fn=eval_fn)
+            real_inputs = self._get_layer_inputs(qmodel, module, calib_data, eval_fn=eval_fn)
 
             # Build optimizer
             if self.optimizer == "adam":
@@ -268,7 +274,7 @@ class LayerwiseScaleOptimizer:
             module.register_buffer(f"_internal_amax_{f_name}", amax)
 
     def _collect_fp32_targets(
-        self, qmodel, fp32_model, modules, batches,
+        self, qmodel, fp32_model, modules, calib_data,
         *,
         eval_fn: Optional[Callable] = None,
     ) -> Dict[str, List[torch.Tensor]]:
@@ -294,9 +300,9 @@ class LayerwiseScaleOptimizer:
         try:
             with torch.no_grad():
                 if eval_fn is not None:
-                    eval_fn(fp32_model, batches)
+                    eval_fn(fp32_model, calib_data)
                 else:
-                    for batch in batches:
+                    for batch in calib_data[:self.num_batches]:
                         fp32_model(batch)
         finally:
             for h in hooks:
@@ -305,7 +311,7 @@ class LayerwiseScaleOptimizer:
         return targets
 
     def _get_layer_inputs(
-        self, qmodel, module, batches,
+        self, qmodel, module, calib_data,
         *,
         eval_fn: Optional[Callable] = None,
     ) -> List[torch.Tensor]:
@@ -319,9 +325,9 @@ class LayerwiseScaleOptimizer:
         try:
             with torch.no_grad():
                 if eval_fn is not None:
-                    eval_fn(qmodel, batches)
+                    eval_fn(qmodel, calib_data)
                 else:
-                    for batch in batches:
+                    for batch in calib_data[:self.num_batches]:
                         qmodel(batch)
         finally:
             handle.remove()

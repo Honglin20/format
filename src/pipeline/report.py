@@ -137,6 +137,66 @@ def _results_to_viz_dict(results: List[ExperimentResult]) -> dict:
     return viz_dict
 
 
+def _results_to_nested_viz_dict(
+    results: List[ExperimentResult],
+    config_descriptors: List[dict],
+) -> dict:
+    """Convert ExperimentResult list to nested ``{format: {transform_label: data}}``.
+
+    Uses config descriptors to infer format grouping and transform labels.
+    A config without a ``"transform"`` key (or ``"transform": "none"``) is
+    the baseline (key ``"None"``).  ``"hadamard"`` → ``"Hadamard"``,
+    ``"smoothquant"`` → ``"SmoothQuant"``.
+
+    Returns::
+
+        {"fmt_base": {"None": {...}, "Hadamard": {...}, ...}}
+    """
+    TX_LABEL = {"none": "None", "hadamard": "Hadamard", "smoothquant": "SmoothQuant"}
+
+    # Build a lookup: config_name → (base_format, transform_label)
+    name_to_group: Dict[str, tuple] = {}
+    for desc in config_descriptors:
+        name = desc.get("name")
+        if not name:
+            continue
+        tx_raw = desc.get("transform", "none")
+        if tx_raw is None:
+            tx_raw = "none"
+        tx_label = TX_LABEL.get(str(tx_raw).lower(), str(tx_raw))
+        # Infer base format name: strip known transform suffixes
+        base = name
+        for suffix in ("-Had", "-None", "-SmoothQuant", "-Hadamard", "-SQ"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        name_to_group[name] = (base, tx_label)
+
+    nested: Dict[str, dict] = {}
+    for r in results:
+        if r.name not in name_to_group:
+            # Fallback: use raw name as both format and transform
+            base_fmt = r.name
+            tx_label = "None"
+        else:
+            base_fmt, tx_label = name_to_group[r.name]
+
+        entry: Dict[str, Any] = {}
+        if r.quant_metrics is not None:
+            entry["accuracy"] = r.quant_metrics
+        if r.qsnr_per_layer:
+            entry["qsnr_per_layer"] = r.qsnr_per_layer
+        if r.mse_per_layer:
+            entry["mse_per_layer"] = r.mse_per_layer
+        if r.delta is not None:
+            entry["delta"] = r.delta
+        if r.fp32_metrics is not None:
+            entry["fp32_accuracy"] = r.fp32_metrics
+
+        nested.setdefault(base_fmt, {})[tx_label] = entry
+    return nested
+
+
 def _results_to_combined_viz_dict(
     all_results: Dict[str, List[ExperimentResult]],
 ) -> dict:
@@ -250,6 +310,10 @@ class StudyReport:
 
             viz_dict = _results_to_viz_dict(part_results)
 
+            # Transform figures expect nested {fmt: {tx: data}} — build on demand
+            _nested_cache: Optional[dict] = None
+            _transform_figures = {"transform_heatmap", "transform_pie", "transform_delta"}
+
             for table_key in table_keys:
                 if table_key == "sensitivity":
                     continue  # Handled separately below
@@ -268,7 +332,13 @@ class StudyReport:
                     print(f"  Warning: unknown figure '{fig_key}' for {part_name}, skipped")
                     continue
                 try:
-                    func(viz_dict, output_dir)
+                    if fig_key in _transform_figures:
+                        if _nested_cache is None:
+                            descriptors = config.get(part_name, {}).get("configs", [])
+                            _nested_cache = _results_to_nested_viz_dict(part_results, descriptors)
+                        func(_nested_cache, output_dir)
+                    else:
+                        func(viz_dict, output_dir)
                 except Exception as e:
                     print(f"  Warning: figure '{fig_key}' for {part_name} failed: {e}")
 
