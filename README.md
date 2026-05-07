@@ -21,7 +21,17 @@ pip install -r requirements.txt
 ## 快速开始
 
 ```python
+import torch
+import torch.nn as nn
 from src.session import Session, QuantConfig
+
+# 准备模型和数据
+model = nn.Sequential(nn.Linear(128, 256), nn.ReLU(), nn.Linear(256, 10))
+calib_data = [torch.randn(32, 128) for _ in range(10)]
+eval_data  = [torch.randn(32, 128) for _ in range(5)]
+
+def eval_fn(m, data):
+    return {"loss": sum(m(batch).sum() for batch in data).item()}
 
 # 1. 定义配置（一个 dataclass，IDE 自动补全）
 cfg = QuantConfig(
@@ -32,25 +42,31 @@ cfg = QuantConfig(
 )
 
 # 2. 运行 Session（一行完成 calibrate → analyze → evaluate）
-result = Session(model, cfg).run(calib_data, eval_fn=my_eval)
-print(f"fp32: {result.fp32_metrics}, quant: {result.quant_metrics}")
+result = Session(model, cfg).run(calib_data, eval_data=eval_data, eval_fn=eval_fn)
+print(f"fp32: {result.fp32_metrics}")   # {"loss": ...}
+print(f"quant: {result.quant_metrics}")  # {"loss": ...}
+print(f"delta: {result.delta}")          # {"loss": ...}
 
 # 3. 多配置对比
 from src.session import Study
-study = Study([cfg_a, cfg_b, cfg_c], model=model)
-report = study.run(calib_data, eval_fn=my_eval, outputs="all")
+cfg_a = QuantConfig(name="int8", w_format="int8")
+cfg_b = QuantConfig(name="int4", w_format="int4")
+
+study = Study([cfg_a, cfg_b], model=model)
+report = study.run(calib_data, eval_fn=eval_fn, outputs="all")
 report.save("results/")
 ```
 
 ### 低层精细控制
 
 ```python
-from src.session import QuantSession
-from src.scheme.op_config import OpQuantConfig
+from src.session import QuantSession, QuantConfig
+from src.calibration.strategies import PercentileScaleStrategy
 
+cfg = QuantConfig(w_format="int8")
 qs = QuantSession(model, cfg.to_op_config(), calibrator=PercentileScaleStrategy(q=99.0))
 with qs.calibrate():
-    for batch in calib_loader:
+    for batch in calib_data:
         qs(batch)
 qs.export_onnx("model.onnx")
 ```
