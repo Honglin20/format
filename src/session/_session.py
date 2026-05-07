@@ -1,15 +1,29 @@
 """Session execution unit and SessionResult dataclass.
 
 Session is the atomic execution unit: one QuantConfig → one SessionResult.
-It wraps QuantSession and orchestrates calibrate → analyze → evaluate → cost.
+It wraps _QuantSession and supports two usage modes:
+
+1. **Full pipeline** (backward compat)::
+
+    result = Session(model, cfg).run(calib_data, eval_fn=eval_fn)
+
+2. **Step-by-step** (chainable, user-inspectable at each stage)::
+
+    session = Session(model, cfg)
+    session.quantize(calib_data=calib_data)          # MX: calib_data optional
+    # session.qmodel available for manual inference
+    session.calibrate(calib_data, eval_fn=eval_fn)   # MX per_block: no-op
+    session.analyze(calib_data, outputs="default")
+    session.evaluate(eval_data, eval_fn)
+    session.cost()
+    result = session.result
+    print(result.summary())
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
-import torch
 import torch.nn as nn
 
 from src.analysis.observers import (
@@ -28,8 +42,38 @@ from src.calibration.strategies import (
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.session._config import QuantConfig
-from src.session._quant import QuantSession
+from src.session._quant import _QuantSession
+from src.session._result import SessionResult
 from src.transform.smooth_quant import SmoothQuantTransform, fuse_smoothquant_weights
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _extract_qsnr_mse(observers_data: dict):
+    """Extract per-layer QSNR and MSE from a nested observer report raw dict.
+
+    Returns:
+        (qsnr_per_layer, mse_per_layer) — each is ``Dict[str, float]``.
+    """
+    qsnr_per_layer: Dict[str, float] = {}
+    mse_per_layer: Dict[str, float] = {}
+    for layer, roles in observers_data.items():
+        for _role, stages in roles.items():
+            for _stage, slices in stages.items():
+                for _slice_key, metrics in slices.items():
+                    if "qsnr_db" in metrics:
+                        qsnr_per_layer[layer] = max(
+                            qsnr_per_layer.get(layer, 0.0),
+                            metrics["qsnr_db"],
+                        )
+                    if "mse" in metrics:
+                        mse_per_layer[layer] = max(
+                            mse_per_layer.get(layer, 0.0),
+                            metrics["mse"],
+                        )
+    return qsnr_per_layer, mse_per_layer
 
 
 # ---------------------------------------------------------------------------
@@ -44,10 +88,6 @@ _OBSERVER_MAP: Dict[str, type] = {
 }
 
 # Roles that receive SmoothQuantTransform when patching per-layer configs.
-# Only input-side roles are patched because the output side has a different
-# channel count (out_features vs in_features) and the scale computed by
-# from_model_calibration matches the input channel dimension.
-# Weight must keep IdentityTransform since it was already fused.
 _SMOOTH_INPUT_ROLES = frozenset({"input", "grad_input", "input_gw"})
 
 
@@ -63,12 +103,7 @@ def _make_calibrator(name: str) -> ScaleStrategy:
 
 
 def _run_model(model, data, eval_fn: Optional[Callable] = None) -> None:
-    """Run *model* on *data*, forwarding via *eval_fn* when provided.
-
-    When *eval_fn* is ``None``, falls back to calling the model directly:
-    iterating over a list/tuple of batches, or calling once for a single
-    tensor.  This guarantees forward hooks fire regardless of data format.
-    """
+    """Run *model* on *data*, forwarding via *eval_fn* when provided."""
     if eval_fn is not None:
         eval_fn(model, data)
     elif isinstance(data, (list, tuple)):
@@ -78,26 +113,49 @@ def _run_model(model, data, eval_fn: Optional[Callable] = None) -> None:
         model(data)
 
 
+def _needs_calibration(cfg) -> bool:
+    """Return False if ALL schemes are MX per_block (scales computed dynamically)."""
+    if isinstance(cfg, dict):
+        configs = list(cfg.values())
+    else:
+        configs = [cfg]
+
+    for op_cfg in configs:
+        for field_name in op_cfg.__dataclass_fields__:
+            scheme = getattr(op_cfg, field_name)
+            if scheme is not None and not scheme.granularity.is_mx:
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
 
 
 class Session:
-    """Atomic execution unit: one QuantConfig -> one SessionResult.
+    """Atomic execution unit with a layered, chainable API.
 
-    Wraps QuantSession and orchestrates:
-      1. Output resolution (observer_keys, needs_eval, needs_cost)
-      2. [if smoothquant] SQ calibration + weight fusion
-      3. to_op_config() translation
-      4. [if prescale] two-step prescale init + optional LSQ optimization
-      5. calibrate -> analyze -> evaluate -> cost
+    Two usage modes:
 
-    Args:
-        model: Original fp32 PyTorch model.
-        config: User-facing ``QuantConfig``.
-        keep_fp32: Keep a deep copy of the fp32 model for comparison
-            (default: ``True``).
+    1. **Full pipeline** (backward compat)::
+
+        result = Session(model, cfg).run(calib_data, eval_fn=eval_fn)
+
+    2. **Step-by-step**::
+
+        session = Session(model, cfg)
+        session.quantize(calib_data=calib_data)
+        # session.qmodel is now accessible for manual inference
+        session.calibrate(calib_data)               # MX per_block: no-op
+        session.analyze(calib_data, outputs="default")
+        session.evaluate(eval_data, eval_fn)
+        session.cost()
+        result = session.result
+
+    All step methods return ``self`` so calls can be chained::
+
+        session.quantize().calibrate(data).analyze(data).evaluate(data, fn)
     """
 
     def __init__(
@@ -111,94 +169,116 @@ class Session:
         self._config = config
         self._keep_fp32 = keep_fp32
 
-    def run(
-        self,
-        calib_data,
-        *,
-        eval_data=None,
-        eval_fn: Optional[Callable] = None,
-        outputs: Union[str, List[str]] = "default",
-    ) -> SessionResult:
-        """Run the full quantization workflow for this config.
+        # Lazily initialized by .quantize()
+        self._quant_session: Optional[_QuantSession] = None
+        self._sq_transforms: Optional[Dict[str, Any]] = None
+
+        # Collected results (populated by each step)
+        self._qsnr_per_layer: Dict[str, float] = {}
+        self._mse_per_layer: Dict[str, float] = {}
+        self._observers_data: Dict[str, Any] = {}
+        self._fp32_metrics: Optional[Dict[str, float]] = None
+        self._quant_metrics: Optional[Dict[str, float]] = None
+        self._delta: Optional[Dict[str, float]] = None
+        self._cost: Any = None
+        self._cost_fp32: Any = None
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def qmodel(self) -> nn.Module:
+        """The quantized model (available after ``.quantize()``)."""
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        return self._quant_session.qmodel
+
+    @property
+    def fp32_model(self) -> Optional[nn.Module]:
+        """The fp32 reference model (available after ``.quantize()`` if
+        ``keep_fp32=True``).
+        """
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        return self._quant_session.fp32_model
+
+    @property
+    def result(self) -> SessionResult:
+        """Build and return the :class:`SessionResult` from collected data.
+
+        Raises:
+            RuntimeError: If ``.quantize()`` has not been called yet.
+        """
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        return SessionResult(
+            name=self._config.name,
+            config=self._config,
+            fp32_metrics=self._fp32_metrics,
+            quant_metrics=self._quant_metrics,
+            delta=self._delta,
+            qsnr_per_layer=self._qsnr_per_layer,
+            mse_per_layer=self._mse_per_layer,
+            observers_data=self._observers_data,
+            cost=self._cost,
+            cost_fp32=self._cost_fp32,
+            sq_transforms=self._sq_transforms,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 1: Quantize
+    # ------------------------------------------------------------------
+
+    def quantize(self, *, calib_data=None) -> "Session":
+        """Build the quantized model. Must be called first.
+
+        After this method returns, ``session.qmodel`` is available for
+        manual inference and ``session(x)`` delegates to the quantized model.
 
         Args:
-            calib_data: Calibration data.  When ``eval_fn`` is ``None``,
-                must be a sequence of tensors (iterated directly) or a
-                single tensor.
-            eval_data: Optional separate evaluation data.  Defaults to
-                ``calib_data`` when ``None``.
-            eval_fn: ``(model, data) -> Dict[str, float]``.  When provided,
-                called for calibration forward passes (return value ignored)
-                and for evaluation (return value used as metrics).  When
-                ``None``, direct ``model(batch)`` calls are used for
-                calibration and analysis, and evaluation is skipped.
-            outputs: Output key or list of keys.  ``"default"`` resolves
-                to ``["accuracy", "qsnr"]``; ``"all"`` resolves to every
-                registered output.
+            calib_data: Calibration data. Required when ``transform`` is
+                ``"smoothquant"`` or ``"prescale"``. Not needed for other
+                transforms or MX per_block formats.
 
-        Returns:
-            ``SessionResult`` containing all computed metrics, observer
-            data, cost estimates, and the cached ``sq_transforms``.
+        Raises:
+            ValueError: If ``calib_data`` is ``None`` but the transform
+                requires it.
         """
-        # ------------------------------------------------------------------
-        # 1. Resolve outputs -> observer_keys / needs_eval / needs_cost
-        # ------------------------------------------------------------------
-        from src.report._spec import resolve_outputs as _resolve_outputs
-
-        observer_keys: set
-        needs_eval: bool
-        needs_cost: bool
-        observer_keys, needs_eval, needs_cost = _resolve_outputs(outputs)
-        observer_keys_set: set = set(observer_keys)
-
-        # ------------------------------------------------------------------
-        # 2. Map observer keys -> observer instances
-        # ------------------------------------------------------------------
-        observers = [_OBSERVER_MAP[k]() for k in sorted(observer_keys_set)]
-
-        # ------------------------------------------------------------------
-        # 3. SmoothQuant: compute per-channel scales, fuse weights
-        # ------------------------------------------------------------------
+        # ---- SmoothQuant: compute per-channel scales + fuse weights ----
         if self._config.transform == "smoothquant":
-            sq_transforms = SmoothQuantTransform.from_model_calibration(
+            if calib_data is None:
+                raise ValueError(
+                    "calib_data is required for smoothquant transform"
+                )
+            self._sq_transforms = SmoothQuantTransform.from_model_calibration(
                 self._model,
                 calib_data,
                 alpha=self._config.sq_alpha,
-                eval_fn=eval_fn,
             )
-            model = fuse_smoothquant_weights(self._model, sq_transforms)
+            model = fuse_smoothquant_weights(self._model, self._sq_transforms)
         else:
             model = self._model
-            sq_transforms = None
+            self._sq_transforms = None
 
-        # ------------------------------------------------------------------
-        # 4. Build base OpQuantConfig
-        # ------------------------------------------------------------------
+        # ---- Build OpQuantConfig ----
         op_cfg = self._config.to_op_config()
 
-        # ------------------------------------------------------------------
-        # 5. Create QuantSession
-        # ------------------------------------------------------------------
+        # ---- Create _QuantSession ----
         calibrator = _make_calibrator(self._config.calibrator)
-        qs = QuantSession(
+        self._quant_session = _QuantSession(
             model,
             op_cfg,
             calibrator=calibrator,
-            observers=observers,
+            observers=[],
             keep_fp32=self._keep_fp32,
+            quantize_nonlinear=self._config.quantize_nonlinear,
         )
 
-        # ------------------------------------------------------------------
-        # 6. Patch per-layer SmoothQuant transforms into module configs
-        #
-        # ``config.to_op_config()`` creates a dummy SmoothQuantTransform
-        # with scale=1.0.  Here we substitute the *real* per-layer scale
-        # from ``from_model_calibration`` so that activation smoothing
-        # matches the weight fusion.
-        # ------------------------------------------------------------------
-        if sq_transforms:
-            for name, sq_t in sq_transforms.items():
-                module = dict(qs.qmodel.named_modules()).get(name)
+        # ---- Patch per-layer SmoothQuant transforms into module configs ----
+        if self._sq_transforms:
+            for name, sq_t in self._sq_transforms.items():
+                module = dict(self._quant_session.qmodel.named_modules()).get(name)
                 if module is None or not hasattr(module, "cfg"):
                     continue
                 old: OpQuantConfig = module.cfg
@@ -211,17 +291,19 @@ class Session:
                             granularity=scheme.granularity,
                             transform=sq_t,
                             round_mode=scheme.round_mode,
-                            scale_format=scheme.scale_format,
+                            scale_storage=scheme.scale_storage,
                         )
                     else:
                         new_kwargs[f_name] = scheme
                 module.cfg = OpQuantConfig(**new_kwargs)
 
-        # ------------------------------------------------------------------
-        # 7. Prescale: two-step translation Step 2
-        # ------------------------------------------------------------------
+        # ---- Prescale: init pre_scales + optional LSQ ----
         if self._config.transform == "prescale":
-            qs.initialize_pre_scales(
+            if calib_data is None:
+                raise ValueError(
+                    "calib_data is required for prescale transform"
+                )
+            self._quant_session.initialize_pre_scales(
                 calib_data,
                 init=self._config.prescale_init,
                 pot=self._config.prescale_pot,
@@ -234,110 +316,218 @@ class Session:
                     num_steps=self._config.lsq_steps,
                     lr=self._config.lsq_lr,
                 )
-                qs.optimize_scales(opt, calib_data, eval_fn=eval_fn)
+                self._quant_session.optimize_scales(opt, calib_data)
 
-        # ------------------------------------------------------------------
-        # 8. Calibrate
-        # ------------------------------------------------------------------
-        with qs.calibrate():
-            _run_model(qs, calib_data, eval_fn)
+        return self
 
-        # ------------------------------------------------------------------
-        # 9. Analyze (only when observers are needed)
-        # ------------------------------------------------------------------
-        qsnr_per_layer: Dict[str, float] = {}
-        mse_per_layer: Dict[str, float] = {}
-        observers_data: Dict[str, Any] = {}
+    # ------------------------------------------------------------------
+    # Step 2: Calibrate
+    # ------------------------------------------------------------------
 
-        if observers:
-            with qs.analyze(observers=observers) as ctx:
-                _run_model(qs, calib_data, eval_fn)
-            report = ctx.report()
-            observers_data = report._raw
-            # Extract per-layer qsnr and mse from the nested report structure
-            for layer, roles in observers_data.items():
-                for _role, stages in roles.items():
-                    for _stage, slices in stages.items():
-                        for _slice_key, metrics in slices.items():
-                            if "qsnr_db" in metrics:
-                                qsnr_per_layer[layer] = max(
-                                    qsnr_per_layer.get(layer, 0.0),
-                                    metrics["qsnr_db"],
-                                )
-                            if "mse" in metrics:
-                                mse_per_layer[layer] = max(
-                                    mse_per_layer.get(layer, 0.0),
-                                    metrics["mse"],
-                                )
+    def calibrate(
+        self,
+        calib_data,
+        *,
+        eval_fn: Optional[Callable] = None,
+    ) -> "Session":
+        """Run calibration to compute quantization scales.
 
-        # ------------------------------------------------------------------
-        # 10. Evaluate (only when needed by the requested outputs)
-        # ------------------------------------------------------------------
-        fp32_metrics: Optional[Dict[str, float]] = None
-        quant_metrics: Optional[Dict[str, float]] = None
-        delta: Optional[Dict[str, float]] = None
+        For MX per_block formats this is a **no-op** — scales are computed
+        dynamically during inference by :func:`quantize_mx`.
 
-        if needs_eval and eval_fn is not None:
-            if eval_data is None:
-                eval_data = calib_data
-            if self._keep_fp32 and qs.fp32_model is not None:
-                fp32_metrics = eval_fn(qs.fp32_model, eval_data)
-            quant_metrics = eval_fn(qs, eval_data)
-            if fp32_metrics is not None:
-                delta = {
-                    k: fp32_metrics[k] - quant_metrics[k]
-                    for k in fp32_metrics
-                }
+        Args:
+            calib_data: Calibration data (list of tensors or single tensor).
+            eval_fn: Optional ``(model, data) -> Any`` for custom model
+                interaction during calibration.
 
-        # ------------------------------------------------------------------
-        # 11. Cost (only when needed by the requested outputs)
-        # ------------------------------------------------------------------
-        cost: Any = None
-        cost_fp32: Any = None
-        if needs_cost:
-            cost = qs.estimate_cost(fp32=False)
-            if self._keep_fp32:
-                cost_fp32 = qs.estimate_cost(fp32=True)
+        Raises:
+            RuntimeError: If ``.quantize()`` has not been called yet.
+        """
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
 
-        # ------------------------------------------------------------------
-        # 12. Return result
-        # ------------------------------------------------------------------
-        return SessionResult(
-            name=self._config.name,
-            config=self._config,
-            fp32_metrics=fp32_metrics,
-            quant_metrics=quant_metrics,
-            delta=delta,
-            qsnr_per_layer=qsnr_per_layer,
-            mse_per_layer=mse_per_layer,
-            observers_data=observers_data,
-            cost=cost,
-            cost_fp32=cost_fp32,
-            sq_transforms=sq_transforms,
+        if not _needs_calibration(self._quant_session.cfg):
+            return self  # MX per_block: scales computed dynamically
+
+        with self._quant_session.calibrate():
+            _run_model(self._quant_session, calib_data, eval_fn)
+
+        return self
+
+    # ------------------------------------------------------------------
+    # Step 3: Analyze
+    # ------------------------------------------------------------------
+
+    def analyze(
+        self,
+        calib_data,
+        *,
+        outputs: Union[str, List[str]] = "default",
+        eval_fn: Optional[Callable] = None,
+    ) -> "Session":
+        """Run error analysis with observers on the quantized model.
+
+        Args:
+            calib_data: Data to run through the model for analysis.
+            outputs: Output keys — ``"default"``, ``"all"``, or a list of
+                specific keys (``"qsnr"``, ``"mse"``, ``"histogram"``, ...).
+            eval_fn: Optional ``(model, data) -> Any`` for custom model
+                interaction.
+
+        Raises:
+            RuntimeError: If ``.quantize()`` has not been called yet.
+        """
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+
+        from src.report._spec import resolve_outputs as _resolve_outputs
+
+        observer_keys, _needs_eval, _needs_cost = _resolve_outputs(outputs)
+        observer_keys_set = set(observer_keys)
+
+        if not observer_keys_set:
+            return self
+
+        observers = [_OBSERVER_MAP[k]() for k in sorted(observer_keys_set)]
+
+        with self._quant_session.analyze(observers=observers) as ctx:
+            _run_model(self._quant_session, calib_data, eval_fn)
+
+        report = ctx.report()
+        self._observers_data = report._raw
+        self._qsnr_per_layer, self._mse_per_layer = _extract_qsnr_mse(self._observers_data)
+
+        return self
+
+    # ------------------------------------------------------------------
+    # Step 4: Evaluate
+    # ------------------------------------------------------------------
+
+    def evaluate(
+        self,
+        eval_data,
+        eval_fn: Optional[Callable] = None,
+    ) -> "Session":
+        """Evaluate fp32 vs quantized model accuracy.
+
+        Args:
+            eval_data: Evaluation data passed to ``eval_fn``.
+            eval_fn: ``(model, data) -> Dict[str, float]``. Called on both
+                fp32 and quantized models. The returned dict keys are used
+                to compute per-metric deltas.
+
+        Raises:
+            RuntimeError: If ``.quantize()`` has not been called yet.
+        """
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+
+        if eval_fn is None:
+            return self
+
+        self._fp32_metrics = None
+        self._quant_metrics = None
+        self._delta = None
+
+        if self._keep_fp32 and self._quant_session.fp32_model is not None:
+            self._fp32_metrics = eval_fn(self._quant_session.fp32_model, eval_data)
+
+        self._quant_metrics = eval_fn(self._quant_session, eval_data)
+
+        if self._fp32_metrics is not None:
+            self._delta = {
+                k: self._fp32_metrics[k] - self._quant_metrics[k]
+                for k in self._fp32_metrics
+            }
+
+        return self
+
+    # ------------------------------------------------------------------
+    # Step 5: Cost
+    # ------------------------------------------------------------------
+
+    def cost(self) -> "Session":
+        """Estimate latency and memory for both fp32 and quantized models.
+
+        Raises:
+            RuntimeError: If ``.quantize()`` has not been called yet.
+        """
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+
+        self._cost = self._quant_session.estimate_cost(fp32=False)
+        self._cost_fp32 = (
+            self._quant_session.estimate_cost(fp32=True)
+            if self._keep_fp32
+            else None
         )
 
+        return self
 
-# ---------------------------------------------------------------------------
-# SessionResult
-# ---------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Inference delegation
+    # ------------------------------------------------------------------
 
+    def __call__(self, *args, **kwargs):
+        """Forward pass through the quantized model (delegates to _QuantSession)."""
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        return self._quant_session(*args, **kwargs)
 
-@dataclass
-class SessionResult:
-    """Result of running a single Session (one QuantConfig).
+    def use_fp32(self) -> "Session":
+        """Switch to fp32 mode — ``session(x)`` calls the original model."""
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        self._quant_session.use_fp32()
+        return self
 
-    This replaces pipeline/runner.py:ExperimentResult with the addition
-    of the config field and sq_transforms cache (fixing C1).
-    """
+    def use_quant(self) -> "Session":
+        """Switch to quantized mode — ``session(x)`` calls the quantized model."""
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        self._quant_session.use_quant()
+        return self
 
-    name: str
-    config: QuantConfig
-    fp32_metrics: Optional[Dict[str, float]] = None
-    quant_metrics: Optional[Dict[str, float]] = None
-    delta: Optional[Dict[str, float]] = None
-    qsnr_per_layer: Dict[str, float] = field(default_factory=dict)
-    mse_per_layer: Dict[str, float] = field(default_factory=dict)
-    observers_data: Dict[str, Any] = field(default_factory=dict)
-    cost: Any = None
-    cost_fp32: Any = None
-    sq_transforms: Optional[Dict[str, Any]] = None
+    @property
+    def mode(self) -> str:
+        """Current inference mode: ``"fp32"`` or ``"quant"``."""
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        return self._quant_session.mode
+
+    # ------------------------------------------------------------------
+    # Full pipeline (backward compat)
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        calib_data,
+        *,
+        eval_data=None,
+        eval_fn: Optional[Callable] = None,
+        outputs: Union[str, List[str]] = "default",
+    ) -> SessionResult:
+        """Run the full quantization workflow. Backward-compatible shortcut.
+
+        Equivalent to calling ``.quantize() → .calibrate() → .analyze() →
+        .evaluate() → .cost() → .result`` in sequence, with conditional
+        evaluation and cost estimation based on *outputs*.
+        """
+        from src.report._spec import resolve_outputs as _resolve_outputs
+
+        observer_keys, needs_eval, needs_cost = _resolve_outputs(outputs)
+
+        self.quantize(calib_data=calib_data)
+        self.calibrate(calib_data, eval_fn=eval_fn)
+        self.analyze(calib_data, outputs=outputs, eval_fn=eval_fn)
+
+        if needs_eval and eval_fn is not None:
+            self.evaluate(
+                eval_data if eval_data is not None else calib_data,
+                eval_fn,
+            )
+
+        if needs_cost:
+            self.cost()
+
+        return self.result

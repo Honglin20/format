@@ -1,14 +1,16 @@
 """Unit tests for Session atomic execution unit.
 
-Session wraps QuantSession and orchestrates:
+Session wraps _QuantSession and orchestrates:
   calibrate -> analyze -> evaluate -> cost
+
+Covers both the full-pipeline ``run()`` and the step-by-step chainable API.
 """
 import pytest
 import torch
 import torch.nn as nn
 
 from src.session._config import QuantConfig
-from src.session._session import Session, SessionResult
+from src.session._session import Session, SessionResult, _needs_calibration
 from src.scheme.op_config import OpQuantConfig
 
 # ---------------------------------------------------------------------------
@@ -367,7 +369,7 @@ class TestSessionPrescale:
             transform="prescale", lsq_steps=5, calibrator="max",
         )
         session = Session(model, config, keep_fp32=False)
-        # Should raise RuntimeError from QuantSession.optimize_scales
+        # Should raise RuntimeError from _QuantSession.optimize_scales
         with pytest.raises(RuntimeError, match="keep_fp32"):
             session.run(_calib_data(), eval_fn=_eval_fn)
 
@@ -528,3 +530,829 @@ class TestSessionPrescaleInitModes:
         session = Session(model, config, keep_fp32=True)
         result = session.run(_calib_data(), eval_fn=_eval_fn)
         assert isinstance(result, SessionResult)
+
+
+# ===========================================================================
+# 16. Chainable step-by-step API
+# ===========================================================================
+
+
+class TestSessionChainableAPI:
+    """Session exposes a chainable API: .quantize() → .calibrate() → ..."""
+
+    def test_quantize_makes_qmodel_available(self):
+        """After .quantize(), session.qmodel is accessible."""
+        model = _make_small_model()
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config)
+        session.quantize()
+        assert session.qmodel is not None
+        assert isinstance(session.qmodel, nn.Module)
+
+    def test_quantize_makes_fp32_model_available(self):
+        """After .quantize() with keep_fp32=True, fp32_model is accessible."""
+        model = _make_small_model()
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config, keep_fp32=True)
+        session.quantize()
+        assert session.fp32_model is not None
+
+    def test_fp32_model_none_when_keep_fp32_false(self):
+        """After .quantize() with keep_fp32=False, fp32_model is None."""
+        model = _make_small_model()
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config, keep_fp32=False)
+        session.quantize()
+        assert session.fp32_model is None
+
+    def test_call_delegates_to_quant_session(self):
+        """session(x) delegates to the quantized model."""
+        model = _make_small_model()
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config)
+        session.quantize().calibrate(_calib_data())
+        x = torch.randn(4, 4)
+        out = session(x)
+        assert out.shape == (4, 3)
+
+    def test_qmodel_before_quantize_raises(self):
+        """Accessing .qmodel before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            _ = session.qmodel
+
+    def test_fp32_model_before_quantize_raises(self):
+        """Accessing .fp32_model before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            _ = session.fp32_model
+
+    def test_call_before_quantize_raises(self):
+        """Calling session(x) before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            session(torch.randn(4, 4))
+
+    def test_calibrate_before_quantize_raises(self):
+        """Calling .calibrate() before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            session.calibrate(_calib_data())
+
+    def test_analyze_before_quantize_raises(self):
+        """Calling .analyze() before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            session.analyze(_calib_data())
+
+    def test_evaluate_before_quantize_raises(self):
+        """Calling .evaluate() before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            session.evaluate(_calib_data(), _eval_fn)
+
+    def test_cost_before_quantize_raises(self):
+        """Calling .cost() before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            session.cost()
+
+    def test_result_before_quantize_raises(self):
+        """Accessing .result before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            _ = session.result
+
+    def test_chainable_returns_self(self):
+        """Each step method returns self for chaining."""
+        model = _make_small_model()
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config)
+        data = _calib_data()
+
+        assert session.quantize() is session
+        assert session.calibrate(data) is session
+        assert session.analyze(data) is session
+        assert session.evaluate(data, _eval_fn) is session
+        assert session.cost() is session
+
+    def test_full_chain_produces_result(self):
+        """Chaining all steps produces a valid SessionResult via .result."""
+        model = _make_small_model()
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config)
+        data = _calib_data()
+
+        session.quantize()
+        session.calibrate(data)
+        session.analyze(data, outputs=["accuracy", "qsnr"])
+        session.evaluate(data, _eval_fn)
+        session.cost()
+
+        result = session.result
+        assert isinstance(result, SessionResult)
+        assert result.config is config
+        assert result.fp32_metrics is not None
+        assert result.quant_metrics is not None
+        assert result.delta is not None
+        assert result.cost is not None
+
+    def test_full_chain_one_liner(self):
+        """Chained one-liner produces a valid SessionResult."""
+        model = _make_small_model()
+        config = QuantConfig(calibrator="max")
+        data = _calib_data()
+
+        result = (
+            Session(model, config)
+            .quantize()
+            .calibrate(data)
+            .analyze(data, outputs=["accuracy", "qsnr"])
+            .evaluate(data, _eval_fn)
+            .cost()
+            .result
+        )
+        assert isinstance(result, SessionResult)
+        assert result.fp32_metrics is not None
+
+    def test_mode_property(self):
+        """session.mode reflects current inference mode."""
+        model = _make_small_model()
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config)
+        session.quantize()
+        assert session.mode == "quant"
+        session.use_fp32()
+        assert session.mode == "fp32"
+        session.use_quant()
+        assert session.mode == "quant"
+
+    def test_use_fp32_before_quantize_raises(self):
+        """Calling .use_fp32() before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            session.use_fp32()
+
+    def test_use_quant_before_quantize_raises(self):
+        """Calling .use_quant() before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            session.use_quant()
+
+    def test_mode_before_quantize_raises(self):
+        """Accessing .mode before .quantize() raises RuntimeError."""
+        model = _make_small_model()
+        config = QuantConfig()
+        session = Session(model, config)
+        with pytest.raises(RuntimeError, match="Call .quantize\\(\\) first"):
+            _ = session.mode
+
+
+# ===========================================================================
+# 17. MX per_block no-op calibration
+# ===========================================================================
+
+
+class TestSessionMXNoCalibration:
+    """MX per_block formats skip calibration (scales computed dynamically)."""
+
+    def test_mx_per_block_calibrate_is_noop(self):
+        """Calibrate on MX per_block config should be a no-op (no crash)."""
+        model = _make_small_model()
+        config = QuantConfig(
+            w_format="fp4_e2m1",
+            w_granularity="per_block",
+            w_block_size=32,
+            a_format="fp4_e2m1",
+            a_granularity="per_block",
+            a_block_size=32,
+            calibrator="max",
+        )
+        session = Session(model, config)
+        session.quantize()
+        # calibrate should be a no-op for MX
+        session.calibrate(_calib_data())
+        assert session.qmodel is not None
+
+    def test_mx_per_block_run_still_works(self):
+        """run() should work on MX per_block config (calibration skipped)."""
+        model = _make_small_model()
+        config = QuantConfig(
+            w_format="fp4_e2m1",
+            w_granularity="per_block",
+            w_block_size=32,
+            a_format="fp4_e2m1",
+            a_granularity="per_block",
+            a_block_size=32,
+            calibrator="max",
+        )
+        session = Session(model, config)
+        result = session.run(_calib_data(), eval_fn=_eval_fn, outputs=["accuracy"])
+        assert isinstance(result, SessionResult)
+        assert result.fp32_metrics is not None
+        assert result.quant_metrics is not None
+
+    def test_mx_per_block_forward_pass(self):
+        """Forward pass works on MX quantized model without calibration."""
+        model = _make_small_model()
+        config = QuantConfig(
+            w_format="fp4_e2m1",
+            w_granularity="per_block",
+            w_block_size=32,
+            a_format="fp4_e2m1",
+            a_granularity="per_block",
+            a_block_size=32,
+        )
+        session = Session(model, config)
+        session.quantize()
+        x = torch.randn(4, 4)
+        out = session(x)
+        assert out.shape == (4, 3)
+
+
+# ===========================================================================
+# 18. _needs_calibration helper
+# ===========================================================================
+
+
+class TestNeedsCalibration:
+    """Unit tests for _needs_calibration()."""
+
+    def test_per_tensor_needs_calibration(self):
+        cfg = QuantConfig(
+            w_granularity="per_tensor",
+            a_granularity="per_tensor",
+        ).to_op_config()
+        assert _needs_calibration(cfg) is True
+
+    def test_per_channel_needs_calibration(self):
+        cfg = QuantConfig(
+            w_granularity="per_channel",
+            a_granularity="per_channel",
+        ).to_op_config()
+        assert _needs_calibration(cfg) is True
+
+    def test_all_per_block_no_calibration(self):
+        cfg = QuantConfig(
+            w_format="fp4_e2m1",
+            w_granularity="per_block",
+            w_block_size=32,
+            a_format="fp4_e2m1",
+            a_granularity="per_block",
+            a_block_size=32,
+        ).to_op_config()
+        assert _needs_calibration(cfg) is False
+
+    def test_hybrid_needs_calibration(self):
+        """If ANY scheme is not MX, calibration is needed."""
+        cfg = QuantConfig(
+            w_format="fp4_e2m1",
+            w_granularity="per_block",
+            w_block_size=32,
+            a_format="int8",
+            a_granularity="per_tensor",
+        ).to_op_config()
+        assert _needs_calibration(cfg) is True
+
+
+# ===========================================================================
+# 19. SessionResult accessor methods
+# ===========================================================================
+
+
+class TestSessionResultAccessors:
+    """SessionResult accessor methods: summary, accuracy_table, top_k_qsnr, layer_report."""
+
+    @staticmethod
+    def _make_result(**overrides):
+        """Build a SessionResult with sensible defaults for testing."""
+        defaults = dict(
+            name="test-cfg",
+            config=QuantConfig(),
+            fp32_metrics={"loss": 1.0, "acc": 0.95},
+            quant_metrics={"loss": 1.2, "acc": 0.93},
+            delta={"loss": -0.2, "acc": 0.02},
+            qsnr_per_layer={
+                "layer.0": 15.0,
+                "layer.1": 30.0,
+                "layer.2": 25.0,
+                "layer.3": 40.0,
+                "layer.4": 20.0,
+            },
+            mse_per_layer={
+                "layer.0": 0.01,
+                "layer.1": 0.001,
+                "layer.2": 0.005,
+                "layer.3": 0.0001,
+                "layer.4": 0.003,
+            },
+        )
+        defaults.update(overrides)
+        return SessionResult(**defaults)
+
+    def test_summary_returns_str(self):
+        result = self._make_result()
+        s = result.summary()
+        assert isinstance(s, str)
+        assert "test-cfg" in s
+        assert "loss" in s
+        assert "QSNR" in s
+
+    def test_summary_without_metrics(self):
+        result = self._make_result(fp32_metrics=None, quant_metrics=None, delta=None)
+        s = result.summary()
+        assert isinstance(s, str)
+        assert "test-cfg" in s
+        # Should not crash and should still show QSNR
+        assert "QSNR" in s
+
+    def test_summary_without_qsnr(self):
+        result = self._make_result(qsnr_per_layer={})
+        s = result.summary()
+        assert isinstance(s, str)
+        assert "QSNR" not in s
+
+    def test_summary_without_name(self):
+        result = self._make_result(name="")
+        s = result.summary()
+        assert "(unnamed)" in s
+
+    def test_accuracy_table_returns_str(self):
+        result = self._make_result()
+        t = result.accuracy_table()
+        assert isinstance(t, str)
+        assert "Metric" in t
+        assert "FP32" in t
+        assert "Quant" in t
+        assert "loss" in t
+        assert "acc" in t
+
+    def test_accuracy_table_without_metrics(self):
+        result = self._make_result(fp32_metrics=None)
+        t = result.accuracy_table()
+        assert "no accuracy metrics" in t.lower()
+
+    def test_top_k_qsnr_returns_sorted(self):
+        result = self._make_result()
+        top = result.top_k_qsnr(k=3)
+        assert len(top) == 3
+        # Should be sorted ascending (worst first)
+        assert top[0][0] == "layer.0"  # 15.0 dB (worst)
+        assert top[1][0] == "layer.4"  # 20.0 dB
+        assert top[2][0] == "layer.2"  # 25.0 dB
+
+    def test_top_k_qsnr_default_k(self):
+        result = self._make_result()
+        top = result.top_k_qsnr()
+        assert len(top) == 5  # only 5 layers in test data, all returned
+
+    def test_top_k_qsnr_empty(self):
+        result = self._make_result(qsnr_per_layer={})
+        top = result.top_k_qsnr()
+        assert top == []
+
+    def test_layer_report_returns_dataframe(self):
+        pytest.importorskip("pandas")
+        result = self._make_result()
+        df = result.layer_report()
+        assert df is not None
+        assert list(df.columns) == ["layer", "qsnr_db", "mse"]
+        assert len(df) == 5
+
+    def test_layer_report_without_pandas(self, monkeypatch):
+        import builtins
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "pandas":
+                raise ImportError("No module named 'pandas'")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", mock_import)
+        # Force re-import so the module sees pandas as unavailable
+        import src.session._session as mod
+        result = self._make_result()
+        df = mod.SessionResult.layer_report(result)
+        assert df is None
+
+    def test_layer_report_empty(self):
+        pytest.importorskip("pandas")
+        result = self._make_result(qsnr_per_layer={}, mse_per_layer={})
+        df = result.layer_report()
+        assert len(df) == 0
+
+
+# ===========================================================================
+# 20. quantize_nonlinear switch — e2e tests
+# ===========================================================================
+
+
+def _make_model_with_all_op_types():
+    """Model covering matmul, norm, activation, and pool op types.
+
+    Returns a model with: Linear, Conv2d, BatchNorm2d, LayerNorm, ReLU,
+    SiLU, Softmax, AdaptiveAvgPool2d, and Sigmoid.
+    """
+    return nn.Sequential(
+        nn.Conv2d(3, 8, kernel_size=3, padding=1),
+        nn.BatchNorm2d(8),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d((4, 4)),
+        nn.Flatten(),
+        nn.Linear(8 * 4 * 4, 32),
+        nn.LayerNorm(32),
+        nn.SiLU(),
+        nn.Linear(32, 10),
+        nn.Softmax(dim=1),
+        nn.Sigmoid(),
+    )
+
+
+def _get_module_types(model):
+    """Return a dict mapping module name → class name for all children."""
+    result = {}
+    for child_name, child in model.named_children():
+        result[child_name] = type(child).__name__
+        # Also recurse into Sequential containers
+        if isinstance(child, nn.Sequential):
+            for sub_name, sub_child in child.named_children():
+                result[f"{child_name}.{sub_name}"] = type(sub_child).__name__
+    return result
+
+
+class TestQuantizeNonLinearSwitch:
+    """End-to-end tests for quantize_nonlinear switch."""
+
+    # ------------------------------------------------------------------
+    # quantize_nonlinear=False — module type verification
+    # ------------------------------------------------------------------
+
+    def test_nonlinear_modules_skipped(self):
+        """quantize_nonlinear=False leaves norm/activation/pool as original types."""
+        from src.session._model import quantize_model
+        from src.scheme.op_config import OpQuantConfig
+
+        model = _make_model_with_all_op_types()
+        cfg = QuantConfig(w_format="int8").to_op_config()
+
+        qmodel = quantize_model(model, cfg, quantize_nonlinear=False)
+
+        types = _get_module_types(qmodel)
+        # Matmul modules should be replaced
+        assert types["0"].startswith("Quantized")   # Conv2d
+        assert types["5"].startswith("Quantized")   # Linear
+        assert types["8"].startswith("Quantized")   # Linear
+
+        # Nonlinear modules should stay as original nn.* types
+        assert types["1"] == "BatchNorm2d"          # NOT QuantizedBatchNorm2d
+        assert types["2"] == "ReLU"                  # NOT QuantizedReLU
+        assert types["3"] == "AdaptiveAvgPool2d"    # NOT QuantizedAdaptiveAvgPool2d
+        assert types["6"] == "LayerNorm"            # NOT QuantizedLayerNorm
+        assert types["7"] == "SiLU"                  # NOT QuantizedSiLU
+
+    def test_only_matmul_types_in_matmul_tuple(self):
+        """_MATMUL_TYPES contains exactly the matmul module classes."""
+        from src.session._model import _MATMUL_TYPES
+        import torch.nn as nn
+
+        expected = {
+            nn.Linear,
+            nn.Conv1d, nn.Conv2d, nn.Conv3d,
+            nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d,
+        }
+        assert set(_MATMUL_TYPES) == expected
+
+    # ------------------------------------------------------------------
+    # quantize_nonlinear=True (default) — backward compat
+    # ------------------------------------------------------------------
+
+    def test_default_quantizes_all_modules(self):
+        """quantize_nonlinear=True (default) replaces all supported module types."""
+        from src.session._model import quantize_model
+
+        model = _make_model_with_all_op_types()
+        cfg = QuantConfig(w_format="int8").to_op_config()
+
+        qmodel = quantize_model(model, cfg)  # default: quantize_nonlinear=True
+
+        types = _get_module_types(qmodel)
+        # All supported modules should be "Quantized*" (Flatten has no quantized
+        # counterpart and stays as-is).
+        unsupported = {"Flatten"}
+        for name, type_name in types.items():
+            if type_name in unsupported:
+                continue
+            assert type_name.startswith("Quantized"), \
+                f"{name} ({type_name}) should be Quantized*"
+
+    # ------------------------------------------------------------------
+    # Forward pass works
+    # ------------------------------------------------------------------
+
+    def test_forward_pass_quantize_nonlinear_false(self):
+        """Forward pass succeeds with quantize_nonlinear=False."""
+        from src.session._model import quantize_model
+
+        model = _make_model_with_all_op_types()
+        model.eval()
+        cfg = QuantConfig(w_format="int8", calibrator="max").to_op_config()
+
+        qmodel = quantize_model(model, cfg, quantize_nonlinear=False)
+        qmodel.eval()
+
+        x = torch.randn(2, 3, 8, 8)
+        with torch.no_grad():
+            out = qmodel(x)
+        assert out.shape == (2, 10)  # Softmax + Sigmoid → 10-dim
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+
+    def test_forward_pass_quantize_nonlinear_true(self):
+        """Forward pass succeeds with quantize_nonlinear=True."""
+        from src.session._model import quantize_model
+
+        model = _make_model_with_all_op_types()
+        model.eval()
+        cfg = QuantConfig(w_format="int8", calibrator="max").to_op_config()
+
+        qmodel = quantize_model(model, cfg, quantize_nonlinear=True)
+        qmodel.eval()
+
+        x = torch.randn(2, 3, 8, 8)
+        with torch.no_grad():
+            out = qmodel(x)
+        assert out.shape == (2, 10)
+        assert not torch.isnan(out).any()
+
+    def test_forward_values_differ_between_modes(self):
+        """quantize_nonlinear=False vs True produce different output values."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(w_format="int8", calibrator="max").to_op_config()
+
+        model_false = _make_model_with_all_op_types()
+        model_false.eval()
+        qmodel_false = quantize_model(
+            model_false, cfg, quantize_nonlinear=False,
+        )
+        qmodel_false.eval()
+
+        model_true = _make_model_with_all_op_types()
+        model_true.load_state_dict(model_false.state_dict())
+        model_true.eval()
+        qmodel_true = quantize_model(
+            model_true, cfg, quantize_nonlinear=True,
+        )
+        qmodel_true.eval()
+
+        x = torch.randn(2, 3, 8, 8)
+        with torch.no_grad():
+            out_false = qmodel_false(x)
+            out_true = qmodel_true(x)
+
+        # Outputs differ because nonlinear modules are quantized in one
+        # but not the other.
+        assert not torch.allclose(out_false, out_true)
+
+    # ------------------------------------------------------------------
+    # Session high-level API integration
+    # ------------------------------------------------------------------
+
+    def test_session_quantize_nonlinear_false_runs(self):
+        """Session.run() works with quantize_nonlinear=False."""
+        model = nn.Sequential(
+            nn.Conv2d(3, 4, 3, padding=1),
+            nn.BatchNorm2d(4),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(4 * 8 * 8, 5),
+        )
+        config = QuantConfig(
+            name="matmul-only",
+            w_format="int8",
+            calibrator="max",
+            quantize_nonlinear=False,
+        )
+        session = Session(model, config)
+
+        def eval_fn(m, data):
+            with torch.no_grad():
+                for batch in data:
+                    m(batch)
+            return {"loss": 0.5, "acc": 0.9}
+
+        calib = [torch.randn(2, 3, 8, 8) for _ in range(4)]
+        result = session.run(calib, eval_fn=eval_fn, outputs=["accuracy", "qsnr"])
+
+        assert isinstance(result, SessionResult)
+        assert result.fp32_metrics is not None
+        assert result.quant_metrics is not None
+
+        # Verify module types: BatchNorm and ReLU are untouched
+        types = _get_module_types(session.qmodel)
+        assert types["1"] == "BatchNorm2d"
+        assert types["2"] == "ReLU"
+        assert types["0"].startswith("Quantized")   # Conv2d quantized
+        assert types["4"].startswith("Quantized")   # Linear quantized
+
+    def test_session_chainable_api_quantize_nonlinear_false(self):
+        """Chainable API works with quantize_nonlinear=False."""
+        model = nn.Sequential(
+            nn.Linear(10, 20),
+            nn.ReLU(),
+            nn.Linear(20, 5),
+        )
+        config = QuantConfig(
+            name="chain-test",
+            w_format="int8",
+            calibrator="max",
+            quantize_nonlinear=False,
+        )
+        session = Session(model, config)
+        data = [torch.randn(4, 10) for _ in range(4)]
+
+        session.quantize().calibrate(data).analyze(
+            data, outputs=["qsnr"],
+        )
+
+        result = session.result
+        assert isinstance(result, SessionResult)
+
+        # ReLU should be untouched
+        types = _get_module_types(session.qmodel)
+        assert types["1"] == "ReLU"
+        assert types["0"].startswith("Quantized")
+        assert types["2"].startswith("Quantized")
+
+    def test_session_forward_quantize_nonlinear_false(self):
+        """session(x) works with quantize_nonlinear=False."""
+        model = nn.Sequential(
+            nn.Linear(10, 20),
+            nn.ReLU(),
+            nn.Linear(20, 5),
+        )
+        config = QuantConfig(
+            w_format="int8",
+            calibrator="max",
+            quantize_nonlinear=False,
+        )
+        session = Session(model, config)
+        session.quantize()
+
+        x = torch.randn(3, 10)
+        out = session(x)
+        assert out.shape == (3, 5)
+        assert not torch.isnan(out).any()
+
+    # ------------------------------------------------------------------
+    # QuantConfig validation
+    # ------------------------------------------------------------------
+
+    def test_quantize_nonlinear_default(self):
+        """quantize_nonlinear defaults to True."""
+        cfg = QuantConfig()
+        assert cfg.quantize_nonlinear is True
+
+    def test_quantize_nonlinear_field_stored(self):
+        """quantize_nonlinear is stored as a field value."""
+        cfg = QuantConfig(quantize_nonlinear=False)
+        assert cfg.quantize_nonlinear is False
+
+    def test_quantize_nonlinear_persists_in_result(self):
+        """SessionResult.config.quantize_nonlinear reflects the config value."""
+        model = nn.Sequential(nn.Linear(4, 3), nn.ReLU())
+        config = QuantConfig(
+            w_format="int8", calibrator="max", quantize_nonlinear=False,
+        )
+        session = Session(model, config)
+        result = session.run(
+            [torch.randn(2, 4)],
+            eval_fn=lambda m, d: (([m(b) for b in d]), {"x": 0.0})[1],
+            outputs=[],
+        )
+        assert result.config.quantize_nonlinear is False
+
+    # ------------------------------------------------------------------
+    # Edge cases
+    # ------------------------------------------------------------------
+
+    def test_model_with_only_matmul_modules(self):
+        """quantize_nonlinear=False on a matmul-only model still quantizes everything."""
+        from src.session._model import quantize_model
+
+        model = nn.Sequential(nn.Linear(4, 8), nn.Linear(8, 3))
+        cfg = QuantConfig(w_format="int8").to_op_config()
+
+        qmodel = quantize_model(model, cfg, quantize_nonlinear=False)
+
+        types = _get_module_types(qmodel)
+        for name, type_name in types.items():
+            assert type_name.startswith("Quantized"), \
+                f"{name} should be quantized (matmul-only model)"
+
+    def test_model_with_only_nonlinear_modules(self):
+        """quantize_nonlinear=False on a nonlinear-only model skips everything."""
+        from src.session._model import quantize_model
+
+        model = nn.Sequential(nn.ReLU(), nn.Sigmoid(), nn.Tanh())
+        cfg = QuantConfig(w_format="int8").to_op_config()
+
+        qmodel = quantize_model(model, cfg, quantize_nonlinear=False)
+
+        types = _get_module_types(qmodel)
+        assert types["0"] == "ReLU"
+        assert types["1"] == "Sigmoid"
+        assert types["2"] == "Tanh"
+
+    def test_per_block_mx_with_quantize_nonlinear_false(self):
+        """MX per_block format + quantize_nonlinear=False works correctly."""
+        from src.session._model import quantize_model
+
+        model = nn.Sequential(
+            nn.Linear(4, 8),
+            nn.BatchNorm1d(8),
+            nn.ReLU(),
+            nn.Linear(8, 3),
+        )
+        model.eval()
+
+        cfg = QuantConfig(
+            w_format="fp4_e2m1",
+            w_granularity="per_block",
+            w_block_size=32,
+            a_format="fp4_e2m1",
+            a_granularity="per_block",
+            a_block_size=32,
+            quantize_nonlinear=False,
+        ).to_op_config()
+
+        qmodel = quantize_model(model, cfg, quantize_nonlinear=False)
+        qmodel.eval()
+
+        x = torch.randn(4, 4)
+        with torch.no_grad():
+            out = qmodel(x)
+        assert out.shape == (4, 3)
+        assert not torch.isnan(out).any()
+
+        types = _get_module_types(qmodel)
+        assert types["0"].startswith("Quantized")
+        assert types["1"] == "BatchNorm1d"
+        assert types["2"] == "ReLU"
+        assert types["3"].startswith("Quantized")
+
+    def test_storage_bits_nonlinear_true_vs_false_difference(self):
+        """With storage_bits>0, quantize_nonlinear toggle changes nonlinear behaviour."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="int8",
+            storage_bits=16,
+            storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model_false = _make_model_with_all_op_types()
+        model_false.eval()
+        qmodel_false = quantize_model(
+            model_false, cfg, quantize_nonlinear=False,
+        )
+        qmodel_false.eval()
+
+        model_true = _make_model_with_all_op_types()
+        model_true.load_state_dict(model_false.state_dict())
+        model_true.eval()
+        qmodel_true = quantize_model(
+            model_true, cfg, quantize_nonlinear=True,
+        )
+        qmodel_true.eval()
+
+        x = torch.randn(2, 3, 8, 8)
+        with torch.no_grad():
+            out_false = qmodel_false(x)
+            out_true = qmodel_true(x)
+
+        # Storage quant + nonlinear quant → difference
+        assert not torch.allclose(out_false, out_true)

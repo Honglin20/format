@@ -60,8 +60,3 @@ class FPFormat(FormatBase):
             xq = g.op("QuantizeLinear", x, scale, zp)
             return g.op("DequantizeLinear", xq, scale, zp)
         return super().export_onnx(g, x, scheme)
-
-    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None, scale_format="fp32"):
-        return super().quantize(x, granularity, round_mode, allow_denorm,
-                                scale=scale, scale_format=scale_format)

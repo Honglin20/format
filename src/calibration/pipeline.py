@@ -27,7 +27,7 @@ class CalibrationSession:
     """Context manager for activation-scale calibration.
 
     Args:
-        model: PyTorch model (typically the quantized model from QuantSession).
+        model: PyTorch model (typically the quantized model from _QuantSession).
         strategy: ``ScaleStrategy`` instance used to compute final scales.
         axis: Dimension along which per-slice statistics are tracked.
         assign: If True (default), scales are auto-assigned as module

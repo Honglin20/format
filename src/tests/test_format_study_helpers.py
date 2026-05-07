@@ -101,7 +101,6 @@ class TestMakeOpCfg:
         cfg = QuantConfig(w_format="int8", w_granularity="per_tensor").to_op_config()
         assert cfg.weight.format.name == "int8"
         assert cfg.input.format.name == "int8"
-        assert cfg.output.format.name == "int8"
 
     def test_with_transform(self):
         from src.transform.hadamard import HadamardTransform
@@ -118,7 +117,6 @@ class TestMakeOpCfg:
         ).to_op_config()
         assert cfg.weight.format.name == "int4"
         assert cfg.input.format.name == "int8"
-        assert cfg.output.format.name == "int8"
 
     def test_act_format_same_granularity(self):
         cfg = QuantConfig(
@@ -131,15 +129,15 @@ class TestMakeOpCfg:
 
     def test_scale_format_fp32_default(self):
         cfg = QuantConfig(w_format="int8", w_granularity="per_tensor").to_op_config()
-        assert cfg.weight.scale_format == "fp32"
+        assert cfg.weight.scale_storage == "fp32"
 
     def test_scale_format_pot(self):
         cfg = QuantConfig(
             w_format="int4", w_granularity="per_channel",
             scale_storage="pot",
         ).to_op_config()
-        assert cfg.weight.scale_format == "pot"
-        assert cfg.input.scale_format == "pot"
+        assert cfg.weight.scale_storage == "pot"
+        assert cfg.input.scale_storage == "pot"
 
     def test_act_format_with_pot_scale(self):
         cfg = QuantConfig(
@@ -147,14 +145,14 @@ class TestMakeOpCfg:
             w_granularity="per_tensor", a_granularity="per_tensor",
             scale_storage="pot",
         ).to_op_config()
-        assert cfg.weight.scale_format == "pot"
-        assert cfg.input.scale_format == "pot"
+        assert cfg.weight.scale_storage == "pot"
+        assert cfg.input.scale_storage == "pot"
         assert cfg.weight.format.name == "int4"
         assert cfg.input.format.name == "int8"
 
     def test_without_act_format_all_roles_identical(self):
         cfg = QuantConfig(w_format="int8", w_granularity="per_tensor").to_op_config()
-        assert cfg.weight.format.name == cfg.input.format.name == cfg.output.format.name
+        assert cfg.weight.format.name == cfg.input.format.name
 
 
 class TestMakeOpCfgWeightOnly:
@@ -172,11 +170,11 @@ class TestMakeOpCfgWeightOnly:
             w_format="int4", w_granularity="per_tensor",
             weight_only=True,
         ).to_op_config()
-        assert cfg.weight.scale_format == "fp32"
+        assert cfg.weight.scale_storage == "fp32"
 
     def test_scale_format_pot(self):
         cfg = QuantConfig(
             w_format="int4", w_granularity="per_tensor",
             weight_only=True, scale_storage="pot",
         ).to_op_config()
-        assert cfg.weight.scale_format == "pot"
+        assert cfg.weight.scale_storage == "pot"

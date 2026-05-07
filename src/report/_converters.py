@@ -10,7 +10,7 @@ from collections import defaultdict
 from typing import Any, Dict, List
 
 from src.report._session_report import SessionReport
-from src.session._session import SessionResult
+from src.session._result import SessionResult
 
 
 def results_to_viz_dict(results: List[SessionResult]) -> dict:

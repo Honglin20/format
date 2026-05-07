@@ -37,7 +37,7 @@
 | Phase 5 | `pytest src/tests/ -x` | 图结构正确 + `onnx.checker` 通过 |
 | Phase 6+ | `pytest src/tests/ -q` | 0 xfail，无 regression |
 
-当前全量：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,671 passed
+当前全量：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,709 passed
 
 ## 不在当前范围
 

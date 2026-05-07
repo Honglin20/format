@@ -8,10 +8,13 @@ provided QuantScheme. When scheme=None, the result is returned unquantized
 These are building blocks for Norm, Activation, Softmax, and Pool operators
 that need per-step quantization.
 """
+from contextlib import contextmanager
+
 import numpy as np
 import torch
 
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 from src.scheme.quant_scheme import QuantScheme
 
 _torch_exp = torch.exp
@@ -21,6 +24,16 @@ _torch_tanh = torch.tanh
 
 LN_2_EXACT = 0.69314718056
 LOG2_E_BF16 = 1.4453125  # 1 + 2**-2 + 2**-3 + 2**-4 + 2**-7
+
+
+@contextmanager
+def _unpatched():
+    """Context manager that disables Tensor dunder patches during internal ops."""
+    _enter_quantize()
+    try:
+        yield
+    finally:
+        _exit_quantize()
 
 
 def _q(x: torch.Tensor, scheme) -> torch.Tensor:
@@ -35,15 +48,21 @@ def vec_quantize(x: torch.Tensor, scheme) -> torch.Tensor:
 
 
 def vec_add(a: torch.Tensor, b: torch.Tensor, scheme) -> torch.Tensor:
-    return _q(a + b, scheme)
+    with _unpatched():
+        s = a + b
+    return _q(s, scheme)
 
 
 def vec_sub(a: torch.Tensor, b: torch.Tensor, scheme) -> torch.Tensor:
-    return _q(a - b, scheme)
+    with _unpatched():
+        s = a - b
+    return _q(s, scheme)
 
 
 def vec_mul(a: torch.Tensor, b: torch.Tensor, scheme) -> torch.Tensor:
-    return _q(a * b, scheme)
+    with _unpatched():
+        s = a * b
+    return _q(s, scheme)
 
 
 def vec_div(a: torch.Tensor, b: torch.Tensor, scheme,
@@ -51,11 +70,15 @@ def vec_div(a: torch.Tensor, b: torch.Tensor, scheme,
     if use_recip:
         recip_b = vec_recip(b, scheme)
         return vec_mul(a, recip_b, scheme)
-    return _q(a / b, scheme)
+    with _unpatched():
+        s = a / b
+    return _q(s, scheme)
 
 
 def vec_recip(x: torch.Tensor, scheme) -> torch.Tensor:
-    return _q(1.0 / x, scheme)
+    with _unpatched():
+        s = 1.0 / x
+    return _q(s, scheme)
 
 
 def vec_sqrt(x: torch.Tensor, scheme) -> torch.Tensor:
@@ -64,7 +87,9 @@ def vec_sqrt(x: torch.Tensor, scheme) -> torch.Tensor:
 
 def vec_exp(x: torch.Tensor, scheme, use_exp2: bool = False) -> torch.Tensor:
     if use_exp2:
-        phi = _q(LOG2_E_BF16 * x, scheme)
+        with _unpatched():
+            phi_in = LOG2_E_BF16 * x
+        phi = _q(phi_in, scheme)
         return vec_exp2(phi, scheme)
     return _q(_torch_exp(x), scheme)
 
@@ -72,7 +97,9 @@ def vec_exp(x: torch.Tensor, scheme, use_exp2: bool = False) -> torch.Tensor:
 def vec_exp2(x: torch.Tensor, scheme) -> torch.Tensor:
     if hasattr(torch, 'exp2'):
         return _q(_torch_exp2(x), scheme)
-    return _q(_torch_exp(x * LN_2_EXACT), scheme)
+    with _unpatched():
+        s = x * LN_2_EXACT
+    return _q(_torch_exp(s), scheme)
 
 
 def vec_tanh(x: torch.Tensor, scheme) -> torch.Tensor:

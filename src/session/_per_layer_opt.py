@@ -18,18 +18,13 @@ import torch
 import torch.nn as nn
 
 from src.analysis.observers import MSEObserver, QSNRObserver
-from src.calibration.strategies import (
-    KLScaleStrategy,
-    MaxScaleStrategy,
-    MSEScaleStrategy,
-    PercentileScaleStrategy,
-)
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.transform import IdentityTransform
 from src.session._config import QuantConfig
-from src.session._quant import QuantSession
-from src.session._session import SessionResult
+from src.session._quant import _QuantSession
+from src.session._result import SessionResult
+from src.session._session import _extract_qsnr_mse, _make_calibrator, _run_model
 from src.transform.hadamard import HadamardTransform
 from src.transform.smooth_quant import (
     SmoothQuantTransform,
@@ -139,7 +134,7 @@ def per_layer_optimal(
                     granularity=op_cfg.weight.granularity,
                     transform=tx,
                     round_mode=op_cfg.weight.round_mode,
-                    scale_format=op_cfg.weight.scale_format,
+                    scale_storage=op_cfg.weight.scale_storage,
                 )
                 per_layer_cfgs[layer_name] = OpQuantConfig(weight=new_weight)
             else:
@@ -152,7 +147,7 @@ def per_layer_optimal(
                     granularity=op_cfg.input.granularity,
                     transform=tx,
                     round_mode=op_cfg.input.round_mode,
-                    scale_format=op_cfg.input.scale_format,
+                    scale_storage=op_cfg.input.scale_storage,
                 )
                 per_layer_cfgs[layer_name] = OpQuantConfig(
                     input=new_input,
@@ -193,7 +188,7 @@ def per_layer_optimal(
                         granularity=op_cfg.weight.granularity,
                         transform=sq_t,
                         round_mode=op_cfg.weight.round_mode,
-                        scale_format=op_cfg.weight.scale_format,
+                        scale_storage=op_cfg.weight.scale_storage,
                     )
                     per_layer_cfgs[layer_name] = OpQuantConfig(
                         weight=new_weight,
@@ -205,7 +200,7 @@ def per_layer_optimal(
                         granularity=op_cfg.input.granularity,
                         transform=sq_t,
                         round_mode=op_cfg.input.round_mode,
-                        scale_format=op_cfg.input.scale_format,
+                        scale_storage=op_cfg.input.scale_storage,
                     )
                     per_layer_cfgs[layer_name] = OpQuantConfig(
                         input=new_input,
@@ -243,16 +238,13 @@ def per_layer_optimal(
     )
 
     # ------------------------------------------------------------------
-    # 8. Create QuantSession with per-layer configs
+    # 8. Create _QuantSession with per-layer configs
     # ------------------------------------------------------------------
-    _cal_mapping = {
-        "mse": MSEScaleStrategy,
-        "max": MaxScaleStrategy,
-        "percentile": PercentileScaleStrategy,
-        "kl": KLScaleStrategy,
-    }
-    calibrator = _cal_mapping[base_cfg.calibrator]()
-    qs = QuantSession(
+    # Uses _QuantSession directly (not Session) because Session works with
+    # a single QuantConfig→OpQuantConfig, while per-layer optimal requires
+    # per-layer OpQuantConfig dicts.
+    calibrator = _make_calibrator(base_cfg.calibrator)
+    qs = _QuantSession(
         model,
         per_layer_cfgs,
         calibrator=calibrator,
@@ -260,36 +252,19 @@ def per_layer_optimal(
     )
 
     # ------------------------------------------------------------------
-    # 9. Calibrate
+    # 9. Calibrate (reuses _run_model from _session.py)
     # ------------------------------------------------------------------
     with qs.calibrate():
-        eval_fn(qs, calib_data)
+        _run_model(qs, calib_data, eval_fn=eval_fn)
 
     # ------------------------------------------------------------------
     # 10. Analyze
     # ------------------------------------------------------------------
-    qsnr_per_layer: Dict[str, float] = {}
-    mse_per_layer: Dict[str, float] = {}
-
     with qs.analyze(observers=[QSNRObserver(), MSEObserver()]) as ctx:
-        eval_fn(qs, calib_data)
+        _run_model(qs, calib_data, eval_fn=eval_fn)
     report = ctx.report()
     observers_data = report._raw
-
-    for layer, roles in observers_data.items():
-        for _role, stages in roles.items():
-            for _stage, slices in stages.items():
-                for _slice_key, metrics in slices.items():
-                    if "qsnr_db" in metrics:
-                        qsnr_per_layer[layer] = max(
-                            qsnr_per_layer.get(layer, 0.0),
-                            metrics["qsnr_db"],
-                        )
-                    if "mse" in metrics:
-                        mse_per_layer[layer] = max(
-                            mse_per_layer.get(layer, 0.0),
-                            metrics["mse"],
-                        )
+    qsnr_per_layer, mse_per_layer = _extract_qsnr_mse(observers_data)
 
     # ------------------------------------------------------------------
     # 11. Evaluate

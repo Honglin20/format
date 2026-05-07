@@ -10,9 +10,10 @@ import torch
 import mx
 from mx.specs import apply_mx_specs
 
-from src.ops.conv import ConvTransposeFunction, QuantizedConvTranspose2d
+from src.ops.conv import ConvTransposeFunction, QuantizedConvTranspose1d, QuantizedConvTranspose2d, QuantizedConvTranspose3d
 from src.scheme.op_config import OpQuantConfig
 from src.tests._compat import op_config_from_mx_specs
+from src.tests._formats import smoke_mx_specs_params, full_mx_specs_params
 
 
 # ---------------------------------------------------------------------------
@@ -86,21 +87,8 @@ def _assert_bit_exact(mx_out, src_out, label="output"):
     )
 
 
-MX_SPECS_CONV_TRANSPOSE = [
-    pytest.param("bfloat16", {"bfloat": 16}, id="bf16"),
-    pytest.param("bf16+mxfp8e4m3", {
-        "bfloat": 16, "a_elem_format": "fp8_e4m3",
-        "w_elem_format": "fp8_e4m3", "block_size": 32,
-    }, id="bf16+mxfp8e4m3"),
-    pytest.param("bf16+mxfp8e5m2", {
-        "bfloat": 16, "a_elem_format": "fp8_e5m2",
-        "w_elem_format": "fp8_e5m2", "block_size": 32,
-    }, id="bf16+mxfp8e5m2"),
-    pytest.param("mxfp8e4m3-no-bf", {
-        "a_elem_format": "fp8_e4m3",
-        "w_elem_format": "fp8_e4m3", "block_size": 32,
-    }, id="mxfp8e4m3-no-bf"),
-]
+MX_SPECS_CONV_TRANSPOSE = smoke_mx_specs_params()
+FULL_MX_SPECS_CONV_TRANSPOSE = full_mx_specs_params()
 
 
 # ---------------------------------------------------------------------------
@@ -186,5 +174,116 @@ class TestQuantizedConvTranspose2dModule:
         out_m = qc(x_m)
         out_m.sum().backward()
 
+        assert torch.equal(out_f.detach(), out_m.detach()), "Module forward != functional"
+        assert torch.equal(x_f.grad, x_m.grad), "Module grad_input != functional"
+
+
+# ---------------------------------------------------------------------------
+# Slow full-format ConvTranspose2d tests (all 8 MX formats)
+# ---------------------------------------------------------------------------
+
+class TestConvTranspose2dForwardFull:
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONV_TRANSPOSE)
+    def test_forward_with_bias(self, name, mx_specs):
+        x, w, b = _make_conv_transpose_tensors()
+        mx_out, _, _, _ = _run_mx_conv_transpose(x, w, b, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="conv_transpose")
+        src_out, _, _, _ = _run_src_conv_transpose(x, w, b, cfg)
+        _assert_bit_exact(mx_out, src_out, label=f"convT-fwd ({name})")
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONV_TRANSPOSE)
+    def test_forward_no_bias(self, name, mx_specs):
+        x, w, b = _make_conv_transpose_tensors()
+        mx_out, _, _, _ = _run_mx_conv_transpose(x, w, None, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="conv_transpose")
+        src_out, _, _, _ = _run_src_conv_transpose(x, w, None, cfg)
+        _assert_bit_exact(mx_out, src_out, label=f"convT-fwd-nobias ({name})")
+
+
+class TestConvTranspose2dBackwardFull:
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONV_TRANSPOSE)
+    def test_backward_grad_input(self, name, mx_specs):
+        x, w, b = _make_conv_transpose_tensors()
+        _, mx_gi, _, _ = _run_mx_conv_transpose(x, w, b, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="conv_transpose")
+        _, src_gi, _, _ = _run_src_conv_transpose(x, w, b, cfg)
+        _assert_bit_exact(mx_gi, src_gi, label=f"convT-grad_input ({name})")
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONV_TRANSPOSE)
+    def test_backward_grad_weight(self, name, mx_specs):
+        x, w, b = _make_conv_transpose_tensors()
+        _, _, mx_gw, _ = _run_mx_conv_transpose(x, w, b, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="conv_transpose")
+        _, _, src_gw, _ = _run_src_conv_transpose(x, w, b, cfg)
+        _assert_bit_exact(mx_gw, src_gw, label=f"convT-grad_weight ({name})")
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONV_TRANSPOSE)
+    def test_backward_grad_bias(self, name, mx_specs):
+        x, w, b = _make_conv_transpose_tensors()
+        _, _, _, mx_gb = _run_mx_conv_transpose(x, w, b, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="conv_transpose")
+        _, _, _, src_gb = _run_src_conv_transpose(x, w, b, cfg)
+        _assert_bit_exact(mx_gb, src_gb, label=f"convT-grad_bias ({name})")
+
+
+# ---------------------------------------------------------------------------
+# ConvTranspose1d module tests (mx lacks ConvTranspose1d — module only)
+# ---------------------------------------------------------------------------
+
+class TestQuantizedConvTranspose1dModule:
+    @pytest.mark.parametrize("name,mx_specs", [
+        pytest.param("bf16", {"bfloat": 16}, id="bf16"),
+        pytest.param("bf16+mxfp8e4m3", {"bfloat": 16, "a_elem_format": "fp8_e4m3",
+                     "w_elem_format": "fp8_e4m3", "block_size": 32}, id="bf16+mxfp8e4m3"),
+    ])
+    def test_module_forward_matches_functional(self, name, mx_specs):
+        torch.manual_seed(42)
+        x = torch.randn(2, 4, 16, dtype=torch.float32)
+        w = torch.randn(4, 8, 3, dtype=torch.float32)
+        b = torch.randn(8, dtype=torch.float32)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="conv_transpose")
+        x_f = x.clone().requires_grad_(True)
+        out_f = ConvTransposeFunction.apply(x_f, w, b, 1, 0, 0, 1, 1, cfg)
+        out_f.sum().backward()
+        qc = QuantizedConvTranspose1d(4, 8, 3, bias=True, cfg=cfg)
+        qc.weight.data.copy_(w)
+        qc.bias.data.copy_(b)
+        x_m = x.clone().requires_grad_(True)
+        out_m = qc(x_m)
+        out_m.sum().backward()
+        assert torch.equal(out_f.detach(), out_m.detach()), "Module forward != functional"
+        assert torch.equal(x_f.grad, x_m.grad), "Module grad_input != functional"
+
+
+# ---------------------------------------------------------------------------
+# ConvTranspose3d module tests (mx lacks ConvTranspose3d — module only)
+# ---------------------------------------------------------------------------
+
+class TestQuantizedConvTranspose3dModule:
+    @pytest.mark.parametrize("name,mx_specs", [
+        pytest.param("bf16", {"bfloat": 16}, id="bf16"),
+        pytest.param("bf16+mxfp8e4m3", {"bfloat": 16, "a_elem_format": "fp8_e4m3",
+                     "w_elem_format": "fp8_e4m3", "block_size": 32}, id="bf16+mxfp8e4m3"),
+    ])
+    def test_module_forward_matches_functional(self, name, mx_specs):
+        torch.manual_seed(42)
+        x = torch.randn(2, 3, 6, 6, 6, dtype=torch.float32)
+        w = torch.randn(3, 6, 3, 3, 3, dtype=torch.float32)
+        b = torch.randn(6, dtype=torch.float32)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="conv_transpose")
+        x_f = x.clone().requires_grad_(True)
+        out_f = ConvTransposeFunction.apply(x_f, w, b, 1, 0, 0, 1, 1, cfg)
+        out_f.sum().backward()
+        qc = QuantizedConvTranspose3d(3, 6, 3, bias=True, cfg=cfg)
+        qc.weight.data.copy_(w)
+        qc.bias.data.copy_(b)
+        x_m = x.clone().requires_grad_(True)
+        out_m = qc(x_m)
+        out_m.sum().backward()
         assert torch.equal(out_f.detach(), out_m.detach()), "Module forward != functional"
         assert torch.equal(x_f.grad, x_m.grad), "Module grad_input != functional"

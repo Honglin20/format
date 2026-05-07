@@ -1,6 +1,6 @@
 # Current Task
 
-**Task ID**: Phase 8.R3 — Session 统一入口重构 ✅ → 下一阶段：P7 自动格式搜索
+**Task ID**: Phase 8.R3 — Session 统一入口重构 ✅ → Session 2.0 分层 API ✅ → 下一阶段：P7 自动格式搜索
 **Plan**: `docs/plans/2026-05-07-session-refactor.md`
 **Design**: `docs/architecture/008-session-refactor.md`
 **Branch**: `feature/refactor-src`
@@ -67,7 +67,21 @@
 - [x] Task 6: 清理 pipeline/ + C1-C5 修复 + 兼容（删除 `src/pipeline/`，更新所有 import）
 - [x] Task 7: 文档更新（CLAUDE.md + CURRENT.md）
 
-**状态**: Phase 8.R3 全部完成。1671 passed，0 regression。`src/pipeline/` 已删除。
+**状态**: Phase 8.R3 全部完成。1,708 passed，0 regression。Session 2.0 分层 API 已完成。
+
+### Session 2.0 分层 API（2026-05-07）
+
+- [x] Session 链式 API：`.quantize()` → `.calibrate()` → `.analyze()` → `.evaluate()` → `.cost()` → `.result`
+- [x] 所有步骤方法返回 `self`（可链式调用）
+- [x] MX per_block 格式 `calibrate()` 自动跳过（scale 动态计算）
+- [x] `.qmodel` / `.fp32_model` property（`.quantize()` 后可访问）
+- [x] `session(x)` 推理委托（`__call__`）
+- [x] `.use_fp32()` / `.use_quant()` / `.mode` 模式切换
+- [x] `SessionResult` 访问方法：`.summary()` / `.accuracy_table()` / `.top_k_qsnr(k)` / `.layer_report()`
+- [x] `run()` 保持向后兼容（快捷方式）
+- [x] 全部 guard：所有方法在 `.quantize()` 之前调用抛出 `RuntimeError("Call .quantize() first")`
+- [x] README 更新：三种使用方式（全自动 / 分步链式 / MX 直接推理）
+- [x] 76 tests（38 原有 + 38 新增），全量 1,709 passed
 
 ### 剩余（P7-P9，未开始）
 
@@ -92,7 +106,7 @@
 
 `pytest src/tests/` 有 26 个预存在失败（非本分支引入）：
 - `test_golden_equiv.py` — 26 tests FileNotFoundError（golden data `.pt` 文件未 staging）
-- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,671 passed
+- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 2,034 passed
 
 ## 关键经验记录
 
@@ -107,6 +121,10 @@
 
 ## 最近变更
 
+- 2026-05-08: **quantize_nonlinear 开关**。`QuantConfig.quantize_nonlinear=False` 使 norm / activation / pool 保持 fp32，仅 Linear / Conv 做量化。`QuantSession` 公开别名加入 `__all__`。README 和 quickstart-details 文档全面更新，与代码一致。全量 2,034 passed。
+- 2026-05-07: **Session 内部三层委托关系文档化**。ADR-008 §5.1.1 记录了 `Session` → `_QuantSession` → `quantize_model()` 的分层委托关系和各自的使用场景。
+- 2026-05-07: **全算子端到端等价性验证通过**。`tools/verify_layer_equiv.py` 验证了全部 21 种模块类型 + 全部 inline ops 的 bit-exact 等价性。修复了 5 个 bug：`bfloat=16` → `storage_bits/storage_kind` 参数重命名、`model.eval()` 必须在 `quantize_model()` 之后调用、`to_op_config()`/`resolve_config()` 不应设置 `output` field（MX 不施加 per-block 输出量化）、per-module dict 模式需要显式 `op_cfgs` 以配置 inline matmul 系列 op、MX 参考链中 combine-add 的结合律需与模型 forward 一致（左结合）。全量 1,712 passed。
 - 2026-05-07: **Session 统一入口重构完成**（Phase 8.R3）。`QuantConfig` 唯一配置入口、`Session`/`Study` 三概念层级、`report/` Output-Driven 输出系统。`src/pipeline/` 已删除，C1-C5 全部修复。全量 1,671 passed。
+- 2026-05-07: **Framework review 13 issues resolved** (P0–P2). C1 (unified deserialization), C2 (STUDY_CONFIG fixes), C3 (output compute in to_op_config), I1 (storage_bits/storage_kind rename), I2 (deleted _utils/), I3 (scale_storage naming unified), I4 (prescale_granularity conditional), M1 (_QuantSession private), M3 (w_axis/a_axis fields), L1 (per_layer_optimal reuses Session helpers), L2 (deduplicated _VALID_ROUND_MODES), L3 (study_config.py translated to English). 1,712 passed.
 - 2026-05-06: **Format Study 三层分离完成**。runner（执行）、report（输出）、format_study（编排）三层职责分离。
 - 2026-05-06: **架构重构完成**。四层依赖模型，observer/ 为横切基础设施。

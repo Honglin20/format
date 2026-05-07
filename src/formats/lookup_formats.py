@@ -36,11 +36,6 @@ class LookupFormat(FormatBase):
         self.min_norm = 0.0
         self._freeze()
 
-    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None, scale_format="fp32"):
-        return super().quantize(x, granularity, round_mode, allow_denorm,
-                                scale=scale, scale_format=scale_format)
-
     def quantize_elemwise(self, x, round_mode="nearest", allow_denorm=True,
                           saturate_normals=None):
         """Nearest-neighbor quantization against self.levels.

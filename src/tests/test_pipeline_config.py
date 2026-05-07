@@ -49,7 +49,7 @@ class TestResolveConfig:
         assert isinstance(cfg, OpQuantConfig)
         assert cfg.input is not None
         assert cfg.weight is not None
-        assert cfg.output is not None
+        assert cfg.output is None
 
     def test_weight_only(self):
         cfg = resolve_config({"format": "nf4", "granularity": "per_channel", "axis": 0, "weight_only": True})
@@ -66,7 +66,7 @@ class TestResolveConfig:
             resolve_config({"format": "unknown_fmt", "granularity": "per_tensor"})
 
     def test_unknown_transform_raises(self):
-        with pytest.raises(ValueError, match="Unknown transform"):
+        with pytest.raises(ValueError, match="Invalid transform"):
             resolve_config({"format": "int8", "granularity": "per_tensor", "transform": "no_such_transform"})
 
     def test_missing_format_raises(self):
@@ -101,17 +101,17 @@ class TestResolveConfig:
 
     def test_scale_format_default_fp32(self):
         cfg = resolve_config({"format": "int8", "granularity": "per_tensor"})
-        assert cfg.weight.scale_format == "fp32"
-        assert cfg.input.scale_format == "fp32"
+        assert cfg.weight.scale_storage == "fp32"
+        assert cfg.input.scale_storage == "fp32"
 
     def test_scale_format_pot(self):
         cfg = resolve_config({"format": "int8", "granularity": "per_tensor", "scale_format": "pot"})
-        assert cfg.weight.scale_format == "pot"
-        assert cfg.input.scale_format == "pot"
+        assert cfg.weight.scale_storage == "pot"
+        assert cfg.input.scale_storage == "pot"
 
     def test_scale_format_per_channel_pot(self):
         cfg = resolve_config({"format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "pot"})
-        assert cfg.weight.scale_format == "pot"
+        assert cfg.weight.scale_storage == "pot"
         assert cfg.weight.granularity.mode == GranularityMode.PER_CHANNEL
 
     def test_scale_format_must_be_string(self):
@@ -131,7 +131,6 @@ class TestResolveConfig:
         })
         assert cfg.weight.format.name == "int4"
         assert cfg.input.format.name == "int8"
-        assert cfg.output.format.name == "int8"
 
     def test_act_format_with_fp_activation(self):
         cfg = resolve_config({
@@ -140,7 +139,6 @@ class TestResolveConfig:
         })
         assert cfg.weight.format.name == "int4"
         assert cfg.input.format.name == "fp8_e4m3"
-        assert cfg.output.format.name == "fp8_e4m3"
 
     def test_act_format_same_granularity_as_weight(self):
         cfg = resolve_config({
@@ -155,8 +153,8 @@ class TestResolveConfig:
             "format": "int4", "act_format": "int8",
             "granularity": "per_tensor", "scale_format": "pot",
         })
-        assert cfg.weight.scale_format == "pot"
-        assert cfg.input.scale_format == "pot"
+        assert cfg.weight.scale_storage == "pot"
+        assert cfg.input.scale_storage == "pot"
 
     def test_act_format_inherits_transform(self):
         cfg = resolve_config({
@@ -192,7 +190,6 @@ class TestResolveConfig:
         cfg = resolve_config({"format": "int8", "granularity": "per_tensor"})
         assert cfg.weight.format.name == "int8"
         assert cfg.input.format.name == "int8"
-        assert cfg.output.format.name == "int8"
 
     # ── Transform type validation ─────────────────────────────────────
 

@@ -35,7 +35,7 @@ class FormatBase(ABC):
     value-based equality and hashing — subclasses must implement __eq__/__hash__.
     """
 
-    __slots__ = ("name", "ebits", "mbits", "emax", "max_norm", "min_norm", "_frozen")
+    __slots__ = ("name", "ebits", "mbits", "emax", "max_norm", "min_norm", "_frozen", "_hardware_dtype")
 
     @abstractmethod
     def __eq__(self, other) -> bool: ...
@@ -103,14 +103,12 @@ class FormatBase(ABC):
             saturate_normals=saturate_normals,
         )
 
-    @abstractmethod
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None, scale_format="fp32"):
+                 scale=None, scale_storage="fp32"):
         """Quantize tensor x to this format.
 
-        Declared @abstractmethod to force subclasses to explicitly decide
-        whether to use this default dispatch or override with special logic.
-        Subclasses can call super().quantize() to reuse the default.
+        Dispatches by granularity mode.  Subclasses may override to provide
+        hardware shortcuts or specialized dispatch logic.
 
         Args:
             x: Input tensor.
@@ -119,7 +117,7 @@ class FormatBase(ABC):
             allow_denorm: If False, flush subnormal values to zero (float formats only).
             scale: Optional pre-computed scale tensor.  If provided, skips
                 on-the-fly scale computation and uses this directly.
-            scale_format: "fp32" (default) or "pot".  When "pot", per-channel
+            scale_storage: "fp32" (default) or "pot".  When "pot", per-channel
                 amax values are rounded to the nearest power of 2.
 
         Returns:
@@ -133,29 +131,39 @@ class FormatBase(ABC):
         mode = granularity.mode
         if mode == GranularityMode.PER_TENSOR:
             return self._quantize_per_tensor(x, round_mode, allow_denorm, scale=scale,
-                                              scale_format=scale_format)
+                                              scale_storage=scale_storage)
         elif mode == GranularityMode.PER_CHANNEL:
             return self._quantize_per_channel(x, granularity, round_mode, allow_denorm,
-                                              scale=scale, scale_format=scale_format)
+                                              scale=scale, scale_storage=scale_storage)
         elif mode == GranularityMode.PER_BLOCK:
             return self._quantize_per_block(x, granularity, round_mode,
-                                              scale=scale, scale_format=scale_format)
+                                              scale=scale, scale_storage=scale_storage)
         raise ValueError(f"Unknown granularity mode: {mode}")
 
     def _quantize_per_tensor(self, x, round_mode, allow_denorm=True, scale=None,
-                              scale_format="fp32"):
-        """Default per-tensor quantization: element-wise only (no scaling)."""
+                              scale_storage="fp32"):
+        """Default per-tensor quantization.
+
+        When ``_hardware_dtype`` is set and the preconditions are met
+        (round_mode='even', allow_denorm=True), uses the hardware dtype
+        conversion shortcut for formats like bfloat16/float16.
+        """
+        hw_dtype = getattr(self, "_hardware_dtype", None)
+        if (hw_dtype is not None
+                and round_mode == "even"
+                and allow_denorm):
+            return x.to(hw_dtype).float()
         return self.quantize_elemwise(x, round_mode=round_mode,
                                       allow_denorm=allow_denorm)
 
     def _quantize_per_channel(self, x, granularity, round_mode, allow_denorm=True,
-                              scale=None, scale_format="fp32"):
+                              scale=None, scale_storage="fp32"):
         """Default per-channel quantization: compute per-channel scale, then elemwise.
 
         If ``scale`` is provided, it is used directly as ``amax``, skipping
         the on-the-fly ``torch.amax(torch.abs(x))`` computation.
 
-        When ``scale_format="pot"``, the amax is rounded to the nearest power
+        When ``scale_storage="pot"``, the amax is rounded to the nearest power
         of 2 before normalization.
         """
         if scale is not None:
@@ -174,7 +182,7 @@ class FormatBase(ABC):
             amax = torch.amax(torch.abs(x), dim=tuple(dims_to_reduce), keepdim=True)
             amax = amax.clamp(min=1e-12)
 
-        if scale_format == "pot":
+        if scale_storage == "pot":
             amax = 2 ** torch.round(torch.log2(amax))
 
         # Normalize to [-1, 1], quantize, then rescale
@@ -184,7 +192,7 @@ class FormatBase(ABC):
         return x_q * amax
 
     def _quantize_per_block(self, x, granularity, round_mode, scale=None,
-                              scale_format="fp32"):
+                              scale_storage="fp32"):
         """Default per-block quantization: delegate to _quantize_mx.
 
         During JIT tracing (ONNX export), return x unchanged — the Function's
@@ -200,7 +208,7 @@ class FormatBase(ABC):
             would cause a semantic mismatch (amax vs shared exponent) and
             produce shape incompatibilities.
 
-            The ``scale_format`` parameter does not apply to PER_BLOCK — MX
+            The ``scale_storage`` parameter does not apply to PER_BLOCK — MX
             shared exponents are always integer (power-of-2) by design.
         """
         if torch.jit.is_tracing():

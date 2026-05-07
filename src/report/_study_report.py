@@ -18,7 +18,7 @@ from src.report._converters import (
 )
 from src.report._registry import get_figure_fn, get_table_fn
 from src.session._config import QuantConfig
-from src.session._session import SessionResult
+from src.session._result import SessionResult
 
 # Figures that consume nested {format: {transform: data}} dicts
 _TRANSFORM_FIGURES = frozenset({"transform_heatmap", "transform_pie", "transform_delta"})

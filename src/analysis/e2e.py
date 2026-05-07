@@ -176,7 +176,7 @@ def compare_sessions(
     ``fp32_model`` — no need to pass a separate fp32 session.
 
     Args:
-        sessions: Dict ``{name: QuantSession}``.  All sessions must share
+        sessions: Dict ``{name: _QuantSession}``.  All sessions must share
             the same original model (their ``fp32_model`` is the same object).
         eval_dataloader: DataLoader yielding ``(inputs, labels)``.
         eval_fn: ``(logits, labels) -> dict[str, float]``.

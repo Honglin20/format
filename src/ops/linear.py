@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.scheme.op_config import OpQuantConfig
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 
 _F_linear = F.linear
 from src.quantize import quantize
@@ -94,7 +95,11 @@ class LinearFunction(torch.autograd.Function):
 
         # bias add + output step 2 (post-bias): storage
         if q_bias is not None:
-            y = y + q_bias
+            _enter_quantize()
+            try:
+                y = y + q_bias
+            finally:
+                _exit_quantize()
             if cfg.storage is not None:
                 fp_y = y; y = quantize(y, cfg.storage)
                 if emit_fn: emit_fn("output", 1, "output_post_quant", fp_y, y, cfg.storage)

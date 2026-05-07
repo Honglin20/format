@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
-from src.session._session import SessionResult
+from src.session._result import SessionResult
 
 
 class SessionReport:

@@ -10,6 +10,8 @@ Low-level primitives (_quantize_elemwise_core, _round_mantissa, _safe_lshift,
 _safe_rshift) are defined in src.formats._core and re-exported here for
 backward compatibility with tests.
 """
+import threading
+
 import torch
 from src.formats.base import compute_min_norm, compute_max_norm, FormatBase
 from src.formats._core import (
@@ -18,6 +20,23 @@ from src.formats._core import (
     _safe_lshift,
     _safe_rshift,
 )
+
+# Thread-local guard preventing Tensor method patches from re-entering
+# quantize internals (e.g. torch.abs + add in _elemwise_core would
+# otherwise trigger SIMDAdd → quantize → ... → infinite recursion).
+_quant_guard = threading.local()
+
+
+def _enter_quantize():
+    _quant_guard.depth = getattr(_quant_guard, 'depth', 0) + 1
+
+
+def _exit_quantize():
+    _quant_guard.depth -= 1
+
+
+def _is_in_quantize() -> bool:
+    return getattr(_quant_guard, 'depth', 0) > 0
 
 # Backward compatibility alias for tests
 _quantize_elemwise_core = _elemwise_core
@@ -92,9 +111,15 @@ def quantize(x, scheme=None, allow_denorm=True, scale=None):
     """
     if scheme is None:
         return x
-    x_t = scheme.transform.forward(x)
-    x_q = scheme.format.quantize(x_t, scheme.granularity, scheme.round_mode,
-                                  allow_denorm=allow_denorm, scale=scale,
-                                  scale_format=scheme.scale_format)
-    return scheme.transform.inverse(x_q)
+    # Set re-entrancy guard so Tensor dunder patches don't intercept
+    # internal tensor arithmetic inside format/granularity logic.
+    _enter_quantize()
+    try:
+        x_t = scheme.transform.forward(x)
+        x_q = scheme.format.quantize(x_t, scheme.granularity, scheme.round_mode,
+                                      allow_denorm=allow_denorm, scale=scale,
+                                      scale_storage=scheme.scale_storage)
+        return scheme.transform.inverse(x_q)
+    finally:
+        _exit_quantize()
 

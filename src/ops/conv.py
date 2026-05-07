@@ -575,7 +575,7 @@ class QuantizedConvTranspose2d(ObservableMixin, nn.ConvTranspose2d):
 
     def forward(self, x, output_size=None):
         if self.cfg == OpQuantConfig():
-            return self._conv_forward(x, self.weight, self.bias)
+            return super().forward(x, output_size)
 
         output_padding = self._output_padding(
             x, output_size, self.stride, self.padding,
@@ -605,7 +605,7 @@ class QuantizedConvTranspose1d(ObservableMixin, nn.ConvTranspose1d):
 
     def forward(self, x, output_size=None):
         if self.cfg == OpQuantConfig():
-            return self._conv_forward(x, self.weight, self.bias)
+            return super().forward(x, output_size)
 
         output_padding = self._output_padding(
             x, output_size, self.stride, self.padding,
@@ -635,7 +635,7 @@ class QuantizedConvTranspose3d(ObservableMixin, nn.ConvTranspose3d):
 
     def forward(self, x, output_size=None):
         if self.cfg == OpQuantConfig():
-            return self._conv_forward(x, self.weight, self.bias)
+            return super().forward(x, output_size)
 
         output_padding = self._output_padding(
             x, output_size, self.stride, self.padding,

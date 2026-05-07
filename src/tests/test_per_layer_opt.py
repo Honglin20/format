@@ -1,7 +1,7 @@
 """Tests for per_layer_optimal function.
 
 per_layer_optimal absorbs logic from pipeline/format_study.py L540-643.
-These tests mock QuantSession to isolate the PerLayerOpt logic.
+These tests mock _QuantSession to isolate the PerLayerOpt logic.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ def variant_results():
 
 
 def _setup_mock_qs(mock_qs_class, model):
-    """Configure a mocked QuantSession for per_layer_optimal tests."""
+    """Configure a mocked _QuantSession for per_layer_optimal tests."""
     mock_qs = mock_qs_class.return_value
     mock_qs.estimate_cost.return_value = None
     mock_qs.fp32_model = model
@@ -106,11 +106,11 @@ def _setup_mock_qs(mock_qs_class, model):
 class TestPerLayerOptimal:
     """Tests for per_layer_optimal function."""
 
-    @patch("src.session._per_layer_opt.QuantSession")
+    @patch("src.session._per_layer_opt._QuantSession")
     def test_returns_session_result(
-        self, MockQuantSession, model, variant_results, calib_data, eval_fn,
+        self, Mock_QuantSession, model, variant_results, calib_data, eval_fn,
     ):
-        _setup_mock_qs(MockQuantSession, model)
+        _setup_mock_qs(Mock_QuantSession, model)
 
         result = per_layer_optimal(
             variant_results, calib_data, model, eval_fn,
@@ -120,11 +120,11 @@ class TestPerLayerOptimal:
         assert isinstance(result, SessionResult)
         assert "PerLayerOpt" in result.name
 
-    @patch("src.session._per_layer_opt.QuantSession")
+    @patch("src.session._per_layer_opt._QuantSession")
     def test_name_contains_perlayeropt(
-        self, MockQuantSession, model, variant_results, calib_data, eval_fn,
+        self, Mock_QuantSession, model, variant_results, calib_data, eval_fn,
     ):
-        _setup_mock_qs(MockQuantSession, model)
+        _setup_mock_qs(Mock_QuantSession, model)
 
         result = per_layer_optimal(
             variant_results, calib_data, model, eval_fn,
@@ -133,11 +133,11 @@ class TestPerLayerOptimal:
 
         assert "PerLayerOpt" in result.name
 
-    @patch("src.session._per_layer_opt.QuantSession")
+    @patch("src.session._per_layer_opt._QuantSession")
     def test_sq_transforms_cached_not_recomputed(
-        self, MockQuantSession, model, variant_results, calib_data, eval_fn,
+        self, Mock_QuantSession, model, variant_results, calib_data, eval_fn,
     ):
-        _setup_mock_qs(MockQuantSession, model)
+        _setup_mock_qs(Mock_QuantSession, model)
 
         sq_cache = {
             "fc2": SmoothQuantTransform(torch.tensor([1.0]), channel_axis=-1),
@@ -153,11 +153,11 @@ class TestPerLayerOptimal:
             )
             mock_from_calib.assert_not_called()
 
-    @patch("src.session._per_layer_opt.QuantSession")
+    @patch("src.session._per_layer_opt._QuantSession")
     def test_sq_transforms_returned_in_result(
-        self, MockQuantSession, model, variant_results, calib_data, eval_fn,
+        self, Mock_QuantSession, model, variant_results, calib_data, eval_fn,
     ):
-        _setup_mock_qs(MockQuantSession, model)
+        _setup_mock_qs(Mock_QuantSession, model)
 
         sq_cache = {
             "fc2": SmoothQuantTransform(torch.tensor([1.0]), channel_axis=-1),
@@ -175,12 +175,12 @@ class TestPerLayerOptimal:
         with pytest.raises(IndexError):
             per_layer_optimal([], calib_data, model, eval_fn)
 
-    @patch("src.session._per_layer_opt.QuantSession")
+    @patch("src.session._per_layer_opt._QuantSession")
     def test_all_identity_no_sq_computed(
-        self, MockQuantSession, model, calib_data, eval_fn,
+        self, Mock_QuantSession, model, calib_data, eval_fn,
     ):
         """When all layers pick Identity/None, SQ is never computed."""
-        _setup_mock_qs(MockQuantSession, model)
+        _setup_mock_qs(Mock_QuantSession, model)
 
         cfg_none = QuantConfig(
             name="test", w_format="int8", a_format="int8", transform="none",
@@ -207,13 +207,13 @@ class TestPerLayerOptimal:
             per_layer_optimal(results, calib_data, model, eval_fn)
             mock_from_calib.assert_not_called()
 
-    @patch("src.session._per_layer_opt.QuantSession")
+    @patch("src.session._per_layer_opt._QuantSession")
     def test_best_transform_selection_delegation(
-        self, MockQuantSession, model, variant_results, calib_data, eval_fn,
+        self, Mock_QuantSession, model, variant_results, calib_data, eval_fn,
     ):
         """per_layer_optimal calls _compute_best_transform_per_layer
         with the correct variant_qsnr."""
-        _setup_mock_qs(MockQuantSession, model)
+        _setup_mock_qs(Mock_QuantSession, model)
 
         with patch(
             "src.session._per_layer_opt._compute_best_transform_per_layer",
@@ -233,12 +233,12 @@ class TestPerLayerOptimal:
             assert call_qsnr["hadamard"] == {"fc1": 25.0, "fc2": 5.0}
             assert call_qsnr["smoothquant"] == {"fc1": 10.0, "fc2": 30.0}
 
-    @patch("src.session._per_layer_opt.QuantSession")
+    @patch("src.session._per_layer_opt._QuantSession")
     def test_passes_per_layer_cfg_to_quant_session(
-        self, MockQuantSession, model, variant_results, calib_data, eval_fn,
+        self, Mock_QuantSession, model, variant_results, calib_data, eval_fn,
     ):
-        """QuantSession receives a dict of per-layer OpQuantConfig."""
-        _setup_mock_qs(MockQuantSession, model)
+        """_QuantSession receives a dict of per-layer OpQuantConfig."""
+        _setup_mock_qs(Mock_QuantSession, model)
 
         with patch(
             "src.session._per_layer_opt._compute_best_transform_per_layer",
@@ -250,18 +250,18 @@ class TestPerLayerOptimal:
                 eval_data=calib_data,
             )
 
-            cfg_arg = MockQuantSession.call_args[0][1]
+            cfg_arg = Mock_QuantSession.call_args[0][1]
             assert isinstance(cfg_arg, dict)
             assert "fc1" in cfg_arg
             assert "fc2" in cfg_arg
 
-    @patch("src.session._per_layer_opt.QuantSession")
+    @patch("src.session._per_layer_opt._QuantSession")
     def test_sq_computed_when_not_cached(
-        self, MockQuantSession, model, variant_results, calib_data, eval_fn,
+        self, Mock_QuantSession, model, variant_results, calib_data, eval_fn,
     ):
         """When sq_transforms is not provided but SQ is the best transform,
         from_model_calibration IS called."""
-        _setup_mock_qs(MockQuantSession, model)
+        _setup_mock_qs(Mock_QuantSession, model)
 
         with patch(
             "src.session._per_layer_opt.SmoothQuantTransform"

@@ -22,6 +22,36 @@ from src.scheme.op_config import OpQuantConfig
 from src.session._context import QuantizeContext
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _non_matmul_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
+    """Derive an OpQuantConfig for norm ops — strip MX compute, keep elemwise.
+
+    When ``cfg`` has a ``storage`` scheme (two-level model from QuantConfig),
+    drop the per-role MX block schemes so only element-wise storage is applied.
+    When ``cfg`` has no ``storage`` (compat-style configs where input/weight
+    already carry the elemwise scheme), pass it through unchanged.
+    """
+    if cfg.storage is None:
+        return cfg
+    return OpQuantConfig(
+        storage=cfg.storage,
+        grad_output=cfg.grad_output,
+        grad_input=cfg.grad_input,
+        grad_weight=cfg.grad_weight,
+        grad_bias=cfg.grad_bias,
+    )
+
+
+def _activation_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
+    """Derive an OpQuantConfig for activation/softmax/pool ops — strip MX compute."""
+    if cfg.storage is None:
+        return cfg
+    return OpQuantConfig(storage=cfg.storage, input=cfg.storage)
+
+
+# ---------------------------------------------------------------------------
 # Module type → Quantized constructor + param extractor
 # ---------------------------------------------------------------------------
 
@@ -98,7 +128,9 @@ def _make_bn1d(orig: nn.BatchNorm1d, cfg: OpQuantConfig, name: str):
     mod = QuantizedBatchNorm1d(
         num_features=orig.num_features, eps=orig.eps,
         momentum=orig.momentum, affine=orig.affine,
-        track_running_stats=orig.track_running_stats, cfg=cfg, name=name,
+        track_running_stats=orig.track_running_stats,
+        cfg=_non_matmul_cfg(cfg),
+        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
     )
     _copy_bn_state(orig, mod)
     return mod
@@ -109,7 +141,9 @@ def _make_bn2d(orig: nn.BatchNorm2d, cfg: OpQuantConfig, name: str):
     mod = QuantizedBatchNorm2d(
         num_features=orig.num_features, eps=orig.eps,
         momentum=orig.momentum, affine=orig.affine,
-        track_running_stats=orig.track_running_stats, cfg=cfg, name=name,
+        track_running_stats=orig.track_running_stats,
+        cfg=_non_matmul_cfg(cfg),
+        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
     )
     _copy_bn_state(orig, mod)
     return mod
@@ -120,7 +154,9 @@ def _make_bn3d(orig: nn.BatchNorm3d, cfg: OpQuantConfig, name: str):
     mod = QuantizedBatchNorm3d(
         num_features=orig.num_features, eps=orig.eps,
         momentum=orig.momentum, affine=orig.affine,
-        track_running_stats=orig.track_running_stats, cfg=cfg, name=name,
+        track_running_stats=orig.track_running_stats,
+        cfg=_non_matmul_cfg(cfg),
+        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
     )
     _copy_bn_state(orig, mod)
     return mod
@@ -142,7 +178,9 @@ def _make_ln(orig: nn.LayerNorm, cfg: OpQuantConfig, name: str):
         normalized_shape = (normalized_shape,)
     mod = QuantizedLayerNorm(
         normalized_shape=list(normalized_shape), eps=orig.eps,
-        elementwise_affine=orig.elementwise_affine, cfg=cfg, name=name,
+        elementwise_affine=orig.elementwise_affine,
+        cfg=_non_matmul_cfg(cfg),
+        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
     )
     if orig.elementwise_affine:
         mod.weight.data = orig.weight.data.clone()
@@ -154,7 +192,9 @@ def _make_gn(orig: nn.GroupNorm, cfg: OpQuantConfig, name: str):
     from src.ops.norm import QuantizedGroupNorm
     mod = QuantizedGroupNorm(
         num_groups=orig.num_groups, num_channels=orig.num_channels,
-        eps=orig.eps, affine=orig.affine, cfg=cfg, name=name,
+        eps=orig.eps, affine=orig.affine,
+        cfg=_non_matmul_cfg(cfg),
+        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
     )
     if orig.affine:
         mod.weight.data = orig.weight.data.clone()
@@ -169,7 +209,9 @@ def _make_rms_norm(orig, cfg: OpQuantConfig, name: str):
         normalized_shape = (normalized_shape,)
     mod = QuantizedRMSNorm(
         normalized_shape=list(normalized_shape), eps=orig.eps,
-        elementwise_affine=orig.elementwise_affine, cfg=cfg, name=name,
+        elementwise_affine=orig.elementwise_affine,
+        cfg=_non_matmul_cfg(cfg),
+        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
     )
     if orig.elementwise_affine:
         mod.weight.data = orig.weight.data.clone()
@@ -180,51 +222,51 @@ def _make_rms_norm(orig, cfg: OpQuantConfig, name: str):
 
 def _make_sigmoid(orig: nn.Sigmoid, cfg: OpQuantConfig, name: str):
     from src.ops.activations import QuantizedSigmoid
-    return QuantizedSigmoid(cfg=cfg, name=name)
+    return QuantizedSigmoid(cfg=_activation_cfg(cfg), name=name)
 
 
 def _make_tanh(orig: nn.Tanh, cfg: OpQuantConfig, name: str):
     from src.ops.activations import QuantizedTanh
-    return QuantizedTanh(cfg=cfg, name=name)
+    return QuantizedTanh(cfg=_activation_cfg(cfg), name=name)
 
 
 def _make_relu(orig: nn.ReLU, cfg: OpQuantConfig, name: str):
     from src.ops.activations import QuantizedReLU
-    return QuantizedReLU(inplace=orig.inplace, cfg=cfg, name=name)
+    return QuantizedReLU(inplace=orig.inplace, cfg=_activation_cfg(cfg), name=name)
 
 
 def _make_relu6(orig: nn.ReLU6, cfg: OpQuantConfig, name: str):
     from src.ops.activations import QuantizedReLU6
-    return QuantizedReLU6(inplace=orig.inplace, cfg=cfg, name=name)
+    return QuantizedReLU6(inplace=orig.inplace, cfg=_activation_cfg(cfg), name=name)
 
 
 def _make_leaky_relu(orig: nn.LeakyReLU, cfg: OpQuantConfig, name: str):
     from src.ops.activations import QuantizedLeakyReLU
     return QuantizedLeakyReLU(
         negative_slope=orig.negative_slope, inplace=orig.inplace,
-        cfg=cfg, name=name,
+        cfg=_activation_cfg(cfg), name=name,
     )
 
 
 def _make_silu(orig: nn.SiLU, cfg: OpQuantConfig, name: str):
     from src.ops.activations import QuantizedSiLU
-    return QuantizedSiLU(inplace=orig.inplace, cfg=cfg, name=name)
+    return QuantizedSiLU(inplace=orig.inplace, cfg=_activation_cfg(cfg), name=name)
 
 
 def _make_gelu(orig: nn.GELU, cfg: OpQuantConfig, name: str):
     from src.ops.activations import QuantizedGELU
-    return QuantizedGELU(cfg=cfg, name=name)
+    return QuantizedGELU(cfg=_activation_cfg(cfg), name=name)
 
 
 def _make_softmax(orig: nn.Softmax, cfg: OpQuantConfig, name: str):
     from src.ops.softmax import QuantizedSoftmax
-    return QuantizedSoftmax(dim=orig.dim, cfg=cfg, name=name)
+    return QuantizedSoftmax(dim=orig.dim, cfg=_activation_cfg(cfg), name=name)
 
 
 def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, name: str):
     from src.ops.pooling import QuantizedAdaptiveAvgPool2d
     return QuantizedAdaptiveAvgPool2d(
-        output_size=orig.output_size, cfg=cfg, name=name,
+        output_size=orig.output_size, cfg=_activation_cfg(cfg), name=name,
     )
 
 
@@ -232,16 +274,47 @@ def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, na
 _EMPTY_CFG = OpQuantConfig()
 
 
-def _resolve_context_cfg(cfg: Union[OpQuantConfig, Dict[str, OpQuantConfig], None]) -> OpQuantConfig:
+def _resolve_context_cfg(
+    cfg: Union[OpQuantConfig, Dict[str, OpQuantConfig], None],
+    op_cfgs: Optional[Dict[str, OpQuantConfig]] = None,
+) -> OpQuantConfig:
     """Resolve a single OpQuantConfig for QuantizeContext inline-op quantization.
 
-    If cfg is a dict (per-name module configs), inline ops get _EMPTY_CFG
-    (passthrough) unless the user also passes op_cfgs for per-op overrides.
+    When cfg is a singleton OpQuantConfig, it is used directly for inline ops.
+    When cfg is a dict (per-module configs), the storage scheme from the first
+    config that has one is extracted as the default for inline ops, so that
+    residual adds and other torch.* calls still get element-wise quantization.
+    Per-op overrides from ``op_cfgs`` take precedence.
     """
     if isinstance(cfg, OpQuantConfig):
         return cfg
-    return _EMPTY_CFG
+    # cfg is a dict — extract storage (or per_tensor input) for inline-op defaults
+    storage = None
+    if cfg:
+        for c in cfg.values():
+            if not isinstance(c, OpQuantConfig):
+                continue
+            if c.storage is not None:
+                storage = c.storage
+                break
+            # Fallback: compat-style configs store the elemwise scheme in `input`
+            if (c.input is not None
+                    and c.input.granularity is not None
+                    and c.input.granularity.mode.name == "PER_TENSOR"):
+                storage = c.input
+                break
+    return OpQuantConfig(storage=storage)
 
+
+# ---------------------------------------------------------------------------
+# Module type classification
+# ---------------------------------------------------------------------------
+
+_MATMUL_TYPES = (
+    nn.Linear,
+    nn.Conv1d, nn.Conv2d, nn.Conv3d,
+    nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d,
+)
 
 # ---------------------------------------------------------------------------
 # Module mapping table
@@ -341,6 +414,7 @@ def quantize_model(
     prefix: str = "",
     op_cfgs: Optional[Dict[str, OpQuantConfig]] = None,
     observers: Optional[list] = None,
+    quantize_nonlinear: bool = True,
     _patch_root: bool = True,
 ) -> nn.Module:
     """Unified entry point: module replacement + inline-op quantization.
@@ -363,6 +437,8 @@ def quantize_model(
                  Valid keys: "matmul", "mm", "bmm", "linear",
                  "add", "sub", "mul", "div", "exp", "log".
         observers: Optional observers for analysis (same as QuantizeContext).
+        quantize_nonlinear: If False, norm/activation/pool modules are skipped
+            and remain in fp32. Default True.
         prefix: Internal. For nested child naming in recursive calls.
         _patch_root: Internal. Set False to skip forward patching (recursive).
 
@@ -376,17 +452,20 @@ def quantize_model(
     # Step 1: Replace module subclasses in-place
     for child_name, child in list(model.named_children()):
         child_prefix = f"{prefix}.{child_name}" if prefix else child_name
-        quantized_child = _replace_module(child, cfg, child_prefix)
+        quantized_child = _replace_module(
+            child, cfg, child_prefix, quantize_nonlinear=quantize_nonlinear,
+        )
         if quantized_child is not None:
             setattr(model, child_name, quantized_child)
         elif isinstance(child, nn.Module):
             quantize_model(child, cfg, prefix=child_prefix,
                            op_cfgs=op_cfgs, observers=observers,
+                           quantize_nonlinear=quantize_nonlinear,
                            _patch_root=False)
 
     # Step 2: Patch forward on the root model only
     if _patch_root:
-        ctx_cfg = _resolve_context_cfg(cfg)
+        ctx_cfg = _resolve_context_cfg(cfg, op_cfgs)
         _patch_forward(model, ctx_cfg, op_cfgs=op_cfgs, observers=observers)
 
     return model
@@ -417,6 +496,8 @@ def _replace_module(
     module: nn.Module,
     cfg: Union[OpQuantConfig, Dict[str, OpQuantConfig]],
     name: str,
+    *,
+    quantize_nonlinear: bool = True,
 ):
     """Replace a single module with its quantized version, or return None."""
     # Skip if already quantized (has cfg attribute)
@@ -425,6 +506,10 @@ def _replace_module(
 
     make_fn = _MODULE_MAPPING.get(type(module))
     if make_fn is None:
+        return None
+
+    # When quantize_nonlinear=False, skip norm/activation/pool modules entirely.
+    if not quantize_nonlinear and not isinstance(module, _MATMUL_TYPES):
         return None
 
     resolved_cfg = _resolve_cfg(cfg, name)

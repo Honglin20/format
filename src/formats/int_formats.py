@@ -41,8 +41,3 @@ class IntFormat(FormatBase):
         zp = g.op("Constant", value_t=torch.tensor(0, dtype=torch.int8))
         xq = g.op("QuantizeLinear", x, scale, zp)
         return g.op("DequantizeLinear", xq, scale, zp)
-
-    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None, scale_format="fp32"):
-        return super().quantize(x, granularity, round_mode, allow_denorm,
-                                scale=scale, scale_format=scale_format)

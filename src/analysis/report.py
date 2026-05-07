@@ -1,4 +1,4 @@
-class Report:
+class AnalysisReport:
     """Analysis report wrapper with Python API and print formatting."""
 
     def __init__(self, raw: dict):
@@ -132,3 +132,7 @@ class Report:
                 writer = csv.DictWriter(f, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(rows)
+
+
+# Backward-compatible alias; prefer AnalysisReport in new code.
+Report = AnalysisReport

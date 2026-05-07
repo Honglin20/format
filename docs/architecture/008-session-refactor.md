@@ -268,6 +268,35 @@ transform/smooth_quant.py         + SmoothQuantTransform.from_model_calibration(
     算子层: ops/
 ```
 
+#### 5.1.1 session/ 内部三层委托
+
+`Session`、`_QuantSession`、`quantize_model()` 三者不是冗余——它们是严格分层委托关系：
+
+```
+Session                    ← 用户 API：QuantConfig（字符串）、transform 预处理、链式 .quantize().calibrate()...
+  │  .to_op_config() + 创建
+  ▼
+_QuantSession              ← 工作流包装：calibrate / analyze / compare / export / LSQ / cost / mode 切换
+  │  在 __init__ 中调用 quantize_model()
+  ▼
+quantize_model()           ← 唯一引擎：递归替换 nn.Module → QuantizedXxx + 劫持 forward 套 QuantizeContext
+```
+
+**各层职责：**
+
+| 层 | 输入 | 职责 | 何时直接用 |
+|---|---|---|---|
+| `Session` | `QuantConfig`（字符串字段） | 翻译字符串→对象、SmoothQuant/Prescale 预处理、收集 SessionResult | 正常用户入口 |
+| `_QuantSession` | `OpQuantConfig`（对象） | 工作流编排：calibrate/analyze/compare/export/LSQ/cost | 需要精细控制工作流的用户 |
+| `quantize_model()` | `OpQuantConfig` | 模块替换 + forward 劫持。纯引擎，无工作流概念 | 测试、验证脚本、只要模块替换不要工作流的场景 |
+
+**关键设计约束：**
+
+- `quantize_model()` 是 session/ 内**唯一**进行模块替换和 forward 劫持的位置。`_QuantSession` 和 `Session` 都不直接操作模块替换逻辑。
+- `_QuantSession.__init__` 只做三件事：deepcopy fp32 模型、调用 `quantize_model()`、存储引用。所有工作流方法（calibrate/analyze/...）都通过已有的 `self.qmodel` 操作。
+- `Session.quantize()` 创建 `_QuantSession` 之前，先处理 SmoothQuant（计算 per-channel scale + 融合权重）和 Prescale（初始化 pre_scale + LSQ 优化），因为这些需要访问**原始 fp32 模型**。
+- `quantize_model()` 保留为 public API（`from src.session import quantize_model`），因为验证脚本和单元测试需要直接调用它来验证模块替换的 bit-exact 等价性，而不希望引入 session 工作流的开销。
+
 #### 5.2 session/ ↔ report/ 边界（解决循环依赖）
 
 `Study.run()` 返回 `StudyReport`（来自 `report/`）。`StudyReport.__init__` 接收 `Dict[str, List[SessionResult]]`（`SessionResult` 来自 `session/`）。

@@ -2,9 +2,191 @@
 
 本文档是 README 快速开始的详细展开，涵盖所有配置方式、高级功能和完整 API 参考。
 
+**API 层级**：`QuantConfig`（用户配置）→ `Session`（执行单元）→ `Study`（多配置对比） 为高层入口；`OpQuantConfig` + `QuantSession` 为低层精细控制。
+
 ---
 
-## 1. 定义量化配置（OpQuantConfig）
+## 0. Session 工作流（高层入口）
+
+`QuantConfig` 是用户唯一需要关心的配置入口——一个 dataclass，IDE 自动补全所有字段。它内部翻译为 `OpQuantConfig`，用户无需直接接触 `QuantScheme` / `GranularitySpec` / `FormatBase`。
+
+### 0.1 定义配置（QuantConfig）
+
+```python
+from src.session import QuantConfig
+
+# 最简配置：全部默认（INT8 per-tensor, no transform）
+cfg = QuantConfig()
+
+# 典型配置：INT8 per-channel + percentile 校准
+cfg = QuantConfig(
+    name="int8-pc",
+    w_format="int8",
+    w_granularity="per_channel",
+    calibrator="percentile",
+)
+
+# MX 格式：block-wise 量化（scale 动态计算，无需校准）
+cfg = QuantConfig(
+    w_format="fp4_e2m1", w_granularity="per_block", w_block_size=32,
+    a_format="fp4_e2m1", a_granularity="per_block", a_block_size=32,
+)
+
+# SmoothQuant：激活平滑 + 权重量化
+cfg = QuantConfig(
+    w_format="int8", w_granularity="per_channel",
+    transform="smoothquant", sq_alpha=0.5,
+)
+
+# PreScale + LSQ：可学习前置 scale
+cfg = QuantConfig(
+    transform="prescale", prescale_init="amax",
+    lsq_steps=100, lsq_lr=1e-3,
+)
+
+# Weight-only：仅量化权重
+cfg = QuantConfig(weight_only=True, w_format="int4", w_granularity="per_channel")
+
+# Element-wise 存储量化 + 计算量化（两级模型）
+cfg = QuantConfig(
+    w_format="int8", w_granularity="per_channel",
+    storage_bits=16, storage_kind="bfloat",  # 所有张量先过 bfloat16
+)
+
+# 只量化 MatMul 算子，非线性（norm/activation/pool）保持 fp32
+cfg = QuantConfig(
+    w_format="fp4_e2m1", w_granularity="per_block", w_block_size=32,
+    a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+    quantize_nonlinear=False,
+)
+```
+
+| QuantConfig 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `name` | `str` | `""` | 配置名（Study 对比时显示） |
+| `w_format` | `str` | `"int8"` | 权重数值格式 |
+| `w_granularity` | `str` | `"per_tensor"` | 权重量化粒度：per_tensor / per_channel / per_block |
+| `w_block_size` | `int\|None` | `None` | per_block 时的 block 大小 |
+| `w_axis` | `int` | `-1` | 权重量化轴 |
+| `a_format` | `str\|None` | `None` | 激活格式（None = 同权重） |
+| `a_granularity` | `str` | `"per_tensor"` | 激活量化粒度 |
+| `a_block_size` | `int\|None` | `None` | 激活 per_block 时的 block 大小 |
+| `a_axis` | `int` | `-1` | 激活量化轴 |
+| `transform` | `str` | `"none"` | none / hadamard / smoothquant / prescale |
+| `sq_alpha` | `float` | `0.5` | SmoothQuant 平滑强度 |
+| `prescale_init` | `str` | `"ones"` | PreScale 初始化：ones / amax / pot_amax |
+| `prescale_pot` | `bool` | `False` | PreScale 是否投影到 2 的幂 |
+| `prescale_granularity` | `str\|None` | `None` | None = 跟随 a_granularity |
+| `lsq_steps` | `int` | `0` | LSQ 优化步数（>0 需要 transform="prescale"） |
+| `lsq_lr` | `float` | `1e-3` | LSQ 学习率 |
+| `scale_storage` | `str` | `"fp32"` | Scale 存储格式：fp32 / pot |
+| `calibrator` | `str` | `"mse"` | 校准策略：mse / max / percentile / kl |
+| `storage_bits` | `int` | `0` | Element-wise 存储位宽（0 = 禁用） |
+| `storage_kind` | `str` | `"bfloat"` | 存储类型：bfloat / fp |
+| `weight_only` | `bool` | `False` | 仅量化权重，激活保持 FP32 |
+| `quantize_nonlinear` | `bool` | `True` | False = norm / activation / pool 保持 fp32 |
+
+### 0.2 Session — 执行单元
+
+一个 `Session` = 一个 `QuantConfig` → 一个 `SessionResult`。支持两种使用方式：
+
+**全自动 `run()`**：一行完成 quantize → calibrate → analyze → evaluate → cost。
+
+```python
+from src.session import Session
+
+result = Session(model, cfg).run(calib_data, eval_data=eval_data, eval_fn=eval_fn)
+```
+
+**分步链式 API**：每步可干预，`session.qmodel` 在 `.quantize()` 后即可直接推理。
+
+```python
+session = Session(model, cfg)
+
+session.quantize(calib_data=calib_data)   # 构建量化模型
+# session.qmodel 现在可用：output = session.qmodel(x)
+
+session.calibrate(calib_data)             # MX per_block 自动跳过
+session.analyze(calib_data, outputs="default")
+session.evaluate(eval_data, eval_fn)
+session.cost()
+
+result = session.result
+
+# 链式一行：
+result = (Session(model, cfg)
+    .quantize(calib_data=calib_data)
+    .calibrate(calib_data)
+    .analyze(calib_data)
+    .evaluate(eval_data, eval_fn)
+    .cost()
+    .result)
+```
+
+**Session 方法与属性**：
+
+| 方法 / 属性 | 返回 | 说明 |
+|---|---|---|
+| `.quantize(*, calib_data=None)` | `self` | 构建量化模型。smoothquant/prescale 需传 calib_data |
+| `.calibrate(calib_data, *, eval_fn=None)` | `self` | 校准 scale。MX per_block 自动跳过（no-op） |
+| `.analyze(calib_data, *, outputs, eval_fn)` | `self` | 误差分析。outputs: "default" / "all" / ["qsnr","mse",...] |
+| `.evaluate(eval_data, eval_fn)` | `self` | 精度评估（fp32 vs quant + delta） |
+| `.cost()` | `self` | 延迟/显存估算 |
+| `.result` | `SessionResult` | 构建返回结果 |
+| `.run(calib_data, *, eval_data, eval_fn, outputs)` | `SessionResult` | 全自动快捷方式（向后兼容） |
+| `.qmodel` | `nn.Module` | 量化模型（`.quantize()` 后可访问） |
+| `.fp32_model` | `nn.Module` | FP32 参考模型 |
+| `.use_fp32()` / `.use_quant()` | `self` | 切换推理模式 |
+| `.mode` | `str` | 当前模式："fp32" / "quant" |
+| `session(x)` | `Tensor` | 委托推理（`__call__`，默认量化模式） |
+
+### 0.3 SessionResult — 结果访问
+
+```python
+result = session.result
+
+# 一行摘要
+print(result.summary())
+# Config: int8-pc | loss: fp32=0.1234 quant=0.1456 | Δloss=+0.0222 | avg QSNR=34.2 dB
+
+# 精度对比表
+print(result.accuracy_table())
+# Metric    FP32      Quant     Δ
+# --------------------------------
+# loss      0.1234    0.1456    +0.0222
+# acc       0.9500    0.9300    -0.0200
+
+# QSNR 最差的 K 层（定位精度瓶颈）
+for name, qsnr in result.top_k_qsnr(5):
+    print(f"  {name}: {qsnr:.1f} dB")
+
+# 逐层 DataFrame
+df = result.layer_report()
+print(df.sort_values("qsnr_db").head())
+```
+
+| 访问方法 | 返回 | 说明 |
+|---|---|---|
+| `.summary()` | `str` | 一行可读摘要（配置名 + 指标 + 平均 QSNR） |
+| `.accuracy_table()` | `str` | 格式化精度对比表（FP32 / Quant / Δ） |
+| `.top_k_qsnr(k=10)` | `List[Tuple[str, float]]` | QSNR 最差的 k 层（升序，最差优先） |
+| `.layer_report()` | `DataFrame | None` | 逐层 DataFrame（pandas 不可用时返回 None） |
+
+### 0.4 Study — 多配置对比
+
+```python
+from src.session import Study
+
+study = Study([cfg_int8, cfg_int4, cfg_fp4], model=model)
+report = study.run(calib_data, eval_fn=eval_fn, outputs="all")
+report.save("results/")
+```
+
+---
+
+## 1. 定义量化配置（OpQuantConfig — 低层）
+
+以下为低层 API，直接操作 `OpQuantConfig` + `QuantScheme`。日常使用推荐上面的 `QuantConfig`。
 
 ### 方式 A：统一配置
 
@@ -91,7 +273,9 @@ qmodel = quantize_model(model, cfg=default_cfg, op_cfgs={"matmul": matmul_cfg, "
 
 ---
 
-## 3. QuantSession API 参考
+## 3. QuantSession API 参考（低层）
+
+`QuantSession` 是低层 API，需要用户直接传入 `OpQuantConfig`。高层推荐使用上面的 `Session`（接受 `QuantConfig`，内部自动翻译）。
 
 | 方法 | 返回 | 说明 |
 |---|---|---|
@@ -317,8 +501,10 @@ scheme = QuantScheme(format=custom, granularity=GranularitySpec.per_tensor())
 
 ## 11. mx/ 等价性适配
 
+测试辅助函数，将 mx 的 specs dict 转为 `OpQuantConfig`：
+
 ```python
-from src.scheme._compat import op_config_from_mx_specs
+from src.tests._compat import op_config_from_mx_specs
 cfg = op_config_from_mx_specs(mx_specs)
 ```
 

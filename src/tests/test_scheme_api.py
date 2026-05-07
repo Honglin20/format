@@ -182,7 +182,7 @@ class TestVecScheme:
 
     def test_vec_quantize_scheme(self):
         """vec_quantize with scheme should match old code."""
-        from src.quantize.vector import vec_quantize
+        from src.ops.vec_ops import vec_quantize
         from mx import vector_ops as old_vec
         from mx.specs import finalize_mx_specs as old_finalize
 
@@ -197,7 +197,7 @@ class TestVecScheme:
 
     def test_vec_add_scheme(self):
         """vec_add with scheme should produce quantized output."""
-        from src.quantize.vector import vec_add
+        from src.ops.vec_ops import vec_add
 
         torch.manual_seed(42)
         a, b = torch.randn(4, 8), torch.randn(4, 8)
@@ -207,7 +207,7 @@ class TestVecScheme:
 
     def test_vec_exp_with_use_exp2_scheme(self):
         """vec_exp with scheme and use_exp2=True should work."""
-        from src.quantize.vector import vec_exp
+        from src.ops.vec_ops import vec_exp
 
         torch.manual_seed(42)
         A = torch.randn(4, 8)
@@ -217,7 +217,7 @@ class TestVecScheme:
 
     def test_vec_div_with_use_recip_scheme(self):
         """vec_div with scheme and use_recip=True should work."""
-        from src.quantize.vector import vec_div
+        from src.ops.vec_ops import vec_div
 
         torch.manual_seed(42)
         a = torch.randn(4, 8) + 2.0

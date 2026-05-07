@@ -14,6 +14,7 @@ import math
 import torch
 import torch.nn.functional as F
 
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 from src.ops.vec_ops import (
     vec_quantize, vec_add, vec_sub, vec_mul, vec_div,
     vec_exp, vec_sqrt,
@@ -107,16 +108,8 @@ class SIMDAdd(torch.autograd.Function):
 
     @staticmethod
     def symbolic(g, in1, in2, inner_scheme, quantize_backprop):
-        from src.onnx.helpers import _emit_quantize_node
-        if inner_scheme is not None:
-            in1 = _emit_quantize_node(g, in1, inner_scheme)
-            # Only quantize in2 when it's an ONNX graph Value (tensor), not a scalar constant
-            if isinstance(in2, torch._C.Value):
-                in2 = _emit_quantize_node(g, in2, inner_scheme)
-        out = g.op("Add", in1, in2)
-        if inner_scheme is not None:
-            out = _emit_quantize_node(g, out, inner_scheme)
-        return out
+        from src.onnx.helpers import _emit_binary_onnx
+        return _emit_binary_onnx(g, in1, in2, inner_scheme, "Add")
 
 
 # ---------------------------------------------------------------------------
@@ -156,15 +149,8 @@ class SIMDSub(torch.autograd.Function):
 
     @staticmethod
     def symbolic(g, in1, in2, inner_scheme, quantize_backprop):
-        from src.onnx.helpers import _emit_quantize_node
-        if inner_scheme is not None:
-            in1 = _emit_quantize_node(g, in1, inner_scheme)
-            if isinstance(in2, torch._C.Value):
-                in2 = _emit_quantize_node(g, in2, inner_scheme)
-        out = g.op("Sub", in1, in2)
-        if inner_scheme is not None:
-            out = _emit_quantize_node(g, out, inner_scheme)
-        return out
+        from src.onnx.helpers import _emit_binary_onnx
+        return _emit_binary_onnx(g, in1, in2, inner_scheme, "Sub")
 
 
 # ---------------------------------------------------------------------------
@@ -221,15 +207,8 @@ class SIMDMul(torch.autograd.Function):
 
     @staticmethod
     def symbolic(g, in1, in2, inner_scheme, quantize_backprop):
-        from src.onnx.helpers import _emit_quantize_node
-        if inner_scheme is not None:
-            in1 = _emit_quantize_node(g, in1, inner_scheme)
-            if isinstance(in2, torch._C.Value):
-                in2 = _emit_quantize_node(g, in2, inner_scheme)
-        out = g.op("Mul", in1, in2)
-        if inner_scheme is not None:
-            out = _emit_quantize_node(g, out, inner_scheme)
-        return out
+        from src.onnx.helpers import _emit_binary_onnx
+        return _emit_binary_onnx(g, in1, in2, inner_scheme, "Mul")
 
 
 # ---------------------------------------------------------------------------
@@ -289,15 +268,8 @@ class SIMDDiv(torch.autograd.Function):
 
     @staticmethod
     def symbolic(g, in1, in2, inner_scheme, quantize_backprop):
-        from src.onnx.helpers import _emit_quantize_node
-        if inner_scheme is not None:
-            in1 = _emit_quantize_node(g, in1, inner_scheme)
-            if isinstance(in2, torch._C.Value):
-                in2 = _emit_quantize_node(g, in2, inner_scheme)
-        out = g.op("Div", in1, in2)
-        if inner_scheme is not None:
-            out = _emit_quantize_node(g, out, inner_scheme)
-        return out
+        from src.onnx.helpers import _emit_binary_onnx
+        return _emit_binary_onnx(g, in1, in2, inner_scheme, "Div")
 
 
 # ---------------------------------------------------------------------------
@@ -408,13 +380,8 @@ class SIMDExp(torch.autograd.Function):
 
     @staticmethod
     def symbolic(g, in1, inner_scheme, quantize_backprop):
-        from src.onnx.helpers import _emit_quantize_node
-        if inner_scheme is not None:
-            in1 = _emit_quantize_node(g, in1, inner_scheme)
-        out = g.op("Exp", in1)
-        if inner_scheme is not None:
-            out = _emit_quantize_node(g, out, inner_scheme)
-        return out
+        from src.onnx.helpers import _emit_unary_onnx
+        return _emit_unary_onnx(g, in1, inner_scheme, "Exp")
 
 
 # ---------------------------------------------------------------------------
@@ -449,13 +416,8 @@ class SIMDLog(torch.autograd.Function):
 
     @staticmethod
     def symbolic(g, in1, inner_scheme, quantize_backprop):
-        from src.onnx.helpers import _emit_quantize_node
-        if inner_scheme is not None:
-            in1 = _emit_quantize_node(g, in1, inner_scheme)
-        out = g.op("Log", in1)
-        if inner_scheme is not None:
-            out = _emit_quantize_node(g, out, inner_scheme)
-        return out
+        from src.onnx.helpers import _emit_unary_onnx
+        return _emit_unary_onnx(g, in1, inner_scheme, "Log")
 
 
 # ---------------------------------------------------------------------------
@@ -504,25 +466,41 @@ class SIMDReduceSum(torch.autograd.Function):
 
 def simd_add(in1, in2, inner_scheme=None, quantize_backprop=True):
     if inner_scheme is None:
-        return in1 + in2
+        _enter_quantize()
+        try:
+            return in1 + in2
+        finally:
+            _exit_quantize()
     return SIMDAdd.apply(in1, in2, inner_scheme, quantize_backprop)
 
 
 def simd_sub(in1, in2, inner_scheme=None, quantize_backprop=True):
     if inner_scheme is None:
-        return in1 - in2
+        _enter_quantize()
+        try:
+            return in1 - in2
+        finally:
+            _exit_quantize()
     return SIMDSub.apply(in1, in2, inner_scheme, quantize_backprop)
 
 
 def simd_mul(in1, in2, inner_scheme=None, quantize_backprop=True):
     if inner_scheme is None:
-        return in1 * in2
+        _enter_quantize()
+        try:
+            return in1 * in2
+        finally:
+            _exit_quantize()
     return SIMDMul.apply(in1, in2, inner_scheme, quantize_backprop)
 
 
 def simd_div(in1, in2, inner_scheme=None, quantize_backprop=True):
     if inner_scheme is None:
-        return in1 / in2
+        _enter_quantize()
+        try:
+            return in1 / in2
+        finally:
+            _exit_quantize()
     return SIMDDiv.apply(in1, in2, inner_scheme, quantize_backprop)
 
 

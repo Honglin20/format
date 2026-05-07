@@ -2,50 +2,26 @@
 Format Study Configuration
 ===========================
 
-修改实验只需改动此文件中的 ``STUDY_CONFIG`` 字典，无需修改 runner 代码。
+To modify experiments, edit the ``STUDY_CONFIG`` dict in this file — no need to touch the runner code.
 
-----
-每个 config dict 支持的字段
-----
+Each config in the ``configs`` list is a :class:`QuantConfig` instance.
 
-============================  ========  ====================================================
-字段                          必需      说明
-============================  ========  ====================================================
-``name``                      是        实验名称（用于结果 key）
-``format``                    是        量化格式字符串
-``granularity``               是        ``"per_tensor"`` | ``"per_channel"`` | ``"per_block"``
-``axis``                      否        per_channel 时的轴（默认 -1，即特征维度）
-``block_size``                否        per_block 时的块大小（默认 32）
-``transform``                 否        变换类型：``"none"`` | ``"hadamard"`` | ``"smoothquant"``
-``weight_only``               否        只量化权重，不量化输入/输出（NF4 应设为 ``true``）
-``lsq_steps``                 否        LSQ 优化步数（0 = 不做 LSQ）
-``lsq_pot``                   否        LSQ 约束 power-of-two
-``lsq_lr``                    否        LSQ 学习率（默认 1e-3）
-``scale_format``              否        缩放格式：``"fp32"``（默认） | ``"pot"``
-============================  ========  ====================================================
+Available format strings
+------------------------
+- **Integer**: ``"int8"``, ``"int4"``, ``"int2"``
+- **Float**: ``"fp8_e4m3"``, ``"fp8_e5m2"``, ``"fp6_e3m2"``, ``"fp6_e2m3"``, ``"fp4_e2m1"``
+- **Lookup table**: ``"nf4"``
+- **Standard**: ``"bfloat16"``, ``"float16"``
 
-----
-可用 format 字符串
-----
+Adding new experiments
+----------------------
+**Add a config**: add a ``QuantConfig(...)`` to the ``configs`` list of the relevant part.
+**Add a new part**: add a new key to ``STUDY_CONFIG``, following the structure of existing parts.
+**Skip a part**: comment out or delete that part's key.
 
-- **整数**: ``"int8"``, ``"int4"``, ``"int2"``
-- **浮点**: ``"fp8_e4m3"``, ``"fp8_e5m2"``, ``"fp6_e3m2"``, ``"fp6_e2m3"``, ``"fp4_e2m1"``
-- **查找表**: ``"nf4"``
-- **标准**: ``"bfloat16"``, ``"float16"``
-
-----
-添加新实验
-----
-
-**加一个 config**：在对应 part 的 ``configs`` 列表里加一个 dict。
-**加一个新 part**：在 ``STUDY_CONFIG`` 里新增一个 key，结构仿照已有 part。
-**跳过某个 part**：把该 part 的 key 注释掉或删除即可。
-
-----
-Part output 声明
-----
-
-每个 part 可以声明 ``output``，指定要生成的表格和图表类型：
+Part output declarations
+------------------------
+Each part can declare ``output`` to specify the tables and figures to generate:
 
 .. code-block:: python
 
@@ -54,101 +30,116 @@ Part output 声明
        "figures": ["qsnr_line", "mse_box"],
    }
 
-可用表格 key: ``accuracy``, ``pot_delta``, ``transform_matrix``,
+Available table keys: ``accuracy``, ``pot_delta``, ``transform_matrix``,
 ``transform_distribution``, ``sensitivity``
-可用图表 key: ``qsnr_line``, ``mse_box``, ``pot_delta_bar``, ``transform_heatmap``,
+Available figure keys: ``qsnr_line``, ``mse_box``, ``pot_delta_bar``, ``transform_heatmap``,
 ``transform_pie``, ``transform_delta``, ``histogram``, ``error_vs_dist``,
 ``layer_type_qsnr``, ``block_sweep``, ``hierarchical_delta``
 """
 
 from __future__ import annotations
 
+from src.session._config import QuantConfig
+
 # ---------------------------------------------------------------------------
-# 主配置 — 修改这里！
+# Shorthand for common config patterns
+# ---------------------------------------------------------------------------
+
+_MX8 = dict(w_format="int8", w_granularity="per_block", w_block_size=32)
+_MX4 = dict(w_format="int4", w_granularity="per_block", w_block_size=32)
+_MXFP8 = dict(w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32)
+_MXFP4 = dict(w_format="fp4_e2m1", w_granularity="per_block", w_block_size=32)
+_PC8 = dict(w_format="int8", w_granularity="per_channel", scale_storage="fp32")
+_PC4 = dict(w_format="int4", w_granularity="per_channel", scale_storage="fp32")
+_NF4 = dict(w_format="nf4", w_granularity="per_channel", weight_only=True, scale_storage="fp32")
+
+# ---------------------------------------------------------------------------
+# Main configuration — edit here!
 # ---------------------------------------------------------------------------
 
 STUDY_CONFIG: dict = {
     # =====================================================================
-    # Part A: 8-bit 格式对比
+    # Part A: 8-bit format comparison
     # =====================================================================
     "part_a": {
         "description": "8-bit Format Comparison",
         "configs": [
-            {"name": "MXINT-8", "format": "int8",     "granularity": "per_block",   "block_size": 32},
-            {"name": "MXFP-8",  "format": "fp8_e4m3", "granularity": "per_block",   "block_size": 32},
-            {"name": "INT8-PC", "format": "int8",     "granularity": "per_channel", "axis": -1, "scale_format": "fp32"},
+            QuantConfig(name="MXINT-8", **_MX8),
+            QuantConfig(name="MXFP-8", **_MXFP8),
+            QuantConfig(name="INT8-PC", **_PC8),
         ],
         "output": {"tables": ["accuracy"], "figures": ["qsnr_line", "mse_box"]},
     },
 
     # =====================================================================
-    # Part B: 4-bit 格式对比
+    # Part B: 4-bit format comparison
     # =====================================================================
     "part_b": {
         "description": "4-bit Format Comparison",
         "configs": [
-            {"name": "MXINT-4", "format": "int4",     "granularity": "per_block",   "block_size": 32},
-            {"name": "MXFP-4",  "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32},
-            {"name": "INT4-PC", "format": "int4",     "granularity": "per_channel", "axis": -1, "scale_format": "fp32"},
-            {"name": "NF4-PC",  "format": "nf4",      "granularity": "per_channel", "axis": -1, "weight_only": True, "scale_format": "fp32"},
+            QuantConfig(name="MXINT-4", **_MX4),
+            QuantConfig(name="MXFP-4", **_MXFP4),
+            QuantConfig(name="INT4-PC", **_PC4),
+            QuantConfig(name="NF4-PC", **_NF4),
         ],
         "output": {"tables": ["accuracy"], "figures": ["qsnr_line", "mse_box"]},
     },
 
     # =====================================================================
-    # Part C: FP32 vs PoT 缩放对比（LSQ 优化）
+    # Part C: FP32 vs PoT scaling comparison (LSQ optimized)
     # =====================================================================
     "part_c": {
-        "description": "FP32 vs PoT Scaling",
+        "description": "FP32 vs PoT Scaling (LSQ optimized)",
         "configs": [
-            {"name": "INT8-PC-FP32", "format": "int8", "granularity": "per_channel", "axis": -1, "scale_format": "fp32",
-             "lsq_steps": 100, "lsq_pot": False},
-            {"name": "INT8-PC-PoT",  "format": "int8", "granularity": "per_channel", "axis": -1, "scale_format": "pot",
-             "lsq_steps": 100, "lsq_pot": True},
-            {"name": "INT4-PC-FP32", "format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "fp32",
-             "lsq_steps": 100, "lsq_pot": False},
-            {"name": "INT4-PC-PoT",  "format": "int4", "granularity": "per_channel", "axis": -1, "scale_format": "pot",
-             "lsq_steps": 100, "lsq_pot": True},
+            QuantConfig(name="INT8-PC-FP32", w_format="int8", w_granularity="per_channel",
+                        transform="prescale", scale_storage="fp32", lsq_steps=100),
+            QuantConfig(name="INT8-PC-PoT", w_format="int8", w_granularity="per_channel",
+                        transform="prescale", scale_storage="pot", lsq_steps=100),
+            QuantConfig(name="INT4-PC-FP32", w_format="int4", w_granularity="per_channel",
+                        transform="prescale", scale_storage="fp32", lsq_steps=100),
+            QuantConfig(name="INT4-PC-PoT", w_format="int4", w_granularity="per_channel",
+                        transform="prescale", scale_storage="pot", lsq_steps=100),
         ],
         "output": {"tables": ["accuracy", "pot_delta"], "figures": ["pot_delta_bar"]},
     },
 
     # =====================================================================
-    # Part D: 4-bit 变换研究（None / Hadamard / SmoothQuant / PerLayerOpt）
+    # Part D: 4-bit transform study (None / Hadamard / SmoothQuant)
     # =====================================================================
     "part_d": {
         "description": "Transform Study at 4-bit (MLP)",
         "configs": [
             # MXINT-4 variants
-            {"name": "MXINT-4-None",         "format": "int4",     "granularity": "per_block",   "block_size": 32, "transform": "none"},
-            {"name": "MXINT-4-Hadamard",     "format": "int4",     "granularity": "per_block",   "block_size": 32, "transform": "hadamard"},
-            {"name": "MXINT-4-SmoothQuant",  "format": "int4",     "granularity": "per_block",   "block_size": 32, "transform": "smoothquant"},
+            QuantConfig(name="MXINT-4-None", **_MX4, transform="none"),
+            QuantConfig(name="MXINT-4-Hadamard", **_MX4, transform="hadamard"),
+            QuantConfig(name="MXINT-4-SmoothQuant", **_MX4, transform="smoothquant"),
             # MXFP-4 variants
-            {"name": "MXFP-4-None",          "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32, "transform": "none"},
-            {"name": "MXFP-4-Hadamard",      "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32, "transform": "hadamard"},
-            {"name": "MXFP-4-SmoothQuant",   "format": "fp4_e2m1", "granularity": "per_block",   "block_size": 32, "transform": "smoothquant"},
+            QuantConfig(name="MXFP-4-None", **_MXFP4, transform="none"),
+            QuantConfig(name="MXFP-4-Hadamard", **_MXFP4, transform="hadamard"),
+            QuantConfig(name="MXFP-4-SmoothQuant", **_MXFP4, transform="smoothquant"),
             # INT4-PC variants
-            {"name": "INT4-PC-None",         "format": "int4",     "granularity": "per_channel", "axis": -1,       "transform": "none", "scale_format": "fp32"},
-            {"name": "INT4-PC-Hadamard",     "format": "int4",     "granularity": "per_channel", "axis": -1,       "transform": "hadamard", "scale_format": "fp32"},
-            {"name": "INT4-PC-SmoothQuant",  "format": "int4",     "granularity": "per_channel", "axis": -1,       "transform": "smoothquant", "scale_format": "fp32"},
+            QuantConfig(name="INT4-PC-None", **_PC4, transform="none"),
+            QuantConfig(name="INT4-PC-Hadamard", **_PC4, transform="hadamard"),
+            QuantConfig(name="INT4-PC-SmoothQuant", **_PC4, transform="smoothquant"),
             # NF4-PC variants (weight-only)
-            {"name": "NF4-PC-None",          "format": "nf4",      "granularity": "per_channel", "axis": -1,       "weight_only": True, "transform": "none", "scale_format": "fp32"},
-            {"name": "NF4-PC-Hadamard",      "format": "nf4",      "granularity": "per_channel", "axis": -1,       "weight_only": True, "transform": "hadamard", "scale_format": "fp32"},
-            {"name": "NF4-PC-SmoothQuant",   "format": "nf4",      "granularity": "per_channel", "axis": -1,       "weight_only": True, "transform": "smoothquant", "scale_format": "fp32"},
+            QuantConfig(name="NF4-PC-None", **_NF4, transform="none"),
+            QuantConfig(name="NF4-PC-Hadamard", **_NF4, transform="hadamard"),
+            QuantConfig(name="NF4-PC-SmoothQuant", **_NF4, transform="smoothquant"),
         ],
-        "output": {"tables": ["accuracy", "transform_matrix", "transform_distribution"], "figures": ["qsnr_line", "transform_heatmap", "transform_pie", "transform_delta"]},
+        "output": {"tables": ["accuracy", "transform_matrix", "transform_distribution"],
+                   "figures": ["qsnr_line", "transform_heatmap", "transform_pie", "transform_delta"]},
     },
 
     # =====================================================================
-    # Block Size 扫描
+    # Block size sweep
     # =====================================================================
     "block_sweep": {
         "description": "Block size sensitivity sweep (int8)",
         "configs": [
-            {"name": "int8-blk16", "format": "int8", "granularity": "per_block", "block_size": 16},
-            {"name": "int8-blk32", "format": "int8", "granularity": "per_block", "block_size": 32},
-            {"name": "int8-blk64", "format": "int8", "granularity": "per_block", "block_size": 64},
-            {"name": "int8-blk128", "format": "int8", "granularity": "per_block", "block_size": 128},
+            QuantConfig(name="int8-blk16", w_format="int8", w_granularity="per_block", w_block_size=16),
+            QuantConfig(name="int8-blk32", w_format="int8", w_granularity="per_block", w_block_size=32),
+            QuantConfig(name="int8-blk64", w_format="int8", w_granularity="per_block", w_block_size=64),
+            QuantConfig(name="int8-blk128", w_format="int8", w_granularity="per_block", w_block_size=128),
         ],
         "output": {"tables": ["accuracy"], "figures": ["block_sweep"]},
     },
@@ -159,14 +150,18 @@ STUDY_CONFIG: dict = {
     "part_hierarchical": {
         "description": "Hierarchical Pre-Scale Study (pot pre-scale + MX per-block)",
         "configs": [
-            {"name": "MXINT-8-HIER", "format": "int8",     "granularity": "per_block", "block_size": 32,
-             "lsq_steps": 0, "pre_scale_init": "pot_amax", "pre_scale_pot": True},
-            {"name": "MXFP-8-HIER",  "format": "fp8_e4m3", "granularity": "per_block", "block_size": 32,
-             "lsq_steps": 0, "pre_scale_init": "pot_amax", "pre_scale_pot": True},
-            {"name": "MXINT-4-HIER", "format": "int4",     "granularity": "per_block", "block_size": 32,
-             "lsq_steps": 0, "pre_scale_init": "pot_amax", "pre_scale_pot": True},
-            {"name": "MXFP-4-HIER",  "format": "fp4_e2m1", "granularity": "per_block", "block_size": 32,
-             "lsq_steps": 0, "pre_scale_init": "pot_amax", "pre_scale_pot": True},
+            QuantConfig(name="MXINT-8-HIER", **_MX8,
+                        transform="prescale", lsq_steps=0,
+                        prescale_init="pot_amax", prescale_pot=True),
+            QuantConfig(name="MXFP-8-HIER", **_MXFP8,
+                        transform="prescale", lsq_steps=0,
+                        prescale_init="pot_amax", prescale_pot=True),
+            QuantConfig(name="MXINT-4-HIER", **_MX4,
+                        transform="prescale", lsq_steps=0,
+                        prescale_init="pot_amax", prescale_pot=True),
+            QuantConfig(name="MXFP-4-HIER", **_MXFP4,
+                        transform="prescale", lsq_steps=0,
+                        prescale_init="pot_amax", prescale_pot=True),
         ],
         "output": {"tables": ["accuracy"], "figures": ["hierarchical_delta"]},
     },

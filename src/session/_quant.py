@@ -1,5 +1,5 @@
 """
-QuantSession: unified high-level API for model quantization workflow.
+_QuantSession: unified high-level API for model quantization workflow.
 
 Wraps quantize_model, calibration, analysis, comparison, and ONNX export
 into a single session object.  Designed as a thin layer on top of existing
@@ -7,7 +7,7 @@ APIs — no breaking changes to the underlying infrastructure.
 
 Usage::
 
-    session = QuantSession(model, cfg)
+    session = _QuantSession(model, cfg)
 
     # Calibrate (scales auto-assigned on exit)
     with session.calibrate():
@@ -53,7 +53,7 @@ def _module_device(module: nn.Module) -> torch.device:
     return torch.device('cpu')
 
 
-class QuantSession:
+class _QuantSession:
     """Unified high-level API for model quantization workflow.
 
     Wraps quantize_model, calibration, analysis, comparison, and export
@@ -74,7 +74,7 @@ class QuantSession:
 
     Example::
 
-        session = QuantSession(model, cfg)
+        session = _QuantSession(model, cfg)
 
         with session.calibrate():
             eval_fn(session, calib_data)
@@ -97,6 +97,7 @@ class QuantSession:
         observers: Optional[List] = None,
         keep_fp32: bool = True,
         op_cfgs: Optional[Dict[str, OpQuantConfig]] = None,
+        quantize_nonlinear: bool = True,
     ):
         self.cfg = cfg
         self.calibrator = calibrator if calibrator is not None else MaxScaleStrategy()
@@ -114,20 +115,21 @@ class QuantSession:
             model,
             cfg=cfg,
             op_cfgs=op_cfgs,
+            quantize_nonlinear=quantize_nonlinear,
         )
 
     # ------------------------------------------------------------------
     # Mode switching
     # ------------------------------------------------------------------
 
-    def use_fp32(self) -> "QuantSession":
+    def use_fp32(self) -> "_QuantSession":
         """Switch to fp32 mode — ``session(x)`` calls the original model."""
         if self.fp32_model is None:
             raise RuntimeError("fp32_model not available (keep_fp32=False)")
         self._mode = "fp32"
         return self
 
-    def use_quant(self) -> "QuantSession":
+    def use_quant(self) -> "_QuantSession":
         """Switch to quantized mode — ``session(x)`` calls the quantized model."""
         self._mode = "quant"
         return self
@@ -358,7 +360,7 @@ class QuantSession:
         # Collect per-module input amax when init requires calibration data
         amax_map = None
         if init in ("amax", "pot_amax"):
-            amax_map = QuantSession._collect_input_amax(
+            amax_map = _QuantSession._collect_input_amax(
                 calib_data, self.qmodel,
                 channel_axis=channel_axis,
                 granularity=granularity,
@@ -430,7 +432,7 @@ class QuantSession:
 
         Raises:
             RuntimeError: If ``fp32_model`` is not available
-                (``keep_fp32=False`` was passed to QuantSession).
+                (``keep_fp32=False`` was passed to _QuantSession).
         """
         if self.fp32_model is None:
             raise RuntimeError(
@@ -521,14 +523,14 @@ class QuantSession:
     # Delegation
     # ------------------------------------------------------------------
 
-    def train(self, mode: bool = True) -> "QuantSession":
+    def train(self, mode: bool = True) -> "_QuantSession":
         """Set training mode on both fp32 and quantized models."""
         self.qmodel.train(mode)
         if self.fp32_model is not None:
             self.fp32_model.train(mode)
         return self
 
-    def eval(self) -> "QuantSession":
+    def eval(self) -> "_QuantSession":
         """Set evaluation mode on both fp32 and quantized models."""
         return self.train(False)
 

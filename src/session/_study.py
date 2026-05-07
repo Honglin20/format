@@ -12,7 +12,8 @@ from typing import Callable, Dict, List, Optional, Union
 import torch.nn as nn
 
 from src.session._config import QuantConfig
-from src.session._session import Session, SessionResult
+from src.session._result import SessionResult
+from src.session._session import Session
 
 
 class Study:
