@@ -21,6 +21,9 @@
 | P4 | 参数化格式注册 | ✅ |
 | P5 | LSQ 可学习量化（ADR-006） | ✅ |
 | P6 | Coarse Model — 延迟/显存估算 | ✅ |
+| P8.R1 | Pipeline Refactor（IoC 模式） | ✅ |
+| P8.R2 | Format Study 三层分离（runner/report/format_study） | ✅ |
+| P8.R3 | Session 统一入口重构（QuantConfig/Session/Study/report） | ✅ |
 | P7 | 自动格式搜索 | 未开始 |
 | P8 | 融合 Kernel | 未开始 |
 | P9 | ONNX custom op ORT 推理 | 未开始 |
@@ -34,7 +37,7 @@
 | Phase 5 | `pytest src/tests/ -x` | 图结构正确 + `onnx.checker` 通过 |
 | Phase 6+ | `pytest src/tests/ -q` | 0 xfail，无 regression |
 
-当前全量：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,416 passed
+当前全量：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 1,671 passed
 
 ## 不在当前范围
 

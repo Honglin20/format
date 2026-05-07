@@ -16,7 +16,11 @@ already baked into the weight values, matching the original paper.
 Design: immutable scale set at construction time. The ``from_calibration()``
 factory computes scale from activation statistics and weight tensor.
 """
+import copy
+from typing import Callable, Dict, List, Optional
+
 import torch
+import torch.nn as nn
 from torch import Tensor
 
 from ..scheme.transform import TransformBase
@@ -237,6 +241,114 @@ class SmoothQuantTransform(TransformBase):
         )
         return SmoothQuantTransform(scale, channel_axis=act_channel_axis)
 
+    # ------------------------------------------------------------------
+    # Model-level calibration factory
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_model_calibration(
+        cls,
+        fp32_model: nn.Module,
+        calib_data,
+        *,
+        alpha: float = 0.5,
+        eval_fn: Optional[Callable] = None,
+    ) -> Dict[str, "SmoothQuantTransform"]:
+        """Run one forward pass to capture activations, then create per-layer
+        SmoothQuantTransform instances.
+
+        Registers forward hooks on all ``nn.Linear`` and ``nn.Conv2d`` layers,
+        runs a single forward pass through ``fp32_model``, then computes per-layer
+        SmoothQuant scales from the captured activations and weights.
+
+        This function does NOT mutate ``fp32_model`` weights.  Weight fusion
+        (``W = W * s``) must be performed separately via
+        :func:`fuse_smoothquant_weights`.
+
+        Args:
+            fp32_model: FP32 reference model (not mutated).
+            calib_data: Calibration data.  When ``eval_fn`` is ``None``, this
+                should be a list/tuple of batches (``calib_data[0]`` is used
+                for the forward pass).  When ``eval_fn`` is provided, it is
+                passed ``(fp32_model, calib_data)``.
+            alpha: Smoothing strength, passed to
+                :func:`compute_smoothquant_scale`.  Default 0.5.
+            eval_fn: Optional ``(model, data) -> Any``.  Controls how the model
+                is called during activation capture.  When ``None``, falls back
+                to ``fp32_model(calib_data[0])``.
+
+        Returns:
+            Dict mapping layer name (``str``) to ``SmoothQuantTransform``.
+            Only ``nn.Linear`` and ``nn.Conv2d`` layers with successfully
+            computed scales are included.
+        """
+        if fp32_model is None:
+            return {}
+
+        # Defensive check: calib_data must contain at least one batch
+        if isinstance(calib_data, (list, tuple)):
+            if len(calib_data) == 0:
+                raise ValueError("calib_data must contain at least one batch")
+        elif isinstance(calib_data, torch.Tensor):
+            if calib_data.numel() == 0:
+                raise ValueError("calib_data must contain at least one batch")
+
+        activations: Dict[str, torch.Tensor] = {}
+        weights: Dict[str, torch.Tensor] = {}
+        channel_axes: Dict[str, int] = {}
+        hooks: List[torch.utils.hooks.RemovableHandle] = []
+
+        def _make_hook(name: str):
+            """Factory to capture name by value in the closure."""
+            def _fn(module, _input, _output):
+                activations[name] = _input[0].detach()
+                if hasattr(module, "weight") and module.weight is not None:
+                    weights[name] = module.weight.data.clone()
+            return _fn
+
+        for name, module in fp32_model.named_modules():
+            if isinstance(module, nn.Linear):
+                channel_axes[name] = -1
+                hooks.append(module.register_forward_hook(_make_hook(name)))
+            elif isinstance(module, nn.Conv2d):
+                channel_axes[name] = 1
+                hooks.append(module.register_forward_hook(_make_hook(name)))
+
+        with torch.no_grad():
+            fp32_model.eval()
+            try:
+                if eval_fn is not None:
+                    eval_fn(fp32_model, calib_data)
+                else:
+                    if isinstance(calib_data, (list, tuple)):
+                        fp32_model(calib_data[0])
+                    else:
+                        fp32_model(calib_data)
+            finally:
+                for h in hooks:
+                    h.remove()
+
+        per_layer: Dict[str, "SmoothQuantTransform"] = {}
+        for name in activations:
+            if name not in weights:
+                continue
+            try:
+                act_axis = channel_axes.get(name, -1)
+                sq_t = cls.from_calibration(
+                    X_act=activations[name], W=weights[name], alpha=alpha,
+                    act_channel_axis=act_axis,
+                )
+                per_layer[name] = sq_t
+            except (ValueError, RuntimeError):
+                # Skip layers where the scale computation fails
+                pass
+
+        return per_layer
+
+    # ------------------------------------------------------------------
+    # Equality / hashing
+    # ------------------------------------------------------------------
+
     def __eq__(self, other) -> bool:
         """Two transforms are equal iff they have the same scale and channel_axis."""
         if not isinstance(other, SmoothQuantTransform):
@@ -249,3 +361,51 @@ class SmoothQuantTransform(TransformBase):
     def __hash__(self) -> int:
         """Hash based on the scale tensor values and channel_axis."""
         return hash((self._channel_axis, tuple(self._scale.flatten().tolist())))
+
+
+# ---------------------------------------------------------------------------
+# Weight fusion (model-level)
+# ---------------------------------------------------------------------------
+
+def fuse_smoothquant_weights(
+    fp32_model: nn.Module,
+    sq_transforms: Dict[str, SmoothQuantTransform],
+    *,
+    layer_names: Optional[List[str]] = None,
+) -> nn.Module:
+    """Return a deep copy of ``fp32_model`` with SmoothQuant weight fusion applied.
+
+    For each layer in ``sq_transforms`` (filtered by ``layer_names`` if given),
+    applies ``W = W * s`` — the one-time calibration-time weight compensation
+    from SmoothQuant (Xiao et al. 2023, eq. 3).  The original ``fp32_model``
+    is NOT mutated.
+
+    Args:
+        fp32_model: Reference FP32 model (not mutated).
+        sq_transforms: Per-layer SmoothQuantTransform dict, as returned by
+            :meth:`SmoothQuantTransform.from_model_calibration`.
+        layer_names: If given, only fuse weights for layers in this list.
+            ``None`` fuses all layers present in ``sq_transforms``.
+
+    Returns:
+        Deep copy of ``fp32_model`` with fused weights for the selected layers.
+    """
+    fused_model = copy.deepcopy(fp32_model)
+    module_map = dict(fused_model.named_modules())
+
+    layer_set: Optional[set] = set(layer_names) if layer_names is not None else None
+
+    for name, sq_t in sq_transforms.items():
+        if layer_set is not None and name not in layer_set:
+            continue
+        module = module_map.get(name)
+        if module is None or not hasattr(module, "weight") or module.weight is None:
+            continue
+        W = module.weight.data
+        # w_axis=1: PyTorch standard input-channel axis for both Linear
+        # (out, in) and Conv2d (out, in, kH, kW).
+        shape = [1] * W.ndim
+        shape[1] = -1
+        module.weight.data = W * sq_t.scale.view(*shape)
+
+    return fused_model

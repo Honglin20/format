@@ -9,3 +9,4 @@
 | 005 | [005-op-quant-config.md](005-op-quant-config.md) | OpQuantConfig：算子级 scheme pipeline 容器 |
 | 006 | [006-p5-learnable-pre-scale.md](006-p5-learnable-pre-scale.md) | LSQ：PreScaleTransform + LayerwiseScaleOptimizer |
 | 007 | [007-p6-cost-model.md](007-p6-cost-model.md) | Coarse Model 架构设计（包结构、Session 集成） |
+| 008 | [008-session-refactor.md](008-session-refactor.md) | Session 统一入口 + Output-Driven 架构（QuantConfig / Session / Study） ✅ 已实施 |

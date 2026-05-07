@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.pipeline.config import resolve_config
+from src.session import resolve_config
 from src.session import QuantSession
 from src.calibration.strategies import MSEScaleStrategy
 from src.analysis.observers import QSNRObserver

@@ -14,12 +14,16 @@ Format Study — Random Tensor Validation
 不需要真实数据集。用随机输入和随机初始化的 MLP 验证量化误差。
 """
 import argparse
+import copy
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.pipeline.format_study import run_format_study, plot_from_results
+from src.session import Study, QuantConfig
+from src.report import StudyReport
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +161,39 @@ STUDY_CONFIG = {
 
 
 # ---------------------------------------------------------------------------
+# Run study using the new Study API
+# ---------------------------------------------------------------------------
+
+def run_study(config_dict, build_model_fn, calib_fn, eval_loader_fn, eval_fn,
+              output_dir="results/random_tensor_study"):
+    """Run a format study using Study + QuantConfig.
+
+    Iterates over STUDY_CONFIG parts and runs each as a separate Study.
+    This replaces the old ``run_format_study()`` function.
+    """
+    fp32_model = build_model_fn()
+    calib_data = calib_fn()
+    eval_data = eval_loader_fn()
+
+    for part_name, part_cfg in config_dict.items():
+        descriptors = part_cfg.get("configs", [])
+        if not descriptors:
+            continue
+
+        configs = [QuantConfig.from_descriptor(d) for d in descriptors]
+        model_copy = copy.deepcopy(fp32_model)
+        study = Study(configs, model=model_copy)
+        report = study.run(
+            calib_data,
+            eval_data=eval_data,
+            eval_fn=eval_fn,
+            outputs="all",
+        )
+        report.print_summary()
+        report.save(output_dir, config=config_dict)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -168,19 +205,25 @@ if __name__ == "__main__":
     parser.add_argument("--calib-samples", type=int, default=128)
     parser.add_argument("--eval-samples", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--plot-from", default=None, metavar="RESULTS_JSON",
-                        help="Regenerate figures from existing results.json")
+    parser.add_argument("--plot-from", default=None, metavar="RESULTS_DIR",
+                        help="Regenerate figures from existing results.json (pass the results/ dir)")
     args = parser.parse_args()
 
+    output_dir = args.output_dir or "results/random_tensor_study"
+
     if args.plot_from:
-        plot_from_results(args.plot_from, args.output_dir)
+        # Regenerate figures from saved results
+        report = StudyReport.from_file(args.plot_from)
+        report.save(args.plot_from)
+        print(f"Figures regenerated from {args.plot_from}/")
     else:
         torch.manual_seed(args.seed)
-        results = run_format_study(
-            build_model=build_model,
-            make_calib_data=lambda: make_calib_data(args.calib_samples, args.batch_size),
-            make_eval_loader=lambda: make_eval_loader(args.eval_samples, args.batch_size),
-            eval_fn=eval_fn,
-            config=STUDY_CONFIG,
-            output_dir=args.output_dir or "results/random_tensor_study",
+        os.makedirs(output_dir, exist_ok=True)
+        run_study(
+            STUDY_CONFIG,
+            build_model,
+            lambda: make_calib_data(args.calib_samples, args.batch_size),
+            lambda: make_eval_loader(args.eval_samples, args.batch_size),
+            eval_fn,
+            output_dir=output_dir,
         )

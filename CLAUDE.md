@@ -32,7 +32,7 @@
 ### 依赖层级（单向，上层依赖下层，永不反向）
 
 ```
-工具层 (Tools)          calibration  analysis  pipeline  cost  viz  onnx
+工具层 (Tools)          calibration  analysis  cost  onnx
                           ↓ 使用
 驱动层 (Integration)     session   模型生命周期编排 + 模块转换 + inline 拦截
                           ↓ 驱动
@@ -41,6 +41,8 @@
 数学层 (Math)            quantize(tensor, scheme) → tensor
                           ↑ 三轴正交组合
                   format  ×  granularity  ×  transform
+
+输出层 (Output)          report  viz  声明式输出 + 可视化（消费 SessionResult）
 ```
 
 ### 包边界原则
@@ -104,7 +106,7 @@ x_q = quantize(x, scheme)
 
 - **Branch**: `feature/refactor-src`（主开发），`claude/<desc>`（单任务），不推 master/main
 - **Commit**: `<type>(<scope>): <描述>` — type: feat/fix/refactor/test/docs/chore
-- **测试门**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`（当前 1,468 passed）
+- **测试门**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`（当前 1,671 passed）
 
 ---
 

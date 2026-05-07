@@ -57,6 +57,12 @@
 | [2026-04-29-pipeline-refactor.md](2026-04-29-pipeline-refactor.md) | Pipeline Refactor 实现 |
 | [2026-04-29-pipeline-refactor-design.md](2026-04-29-pipeline-refactor-design.md) | Pipeline Refactor 设计 |
 
+## Session 统一入口重构
+
+| 文件 | 内容 |
+|------|------|
+| [2026-05-07-session-refactor.md](2026-05-07-session-refactor.md) | Session 统一入口 + Output-Driven 实施计划 |
+
 ## 其他
 
 | 文件 | 内容 |

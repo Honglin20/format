@@ -1,0 +1,423 @@
+"""QuantConfig: user-facing quantization configuration for session workflow.
+
+Translates user-friendly configuration strings (e.g. "int8", "per_tensor",
+"hadamard") into internal OpQuantConfig via :meth:`QuantConfig.to_op_config`.
+"""
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+import torch
+
+from src.formats.base import FormatBase
+from src.scheme.granularity import GranularitySpec
+from src.scheme.op_config import OpQuantConfig
+from src.scheme.quant_scheme import QuantScheme
+from src.scheme.transform import IdentityTransform, TransformBase
+from src.transform.hadamard import HadamardTransform
+from src.transform.smooth_quant import SmoothQuantTransform
+
+_VALID_GRANULARITIES = frozenset({"per_tensor", "per_channel", "per_block"})
+_VALID_TRANSFORMS = frozenset({"none", "hadamard", "smoothquant", "prescale"})
+_VALID_CALIBRATORS = frozenset({"mse", "max", "percentile", "kl"})
+_VALID_SCALE_STORAGES = frozenset({"fp32", "pot"})
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_granularity(
+    granularity: str,
+    block_size: Optional[int] = None,
+    axis: int = -1,
+) -> GranularitySpec:
+    """Convert string granularity + optional block_size to GranularitySpec."""
+    if granularity == "per_tensor":
+        return GranularitySpec.per_tensor()
+    elif granularity == "per_channel":
+        return GranularitySpec.per_channel(axis=axis)
+    elif granularity == "per_block":
+        if block_size is None:
+            raise ValueError("per_block granularity requires block_size")
+        return GranularitySpec.per_block(size=block_size, axis=axis)
+    else:
+        raise ValueError(f"Unknown granularity: {granularity}")
+
+
+def _make_weight_transform(transform: str) -> TransformBase:
+    """Resolve the weight-side transform from a string name."""
+    if transform == "none":
+        return IdentityTransform()
+    elif transform == "hadamard":
+        return HadamardTransform()
+    elif transform in ("prescale", "smoothquant"):
+        return IdentityTransform()
+    else:
+        raise ValueError(f"Unknown transform: {transform}")
+
+
+def _make_activation_transform(transform: str, sq_alpha: float) -> TransformBase:
+    """Resolve the activation-side transform from a string name.
+
+    SmoothQuantTransform is created with a dummy scale tensor since the
+    real per-channel scale comes from calibration later.  This placeholder
+    is sufficient for OpQuantConfig construction and scheme resolution.
+    """
+    if transform == "none":
+        return IdentityTransform()
+    elif transform == "hadamard":
+        return HadamardTransform()
+    elif transform == "prescale":
+        return IdentityTransform()
+    elif transform == "smoothquant":
+        # Dummy scale — replaced by calibrated scale during the session workflow.
+        return SmoothQuantTransform(torch.tensor([1.0]), channel_axis=-1)
+    else:
+        raise ValueError(f"Unknown transform: {transform}")
+
+
+# ---------------------------------------------------------------------------
+# QuantConfig
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class QuantConfig:
+    """User-facing quantization configuration for the session workflow.
+
+    All fields have defaults, so constructing ``QuantConfig()`` gives a
+    sensible baseline (INT8 per-tensor, no transform).  Override only the
+    fields you need to change.
+
+    Translates to :class:`OpQuantConfig` via :meth:`to_op_config`, which
+    resolves format/granularity/transform strings into concrete objects
+    and assembles the per-role ``QuantScheme`` instances.
+    """
+
+    # ---- Identity / naming ----
+    name: str = ""
+
+    # ---- Weight quantization ----
+    w_format: str = "int8"
+    w_granularity: str = "per_tensor"
+    w_block_size: Optional[int] = None
+
+    # ---- Activation quantization (None = same format as weight) ----
+    a_format: Optional[str] = None
+    a_granularity: str = "per_tensor"
+    a_block_size: Optional[int] = None
+
+    # ---- Transform ----
+    transform: str = "none"               # none | hadamard | smoothquant | prescale
+    sq_alpha: float = 0.5
+    prescale_init: str = "ones"           # ones | amax | pot_amax
+    prescale_pot: bool = False
+    prescale_granularity: Optional[str] = None  # None = follow a_granularity
+
+    # ---- LSQ (learned step-size quantization, only valid with prescale) ----
+    lsq_steps: int = 0
+    lsq_lr: float = 1e-3
+
+    # ---- Scale storage format (QuantScheme.scale_format) ----
+    scale_storage: str = "fp32"           # fp32 | pot
+
+    # ---- Calibrator ----
+    calibrator: str = "mse"              # mse | max | percentile | kl
+
+    # ---- Mode ----
+    weight_only: bool = False
+
+    def __post_init__(self):
+        # Resolve prescale_granularity default: None → follow a_granularity
+        if self.prescale_granularity is None:
+            self.prescale_granularity = self.a_granularity
+
+        if self.w_granularity not in _VALID_GRANULARITIES:
+            raise ValueError(
+                f"Invalid w_granularity {self.w_granularity!r}. "
+                f"Must be one of {sorted(_VALID_GRANULARITIES)}"
+            )
+        if self.a_granularity not in _VALID_GRANULARITIES:
+            raise ValueError(
+                f"Invalid a_granularity {self.a_granularity!r}. "
+                f"Must be one of {sorted(_VALID_GRANULARITIES)}"
+            )
+        if self.transform not in _VALID_TRANSFORMS:
+            raise ValueError(
+                f"Invalid transform {self.transform!r}. "
+                f"Must be one of {sorted(_VALID_TRANSFORMS)}"
+            )
+        if self.calibrator not in _VALID_CALIBRATORS:
+            raise ValueError(
+                f"Invalid calibrator {self.calibrator!r}. "
+                f"Must be one of {sorted(_VALID_CALIBRATORS)}"
+            )
+        if self.scale_storage not in _VALID_SCALE_STORAGES:
+            raise ValueError(
+                f"Invalid scale_storage {self.scale_storage!r}. "
+                f"Must be one of {sorted(_VALID_SCALE_STORAGES)}"
+            )
+        if self.lsq_steps < 0:
+            raise ValueError(
+                f"lsq_steps must be >= 0, got {self.lsq_steps}"
+            )
+        if self.weight_only and self.a_format is not None:
+            raise ValueError(
+                "a_format cannot be set when weight_only=True"
+            )
+        if self.transform != "prescale" and self.lsq_steps > 0:
+            raise ValueError(
+                f"lsq_steps > 0 requires transform='prescale', "
+                f"got transform={self.transform!r}"
+            )
+        if self.w_granularity == "per_block" and self.w_block_size is None:
+            raise ValueError(
+                "w_block_size is required when w_granularity='per_block'"
+            )
+        if self.a_granularity == "per_block" and self.a_block_size is None:
+            raise ValueError(
+                "a_block_size is required when a_granularity='per_block'"
+            )
+
+    def to_op_config(self) -> OpQuantConfig:
+        """Convert this user-facing config to internal :class:`OpQuantConfig`.
+
+        Resolution order:
+        1. Resolve ``w_format`` / ``a_format`` → :class:`FormatBase` via
+           :meth:`FormatBase.from_str`.
+        2. Build :class:`GranularitySpec` from the granularity strings.
+        3. Select per-role :class:`TransformBase` according to the transform
+           rule table (weight and activation differ for smoothquant).
+        4. Construct per-role :class:`QuantScheme` and assemble the result.
+        """
+        # ---- Format ----
+        w_fmt = FormatBase.from_str(self.w_format)
+        a_fmt = FormatBase.from_str(self.a_format) if self.a_format is not None else w_fmt
+
+        # ---- Granularity ----
+        w_gran = _resolve_granularity(self.w_granularity, self.w_block_size, axis=-1)
+        a_gran = _resolve_granularity(self.a_granularity, self.a_block_size, axis=-1)
+
+        # ---- Transform (per-role, see rule table in `_make_*` helpers) ----
+        w_tx = _make_weight_transform(self.transform)
+        a_tx = _make_activation_transform(self.transform, self.sq_alpha)
+
+        # ---- QuantScheme ----
+        w_scheme = QuantScheme(
+            format=w_fmt,
+            granularity=w_gran,
+            transform=w_tx,
+            scale_format=self.scale_storage,
+        )
+        a_scheme = QuantScheme(
+            format=a_fmt,
+            granularity=a_gran,
+            transform=a_tx,
+            scale_format=self.scale_storage,
+        )
+
+        # ---- Assemble OpQuantConfig ----
+        if self.weight_only:
+            return OpQuantConfig(weight=w_scheme)
+
+        return OpQuantConfig(input=a_scheme, weight=w_scheme, output=a_scheme)
+
+    @classmethod
+    def from_descriptor(cls, desc: Dict[str, Any]) -> "QuantConfig":
+        """Create a QuantConfig from a legacy dict descriptor.
+
+        Supports all keys from the old ``resolve_config`` API in
+        ``src/pipeline/config.py``:
+
+        * ``format`` (str) → ``w_format``
+        * ``act_format`` (str, optional) → ``a_format``
+        * ``granularity`` (str) → ``w_granularity``, ``a_granularity``
+        * ``block_size`` (int, optional) → ``w_block_size``, ``a_block_size``
+        * ``axis`` (int, optional) ― applied to both granularities
+        * ``transform`` (str, optional) → ``transform``
+        * ``scale_format`` (str) → ``scale_storage`` (maps ``"fp32"/"pot"``)
+        * ``weight_only`` (bool) → ``weight_only``
+        * ``name`` (str) → ``name``
+        * ``lsq_steps`` (int) → ``lsq_steps``
+        * ``lsq_lr`` (float) → ``lsq_lr``
+        * ``pre_scale_init`` (str) → ``prescale_init``
+        * ``pre_scale_pot`` (bool) → ``prescale_pot``
+
+        Raises:
+            ValueError: When required keys are missing or values are invalid.
+            TypeError: When values have the wrong type.
+        """
+        fmt_name = desc.get("format")
+        if fmt_name is not None and not isinstance(fmt_name, str):
+            raise TypeError(
+                f"'format' must be a string, got {type(fmt_name).__name__}"
+            )
+
+        gran = desc.get("granularity")
+        if gran is not None and not isinstance(gran, str):
+            raise TypeError(
+                f"'granularity' must be a string, got {type(gran).__name__}"
+            )
+
+        axis = desc.get("axis", -1)
+        if not isinstance(axis, int):
+            raise TypeError(f"'axis' must be an int, got {type(axis).__name__}")
+
+        block_size = desc.get("block_size")
+        if block_size is not None and not isinstance(block_size, int):
+            raise TypeError(
+                f"'block_size' must be an int, got {type(block_size).__name__}"
+            )
+
+        transform = desc.get("transform", "none")
+        if transform is not None and not isinstance(transform, str):
+            raise TypeError(
+                f"'transform' must be a string, got {type(transform).__name__}"
+            )
+
+        scale_storage = desc.get("scale_format", "fp32")
+
+        weight_only = desc.get("weight_only", False)
+        if not isinstance(weight_only, bool):
+            raise TypeError(
+                f"'weight_only' must be a bool, got {type(weight_only).__name__}"
+            )
+
+        act_format = desc.get("act_format")
+        if act_format is not None and not isinstance(act_format, str):
+            raise TypeError(
+                f"'act_format' must be a string, got {type(act_format).__name__}"
+            )
+        if weight_only and act_format is not None:
+            raise ValueError(
+                "'act_format' cannot be used with 'weight_only=True'"
+            )
+
+        lsq_steps = desc.get("lsq_steps", 0)
+        lsq_lr = desc.get("lsq_lr", 1e-3)
+        prescale_init = desc.get("pre_scale_init", "ones")
+        prescale_pot = desc.get("pre_scale_pot", False)
+
+        # Resolve w_granularity eagerly so axis is threaded through
+        w_gran = _resolve_granularity(
+            gran or "per_tensor",
+            block_size=block_size if isinstance(block_size, int) else None,
+            axis=axis,
+        )
+        a_gran = _resolve_granularity(
+            gran or "per_tensor",
+            block_size=block_size if isinstance(block_size, int) else None,
+            axis=axis,
+        )
+
+        return cls(
+            name=desc.get("name", ""),
+            w_format=fmt_name or "int8",
+            a_format=act_format,
+            w_granularity=gran or "per_tensor",
+            a_granularity=gran or "per_tensor",
+            w_block_size=(w_gran.block_size
+                          if w_gran.mode.name == "PER_BLOCK" else None),
+            a_block_size=(a_gran.block_size
+                          if a_gran.mode.name == "PER_BLOCK" else None),
+            transform=transform,
+            scale_storage=scale_storage,
+            weight_only=weight_only,
+            lsq_steps=lsq_steps,
+            lsq_lr=lsq_lr,
+            prescale_init=prescale_init,
+            prescale_pot=prescale_pot,
+        )
+
+
+def resolve_config(desc: Dict[str, Any]) -> OpQuantConfig:
+    """Backward-compat: convert a legacy study descriptor dict to OpQuantConfig.
+
+    This function handles the full descriptor format including ``axis``,
+    which is resolved eagerly (QuantConfig doesn't have an axis field so
+    it must be handled here).
+
+    Use ``QuantConfig.from_descriptor(desc).to_op_config()`` for a simpler
+    programmatic API that doesn't need axis support.
+    """
+    fmt_name = desc.get("format")
+    if fmt_name is None:
+        raise ValueError("descriptor must contain 'format' key")
+    if not isinstance(fmt_name, str):
+        raise TypeError(
+            f"'format' must be a string, got {type(fmt_name).__name__}"
+        )
+
+    gran = desc.get("granularity")
+    if gran is None:
+        raise ValueError("descriptor must contain 'granularity' key")
+    if not isinstance(gran, str):
+        raise TypeError(
+            f"'granularity' must be a string, got {type(gran).__name__}"
+        )
+
+    axis = desc.get("axis", -1)
+    if not isinstance(axis, int):
+        raise TypeError(f"'axis' must be an int, got {type(axis).__name__}")
+
+    block_size = desc.get("block_size")
+    if block_size is not None and not isinstance(block_size, int):
+        raise TypeError(
+            f"'block_size' must be an int, got {type(block_size).__name__}"
+        )
+
+    transform = desc.get("transform", "none")
+    if transform is not None and not isinstance(transform, str):
+        raise TypeError(
+            f"'transform' must be a string, got {type(transform).__name__}"
+        )
+
+    scale_storage = desc.get("scale_format", "fp32")
+    if not isinstance(scale_storage, str):
+        raise TypeError(
+            f"'scale_format' must be a string, got {type(scale_storage).__name__}"
+        )
+    if scale_storage not in ("fp32", "pot"):
+        raise ValueError(
+            f"Invalid scale_format {scale_storage!r}. Must be 'fp32' or 'pot'"
+        )
+
+    weight_only = desc.get("weight_only", False)
+    if not isinstance(weight_only, bool):
+        raise TypeError(
+            f"'weight_only' must be a bool, got {type(weight_only).__name__}"
+        )
+
+    act_format = desc.get("act_format")
+    if act_format is not None and not isinstance(act_format, str):
+        raise TypeError(
+            f"'act_format' must be a string, got {type(act_format).__name__}"
+        )
+    if weight_only and act_format is not None:
+        raise ValueError(
+            "'act_format' cannot be used with 'weight_only=True'"
+        )
+
+    # Resolve granularity with axis
+    w_gran = _resolve_granularity(gran, block_size=block_size, axis=axis)
+    a_gran = _resolve_granularity(gran, block_size=block_size, axis=axis)
+
+    w_fmt = FormatBase.from_str(fmt_name)
+    a_fmt = FormatBase.from_str(act_format) if act_format is not None else w_fmt
+
+    w_tx = _make_weight_transform(transform)
+    a_tx = _make_activation_transform(transform, 0.5)
+
+    w_scheme = QuantScheme(
+        format=w_fmt, granularity=w_gran, transform=w_tx,
+        scale_format=scale_storage,
+    )
+    a_scheme = QuantScheme(
+        format=a_fmt, granularity=a_gran, transform=a_tx,
+        scale_format=scale_storage,
+    )
+
+    if weight_only:
+        return OpQuantConfig(weight=w_scheme)
+    return OpQuantConfig(input=a_scheme, weight=w_scheme, output=a_scheme)

@@ -1,10 +1,10 @@
-"""Integration tests for cost model with QuantSession and pipeline."""
+"""Integration tests for cost model with QuantSession and Session."""
 import pytest
 import torch
 import torch.nn as nn
 import torch
 
-from src.session import QuantSession
+from src.session import QuantConfig, Session, QuantSession
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
@@ -75,7 +75,7 @@ def test_session_estimate_cost_quantized_no_fp32_ok(int8_cfg):
     assert cost.total_latency_us > 0
 
 
-# ── ExperimentRunner cost integration ────────────────────────────
+# ── Session cost integration tests ────────────────────────────────
 
 def _dummy_eval_fn(model, data):
     """Eval fn for cost integration tests."""
@@ -89,37 +89,36 @@ def _dummy_eval_fn(model, data):
     return {"accuracy": 0.9}
 
 
-def test_runner_attaches_cost_keys(int8_cfg):
-    from src.pipeline.runner import ExperimentRunner
-
-    search_space = {"test_part": {"configs": [{"name": "cfg1", "format": "int8", "granularity": "per_tensor"}]}}
-    runner = ExperimentRunner(search_space)
+def test_session_attaches_cost_keys():
+    """Session.run() returns a result with cost and cost_fp32."""
+    cfg = QuantConfig(name="cfg1", w_format="int8", w_granularity="per_tensor")
     model = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 10))
+    session = Session(model, cfg)
 
-    results = runner.run(model, eval_fn=_dummy_eval_fn,
-                         calib_data=[torch.randn(2, 64)],
-                         eval_data=torch.randn(2, 64))
-    part_results = results["test_part"]
-    assert len(part_results) == 1
-    assert part_results[0].cost is not None
-    assert part_results[0].cost_fp32 is not None
-    assert part_results[0].cost.total_latency_us > 0
-    assert part_results[0].cost_fp32.total_latency_us > 0
+    result = session.run(
+        calib_data=[torch.randn(2, 64)],
+        eval_data=torch.randn(2, 64),
+        eval_fn=_dummy_eval_fn,
+        outputs="all",
+    )
+    assert result.cost is not None
+    assert result.cost_fp32 is not None
+    assert result.cost.total_latency_us > 0
+    assert result.cost_fp32.total_latency_us > 0
 
 
-def test_runner_cost_keys_present_even_without_analysis(int8_cfg):
+def test_session_cost_keys_present_even_without_analysis():
     """cost and cost_fp32 are present even when analysis is skipped."""
-    from src.pipeline.runner import ExperimentRunner
-
-    search_space = {"test_part": {"configs": [{"name": "cfg1", "format": "int8", "granularity": "per_tensor"}]}}
-    runner = ExperimentRunner(search_space)
+    cfg = QuantConfig(name="cfg1", w_format="int8", w_granularity="per_tensor")
     model = nn.Sequential(nn.Linear(64, 32))
+    session = Session(model, cfg)
 
-    results = runner.run(model, eval_fn=_dummy_eval_fn,
-                         calib_data=[torch.randn(2, 64)],
-                         eval_data=torch.randn(2, 64))
-    part_results = results["test_part"]
-    assert len(part_results) == 1
-    assert part_results[0].cost is not None
-    assert part_results[0].cost_fp32 is not None
-    assert part_results[0].cost.total_latency_us > 0
+    result = session.run(
+        calib_data=[torch.randn(2, 64)],
+        eval_data=torch.randn(2, 64),
+        eval_fn=_dummy_eval_fn,
+        outputs="all",
+    )
+    assert result.cost is not None
+    assert result.cost_fp32 is not None
+    assert result.cost.total_latency_us > 0

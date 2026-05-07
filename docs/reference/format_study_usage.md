@@ -1,21 +1,24 @@
 # Format Study 使用指南
 
-系统化量化格式精度研究：8-bit 对比、4-bit 对比、FP32 vs PoT scaling、Transform 效果，产出 6 张表格和 11 张图表。
+系统化量化格式精度研究：8-bit 对比、4-bit 对比、FP32 vs PoT scaling、Transform 效果，产出多张表格和图表。
 
 ## 程序化调用
 
 ```python
-from src.pipeline.format_study import run_format_study
+from src.session import Study, QuantConfig
 
-results = run_format_study(
-    build_model=my_build_fn,
-    make_calib_data=my_calib_fn,
-    make_eval_loader=my_loader_fn,
-    eval_fn=my_eval_fn,
-)
+configs = [
+    QuantConfig(name="int8", w_format="int8", w_granularity="per_block", w_block_size=32),
+    QuantConfig(name="int4", w_format="int4", w_granularity="per_channel"),
+]
+
+study = Study(configs, model=model)
+report = study.run(calib_data, eval_fn=eval_fn, eval_data=eval_loader)
+report.print_summary()
+report.save("results/my_study/")
 ```
 
-## 需要提供的四个函数
+## 需要提供的函数
 
 ```python
 import torch
@@ -39,53 +42,49 @@ def eval_fn(model: nn.Module, dataloader: DataLoader) -> dict[str, float]:
     ...
 ```
 
-参见 `pipeline/experiment_format_study.py` 查看完整的默认实现。
+参见 `examples/format_study_random.py` 查看完整的参考实现。
 
-## 修改搜索空间
+## 配置搜索空间
 
-编辑 `src/pipeline/studies/format_study.py` 中的 `FORMAT_STUDY` dict：
+通过 `QuantConfig` 字段定义每个配置：
 
 ```python
-FORMAT_STUDY = {
-    "part_a_8bit": {
-        "configs": {
-            # 格式名 → descriptor dict
-            "MXINT-8": {"format": "int8",     "granularity": "per_block",   "block_size": 32},
-            "INT8-PC":  {"format": "int8",     "granularity": "per_channel", "axis": 0},
-            "NF4-PC":   {"format": "nf4",      "granularity": "per_channel", "axis": 0, "weight_only": True},
-            # 添加 Hadamard transform：
-            "INT8-Had": {"format": "int8",     "granularity": "per_channel", "axis": 0, "transform": "hadamard"},
-        },
-    },
-    # 添加新的 part：
-    "my_custom_part": {
-        "configs": {
-            "fp8-blk16": {"format": "fp8_e4m3", "granularity": "per_block", "block_size": 16},
-        },
-    },
-}
+from src.session import QuantConfig
+
+configs = [
+    # 基本格式对比
+    QuantConfig(name="MXINT-8", w_format="int8", w_granularity="per_block", w_block_size=32),
+    QuantConfig(name="INT8-PC",  w_format="int8", w_granularity="per_channel"),
+    QuantConfig(name="NF4-PC",   w_format="nf4",  w_granularity="per_channel", weight_only=True),
+    # 加 Hadamard transform
+    QuantConfig(name="INT8-Had", w_format="int8", w_granularity="per_channel", transform="hadamard"),
+    # 4-bit
+    QuantConfig(name="fp4-blk16", w_format="fp4_e2m1", w_granularity="per_block", w_block_size=16),
+    # SmoothQuant
+    QuantConfig(name="INT8-SQ", w_format="int8", transform="smoothquant", sq_alpha=0.5),
+    # LSQ (prescale)
+    QuantConfig(name="INT8-LSQ", w_format="int8", transform="prescale", lsq_steps=100),
+]
 ```
 
-descriptor 字段：
+主要字段：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `format` | str | `"int8"` / `"int4"` / `"fp8_e4m3"` / `"fp4_e2m1"` / `"nf4"` |
-| `granularity` | str | `"per_tensor"` / `"per_channel"` / `"per_block"` |
-| `axis` | int | per_channel / per_block 的 axis（默认 -1）|
-| `block_size` | int | per_block 必填 |
-| `transform` | str / None | `"hadamard"` 或 `None`（默认无 transform）|
-| `weight_only` | bool | `True` 则只量化 weight，input / output 不量化（NF4 场景）|
+| `w_format` | str | `"int8"` / `"int4"` / `"fp8_e4m3"` / `"fp4_e2m1"` / `"nf4"` / ... |
+| `a_format` | str / None | 独立 activation 格式（None = 同 weight），wXaY mixed-precision |
+| `w_granularity` | str | `"per_tensor"` / `"per_channel"` / `"per_block"` |
+| `w_block_size` | int / None | per_block 必填 |
+| `transform` | str | `"none"` / `"hadamard"` / `"smoothquant"` / `"prescale"` |
+| `weight_only` | bool | `True` 则只量化 weight（NF4 场景）|
+| `calibrator` | str | `"mse"` / `"max"` / `"percentile"` / `"kl"` |
+| `scale_storage` | str | `"fp32"` / `"pot"` |
 
-## 其他参数
+预设配置在 `src/session/study_config.py` 的 `STUDY_CONFIG` 中：
 
 ```python
-run_format_study(
-    ...,
-    build_conv_model=my_conv_fn,     # 额外跑 Part D Conv2d 验证（可选）
-    output_dir="results/my_study",   # 指定输出目录
-    skip_parts={"C": True, "D": True},  # 跳过不需要的 Part
-)
+from src.session.study_config import STUDY_CONFIG
+# STUDY_CONFIG["part_a"], STUDY_CONFIG["part_b"], ...
 ```
 
 ## 输出
@@ -93,13 +92,24 @@ run_format_study(
 ```
 output_dir/
 ├── results.json       # 精度 + per-layer QSNR/MSE（可用于重绘）
-├── figures/           # 11 张 PNG
-└── tables/            # 6 张 CSV
+├── figures/           # PNG 图表
+└── tables/            # CSV 表格
 ```
 
 从已有结果重绘（不重跑实验）：
 
 ```python
-from src.pipeline.format_study import plot_from_results
-plot_from_results("results/my_study/results.json")
+from src.report import StudyReport
+StudyReport.from_file("results/my_study/results.json").save("results/regen/")
+```
+
+## PerLayerOpt
+
+按层选最优 transform 的后处理：
+
+```python
+from src.session import per_layer_optimal
+
+results = study.run(calib_data, eval_fn=eval_fn)
+opt_result = per_layer_optimal(results, calib_data, fp32_model, eval_fn=eval_fn)
 ```

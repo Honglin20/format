@@ -340,4 +340,4 @@ PYTHONPATH=. python examples/06_transforms.py          # Hadamard + SmoothQuant
 PYTHONPATH=. python examples/07_pre_scale.py           # PreScale + LSQ + PoT
 ```
 
-> **Format Study**：`pipeline/experiment_format_study.py` 是系统化的量化格式精度研究实验。详见 [format_study_usage.md](format_study_usage.md)。
+> **Format Study**：`examples/format_study_random.py` 是系统化的量化格式精度研究实验。详见 [format_study_usage.md](format_study_usage.md)。

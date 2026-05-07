@@ -1,545 +1,343 @@
+"""Session execution unit and SessionResult dataclass.
+
+Session is the atomic execution unit: one QuantConfig → one SessionResult.
+It wraps QuantSession and orchestrates calibrate → analyze → evaluate → cost.
 """
-QuantSession: unified high-level API for model quantization workflow.
 
-Wraps quantize_model, calibration, analysis, comparison, and ONNX export
-into a single session object.  Designed as a thin layer on top of existing
-APIs — no breaking changes to the underlying infrastructure.
+from __future__ import annotations
 
-Usage::
-
-    session = QuantSession(model, cfg)
-
-    # Calibrate (scales auto-assigned on exit)
-    with session.calibrate():
-        eval_fn(session, calib_data)
-
-    # Analyze
-    with session.analyze() as ctx:
-        eval_fn(session, data)
-    report = ctx.report()
-
-    # Evaluate
-    fp32_metrics = eval_fn(session.fp32_model, eval_loader)
-    quant_metrics = eval_fn(session, eval_loader)
-
-    # Export
-    session.export_onnx("model.onnx")
-"""
-import copy
-from typing import Any, Callable, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 
-from src.calibration.pipeline import CalibrationSession
-from src.calibration.strategies import MaxScaleStrategy, ScaleStrategy
-from src.analysis.context import AnalysisContext
-from src.analysis.e2e import Comparator, compare_models, _default_accuracy
-from src.analysis.observers import QSNRObserver
-from src.session._model import quantize_model
+from src.analysis.observers import (
+    DistributionObserver,
+    HistogramObserver,
+    MSEObserver,
+    QSNRObserver,
+)
+from src.calibration.strategies import (
+    KLScaleStrategy,
+    MSEScaleStrategy,
+    MaxScaleStrategy,
+    PercentileScaleStrategy,
+    ScaleStrategy,
+)
 from src.scheme.op_config import OpQuantConfig
+from src.scheme.quant_scheme import QuantScheme
+from src.session._config import QuantConfig
+from src.session._quant import QuantSession
+from src.transform.smooth_quant import SmoothQuantTransform, fuse_smoothquant_weights
 
 
-def _module_device(module: nn.Module) -> torch.device:
-    """Get the device of *module* from its parameters or buffers."""
-    try:
-        return next(module.parameters()).device
-    except StopIteration:
-        pass
-    try:
-        return next(module.buffers()).device
-    except StopIteration:
-        pass
-    return torch.device('cpu')
+# ---------------------------------------------------------------------------
+# Observer key -> observer class mapping
+# ---------------------------------------------------------------------------
+
+_OBSERVER_MAP: Dict[str, type] = {
+    "qsnr": QSNRObserver,
+    "mse": MSEObserver,
+    "histogram": HistogramObserver,
+    "distribution": DistributionObserver,
+}
+
+# Roles that receive SmoothQuantTransform when patching per-layer configs.
+# Only input-side roles are patched because the output side has a different
+# channel count (out_features vs in_features) and the scale computed by
+# from_model_calibration matches the input channel dimension.
+# Weight must keep IdentityTransform since it was already fused.
+_SMOOTH_INPUT_ROLES = frozenset({"input", "grad_input", "input_gw"})
 
 
-class QuantSession:
-    """Unified high-level API for model quantization workflow.
+def _make_calibrator(name: str) -> ScaleStrategy:
+    """Map calibrator string to a ScaleStrategy instance."""
+    _mapping = {
+        "mse": MSEScaleStrategy,
+        "max": MaxScaleStrategy,
+        "percentile": PercentileScaleStrategy,
+        "kl": KLScaleStrategy,
+    }
+    return _mapping[name]()
 
-    Wraps quantize_model, calibration, analysis, comparison, and export
-    into a single session object.
+
+def _run_model(model, data, eval_fn: Optional[Callable] = None) -> None:
+    """Run *model* on *data*, forwarding via *eval_fn* when provided.
+
+    When *eval_fn* is ``None``, falls back to calling the model directly:
+    iterating over a list/tuple of batches, or calling once for a single
+    tensor.  This guarantees forward hooks fire regardless of data format.
+    """
+    if eval_fn is not None:
+        eval_fn(model, data)
+    elif isinstance(data, (list, tuple)):
+        for batch in data:
+            model(batch)
+    else:
+        model(data)
+
+
+# ---------------------------------------------------------------------------
+# Session
+# ---------------------------------------------------------------------------
+
+
+class Session:
+    """Atomic execution unit: one QuantConfig -> one SessionResult.
+
+    Wraps QuantSession and orchestrates:
+      1. Output resolution (observer_keys, needs_eval, needs_cost)
+      2. [if smoothquant] SQ calibration + weight fusion
+      3. to_op_config() translation
+      4. [if prescale] two-step prescale init + optional LSQ optimization
+      5. calibrate -> analyze -> evaluate -> cost
 
     Args:
         model: Original fp32 PyTorch model.
-        cfg: ``OpQuantConfig`` or ``dict[name → OpQuantConfig]`` for
-            per-layer configs.
-        calibrator: ``ScaleStrategy`` for calibration (default:
-            ``MaxScaleStrategy()``).
-        observers: List of Observer instances for analysis (default:
-            ``[QSNRObserver()]``).
-        keep_fp32: Keep a deep copy of the original fp32 model for
-            comparison (default: True).  Set False to save memory.
-        op_cfgs: Optional per-op-type overrides for inline ops
-            (``{"matmul": cfg, "add": cfg, ...}``).
-
-    Example::
-
-        session = QuantSession(model, cfg)
-
-        with session.calibrate():
-            eval_fn(session, calib_data)
-
-        with session.analyze() as ctx:
-            eval_fn(session, data)
-        report = ctx.report()
-
-        fp32_metrics = eval_fn(session.fp32_model, eval_loader)
-        quant_metrics = eval_fn(session, eval_loader)
-        session.export_onnx("model.onnx")
+        config: User-facing ``QuantConfig``.
+        keep_fp32: Keep a deep copy of the fp32 model for comparison
+            (default: ``True``).
     """
 
     def __init__(
         self,
         model: nn.Module,
-        cfg: Union[OpQuantConfig, Dict[str, OpQuantConfig]],
+        config: QuantConfig,
         *,
-        calibrator: Optional[ScaleStrategy] = None,
-        observers: Optional[List] = None,
         keep_fp32: bool = True,
-        op_cfgs: Optional[Dict[str, OpQuantConfig]] = None,
     ):
-        self.cfg = cfg
-        self.calibrator = calibrator if calibrator is not None else MaxScaleStrategy()
-        self.observers = observers if observers is not None else [QSNRObserver()]
-        self.op_cfgs = op_cfgs
-        self._mode: str = "quant"
-        self._last_input: Any = None
+        self._model = model
+        self._config = config
+        self._keep_fp32 = keep_fp32
 
-        if keep_fp32:
-            self.fp32_model = copy.deepcopy(model)
-        else:
-            self.fp32_model = None
-
-        self.qmodel = quantize_model(
-            model,
-            cfg=cfg,
-            op_cfgs=op_cfgs,
-        )
-
-    # ------------------------------------------------------------------
-    # Mode switching
-    # ------------------------------------------------------------------
-
-    def use_fp32(self) -> "QuantSession":
-        """Switch to fp32 mode — ``session(x)`` calls the original model."""
-        if self.fp32_model is None:
-            raise RuntimeError("fp32_model not available (keep_fp32=False)")
-        self._mode = "fp32"
-        return self
-
-    def use_quant(self) -> "QuantSession":
-        """Switch to quantized mode — ``session(x)`` calls the quantized model."""
-        self._mode = "quant"
-        return self
-
-    @property
-    def mode(self) -> str:
-        """Current inference mode: ``"fp32"`` or ``"quant"``."""
-        return self._mode
-
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
-
-    def __call__(self, *args, **kwargs):
-        """Forward pass through the active model (fp32 or quantized).
-
-        In quantized mode, records the first positional argument as
-        ``_last_input`` for automatic ONNX export.
-        """
-        if self._mode == "fp32":
-            return self.fp32_model(*args, **kwargs)
-
-        if args and self._last_input is None:
-            self._last_input = args[0]
-        return self.qmodel(*args, **kwargs)
-
-    # ------------------------------------------------------------------
-    # Calibration
-    # ------------------------------------------------------------------
-
-    def calibrate(self, strategy: Optional[ScaleStrategy] = None) -> CalibrationSession:
-        """Return a ``CalibrationSession`` context manager.
-
-        Scales are auto-assigned on context exit. The user runs forward
-        passes inside the ``with`` block::
-
-            with session.calibrate():
-                eval_fn(session, calib_data)
-        """
-        strat = strategy if strategy is not None else self.calibrator
-        return CalibrationSession(self.qmodel, strat)
-
-    # ------------------------------------------------------------------
-    # Analysis
-    # ------------------------------------------------------------------
-
-    def analyze(self, observers: Optional[List] = None) -> AnalysisContext:
-        """Return an ``AnalysisContext`` context manager.
-
-        Observers are attached on enter and detached on exit::
-
-            with session.analyze() as ctx:
-                eval_fn(session, data)
-            report = ctx.report()
-        """
-        obs = observers if observers is not None else self.observers
-        return AnalysisContext(self.qmodel, obs)
-
-    # ------------------------------------------------------------------
-    # Comparison
-    # ------------------------------------------------------------------
-
-    def comparator(self) -> Comparator:
-        """Return a ``Comparator`` for manual end-to-end comparison.
-
-        Usage::
-
-            cmp = session.comparator()
-            with cmp:
-                for inputs, labels in data:
-                    session.use_fp32()
-                    fp32_out = session(inputs)
-                    session.use_quant()
-                    q_out = session(inputs)
-                    cmp.record(fp32_out, q_out, labels)
-            result = cmp.evaluate(my_eval_fn)
-        """
-        return Comparator()
-
-    def compare(
+    def run(
         self,
-        eval_dataloader,
-        eval_fn: Callable[..., Dict[str, float]] = _default_accuracy,
-        directions: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
-        """Auto-mode: run fp32 and quantized models on *eval_dataloader*.
-
-        Args:
-            eval_dataloader: DataLoader yielding ``(inputs, labels)``.
-            eval_fn: ``(logits, labels) -> dict[str, float]``.
-            directions: Optional ``{"metric": "higher"|"lower"}`` hints.
-
-        Returns:
-            ``{"fp32": {...}, "quant": {...}, "delta": {...}}``
-        """
-        if self.fp32_model is None:
-            raise RuntimeError("fp32_model not available (keep_fp32=False)")
-        return compare_models(
-            self.fp32_model, self.qmodel, eval_dataloader,
-            eval_fn=eval_fn, directions=directions,
-        )
-
-    # ------------------------------------------------------------------
-    # ONNX Export
-    # ------------------------------------------------------------------
-
-    def export_onnx(
-        self,
-        output_path: str,
-        dummy_input: Optional[torch.Tensor] = None,
-        opset_version: int = 17,
-    ) -> None:
-        """Export quantized model to ONNX.
-
-        If *dummy_input* is not provided, uses the input from the most
-        recent ``session(x)`` call.
-        """
-        inp = dummy_input if dummy_input is not None else self._last_input
-        if inp is None:
-            raise ValueError(
-                "No dummy_input provided and no prior inference recorded. "
-                "Call session(x) first or pass dummy_input explicitly."
-            )
-        self.qmodel.export_onnx(inp, output_path, opset_version=opset_version)
-
-    # ------------------------------------------------------------------
-    # Cost estimation (P6)
-    # ------------------------------------------------------------------
-
-    def estimate_cost(self, fp32: bool = False) -> "CostReport":
-        """Estimate latency and memory for the current model.
-
-        Does not require a forward pass — inspects model graph structure
-        and quantization configs directly.
-
-        Args:
-            fp32: If True, estimate the fp32 baseline; otherwise the
-                quantized model.
-
-        Returns:
-            CostReport with per-layer and total estimates.
-
-        Raises:
-            RuntimeError: If fp32=True but keep_fp32=False was set.
-        """
-        from src.cost.model_cost import analyze_model_cost
-
-        if fp32:
-            if self.fp32_model is None:
-                raise RuntimeError(
-                    "fp32_model not available (keep_fp32=False). "
-                    "Cannot estimate fp32 cost."
-                )
-            model = self.fp32_model
-        else:
-            model = self.qmodel
-        return analyze_model_cost(model)
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
-
-    def clear_scales(self) -> List[str]:
-        """Remove all ``_output_scale`` buffers from the quantized model."""
-        cs = CalibrationSession(self.qmodel, self.calibrator, assign=False)
-        return cs.clear_scales()
-
-    # ------------------------------------------------------------------
-    # Pre-scale (P5: learnable pre-scale via Transform)
-    # ------------------------------------------------------------------
-
-    def initialize_pre_scales(
-        self,
-        calib_data: Any,
+        calib_data,
         *,
-        init: str = "ones",
-        pot: bool = False,
-        granularity: str = "per_tensor",
-        trainable: bool = False,
-        channel_axis: int = -1,
+        eval_data=None,
         eval_fn: Optional[Callable] = None,
-    ) -> int:
-        """Initialize ``_pre_scale`` tensors on all quantized modules.
+        outputs: Union[str, List[str]] = "default",
+    ) -> SessionResult:
+        """Run the full quantization workflow for this config.
 
         Args:
-            calib_data: Calibration data passed through to ``eval_fn`` (only
-                used when ``init`` is ``"amax"`` or ``"pot_amax"``).
-                When ``eval_fn`` is None, must be ``List[Tensor]``.
-                When ``eval_fn`` is provided, can be any type the user's
-                function accepts.
-            init: Initialization method:
-
-                - ``"ones"`` — identity (all ones), for LSQ optimisation.
-                - ``"amax"`` — ``1 / max(|x|)`` from calibration data.
-                - ``"pot_amax"`` — ``2 ** round(log2(1/amax))`` (PoT).
-
-            pot: If True, create a PreScaleTransform that projects the scale
-                to nearest power-of-two at every forward pass.
-            granularity: ``"per_tensor"`` (single scalar per module) or
-                ``"per_channel"`` (one scalar per output channel).
-                Per-channel only replaces activation-role transforms
-                (input/output/grad_*) — weight/bias keep their originals.
-            trainable: If True, register as ``nn.Parameter`` (gradient-based
-                optimisation). If False, register as a buffer.
-            channel_axis: Which dimension is the channel axis for per-channel
-                broadcasting (default -1, the last dim).
-            eval_fn: ``(model, data) -> Any``. Controls how the model is
-                called during amax collection (when ``init`` is ``"amax"``
-                or ``"pot_amax"``). When None, falls back to direct
-                ``model(batch)`` calls.
+            calib_data: Calibration data.  When ``eval_fn`` is ``None``,
+                must be a sequence of tensors (iterated directly) or a
+                single tensor.
+            eval_data: Optional separate evaluation data.  Defaults to
+                ``calib_data`` when ``None``.
+            eval_fn: ``(model, data) -> Dict[str, float]``.  When provided,
+                called for calibration forward passes (return value ignored)
+                and for evaluation (return value used as metrics).  When
+                ``None``, direct ``model(batch)`` calls are used for
+                calibration and analysis, and evaluation is skipped.
+            outputs: Output key or list of keys.  ``"default"`` resolves
+                to ``["accuracy", "qsnr"]``; ``"all"`` resolves to every
+                registered output.
 
         Returns:
-            Number of modules that received pre-scale tensors.
+            ``SessionResult`` containing all computed metrics, observer
+            data, cost estimates, and the cached ``sq_transforms``.
         """
-        from src.transform.pre_scale import PreScaleTransform
-        from src.calibration.lsq_optimizer import (
-            _get_quantized_modules, _replace_transform,
-            _replace_transform_activation_only, _INPUT_ACTIVATION_ROLES,
-        )
+        # ------------------------------------------------------------------
+        # 1. Resolve outputs -> observer_keys / needs_eval / needs_cost
+        # ------------------------------------------------------------------
+        from src.report._spec import resolve_outputs as _resolve_outputs
 
-        if init not in ("ones", "amax", "pot_amax"):
-            raise ValueError(f"Unknown init method: {init!r}")
-        if granularity not in ("per_tensor", "per_channel"):
-            raise ValueError(
-                f"Unknown granularity: {granularity!r}"
-            )
+        observer_keys: set
+        needs_eval: bool
+        needs_cost: bool
+        observer_keys, needs_eval, needs_cost = _resolve_outputs(outputs)
+        observer_keys_set: set = set(observer_keys)
 
-        # Collect per-module input amax when init requires calibration data
-        amax_map = None
-        if init in ("amax", "pot_amax"):
-            amax_map = QuantSession._collect_input_amax(
-                calib_data, self.qmodel,
-                channel_axis=channel_axis,
-                granularity=granularity,
+        # ------------------------------------------------------------------
+        # 2. Map observer keys -> observer instances
+        # ------------------------------------------------------------------
+        observers = [_OBSERVER_MAP[k]() for k in sorted(observer_keys_set)]
+
+        # ------------------------------------------------------------------
+        # 3. SmoothQuant: compute per-channel scales, fuse weights
+        # ------------------------------------------------------------------
+        if self._config.transform == "smoothquant":
+            sq_transforms = SmoothQuantTransform.from_model_calibration(
+                self._model,
+                calib_data,
+                alpha=self._config.sq_alpha,
                 eval_fn=eval_fn,
             )
+            model = fuse_smoothquant_weights(self._model, sq_transforms)
+        else:
+            model = self._model
+            sq_transforms = None
 
-        count = 0
-        for name, module in _get_quantized_modules(self.qmodel):
-            device = _module_device(module)
+        # ------------------------------------------------------------------
+        # 4. Build base OpQuantConfig
+        # ------------------------------------------------------------------
+        op_cfg = self._config.to_op_config()
 
-            # Compute initial pre-scale
-            if init == "ones":
-                if granularity == "per_channel":
-                    out_channels = self._infer_out_channels(module)
-                    if out_channels is None:
-                        continue
-                    init_scale = torch.ones(out_channels, device=device)
-                else:
-                    init_scale = torch.ones(1, device=device)
-            else:  # "amax" or "pot_amax"
-                amax = amax_map.get(name)
-                if amax is None:
+        # ------------------------------------------------------------------
+        # 5. Create QuantSession
+        # ------------------------------------------------------------------
+        calibrator = _make_calibrator(self._config.calibrator)
+        qs = QuantSession(
+            model,
+            op_cfg,
+            calibrator=calibrator,
+            observers=observers,
+            keep_fp32=self._keep_fp32,
+        )
+
+        # ------------------------------------------------------------------
+        # 6. Patch per-layer SmoothQuant transforms into module configs
+        #
+        # ``config.to_op_config()`` creates a dummy SmoothQuantTransform
+        # with scale=1.0.  Here we substitute the *real* per-layer scale
+        # from ``from_model_calibration`` so that activation smoothing
+        # matches the weight fusion.
+        # ------------------------------------------------------------------
+        if sq_transforms:
+            for name, sq_t in sq_transforms.items():
+                module = dict(qs.qmodel.named_modules()).get(name)
+                if module is None or not hasattr(module, "cfg"):
                     continue
-                amax = amax.to(device).clamp(min=1e-12)
-                init_scale = torch.tensor(1.0, device=device) / amax
-                if init == "pot_amax":
-                    init_scale = 2 ** torch.round(torch.log2(init_scale))
+                old: OpQuantConfig = module.cfg
+                new_kwargs: Dict[str, Any] = {}
+                for f_name in old.__dataclass_fields__:
+                    scheme = getattr(old, f_name)
+                    if scheme is not None and f_name in _SMOOTH_INPUT_ROLES:
+                        new_kwargs[f_name] = QuantScheme(
+                            format=scheme.format,
+                            granularity=scheme.granularity,
+                            transform=sq_t,
+                            round_mode=scheme.round_mode,
+                            scale_format=scheme.scale_format,
+                        )
+                    else:
+                        new_kwargs[f_name] = scheme
+                module.cfg = OpQuantConfig(**new_kwargs)
 
-            # Register as buffer or Parameter
-            if trainable:
-                module.register_parameter("_pre_scale", nn.Parameter(init_scale))
-            else:
-                module.register_buffer("_pre_scale", init_scale)
-
-            # Update cfg to route through PreScaleTransform
-            transform = PreScaleTransform(
-                scale=module._pre_scale, pot=pot, channel_axis=channel_axis,
+        # ------------------------------------------------------------------
+        # 7. Prescale: two-step translation Step 2
+        # ------------------------------------------------------------------
+        if self._config.transform == "prescale":
+            qs.initialize_pre_scales(
+                calib_data,
+                init=self._config.prescale_init,
+                pot=self._config.prescale_pot,
+                granularity=self._config.prescale_granularity,
             )
-            if granularity == "per_channel":
-                module.cfg = _replace_transform_activation_only(
-                    module.cfg, transform, roles=_INPUT_ACTIVATION_ROLES,
+            if self._config.lsq_steps > 0:
+                from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+
+                opt = LayerwiseScaleOptimizer(
+                    num_steps=self._config.lsq_steps,
+                    lr=self._config.lsq_lr,
                 )
-            else:
-                module.cfg = _replace_transform(module.cfg, transform)
-            count += 1
+                qs.optimize_scales(opt, calib_data, eval_fn=eval_fn)
 
-        return count
+        # ------------------------------------------------------------------
+        # 8. Calibrate
+        # ------------------------------------------------------------------
+        with qs.calibrate():
+            _run_model(qs, calib_data, eval_fn)
 
-    def optimize_scales(
-        self,
-        optimizer: "LayerwiseScaleOptimizer",
-        calib_data: Any,
-        *,
-        eval_fn: Optional[Callable] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """Run layer-wise LSQ optimization on pre-scale parameters.
+        # ------------------------------------------------------------------
+        # 9. Analyze (only when observers are needed)
+        # ------------------------------------------------------------------
+        qsnr_per_layer: Dict[str, float] = {}
+        mse_per_layer: Dict[str, float] = {}
+        observers_data: Dict[str, Any] = {}
 
-        Args:
-            optimizer: Configured ``LayerwiseScaleOptimizer`` instance.
-            calib_data: Calibration data passed through to ``eval_fn``.
-                When ``eval_fn`` is None, must be ``List[Tensor]``.
-                When ``eval_fn`` is provided, can be any type.
-            eval_fn: ``(model, data) -> Any``. Controls model interaction
-                during LSQ. When None, falls back to iterating
-                ``model(batch) for batch in calib_data``.
+        if observers:
+            with qs.analyze(observers=observers) as ctx:
+                _run_model(qs, calib_data, eval_fn)
+            report = ctx.report()
+            observers_data = report._raw
+            # Extract per-layer qsnr and mse from the nested report structure
+            for layer, roles in observers_data.items():
+                for _role, stages in roles.items():
+                    for _stage, slices in stages.items():
+                        for _slice_key, metrics in slices.items():
+                            if "qsnr_db" in metrics:
+                                qsnr_per_layer[layer] = max(
+                                    qsnr_per_layer.get(layer, 0.0),
+                                    metrics["qsnr_db"],
+                                )
+                            if "mse" in metrics:
+                                mse_per_layer[layer] = max(
+                                    mse_per_layer.get(layer, 0.0),
+                                    metrics["mse"],
+                                )
 
-        Returns:
-            Dict mapping module name → optimized pre_scale tensor.
+        # ------------------------------------------------------------------
+        # 10. Evaluate (only when needed by the requested outputs)
+        # ------------------------------------------------------------------
+        fp32_metrics: Optional[Dict[str, float]] = None
+        quant_metrics: Optional[Dict[str, float]] = None
+        delta: Optional[Dict[str, float]] = None
 
-        Raises:
-            RuntimeError: If ``fp32_model`` is not available
-                (``keep_fp32=False`` was passed to QuantSession).
-        """
-        if self.fp32_model is None:
-            raise RuntimeError(
-                "optimize_scales requires fp32_model (keep_fp32=True)"
-            )
+        if needs_eval and eval_fn is not None:
+            if eval_data is None:
+                eval_data = calib_data
+            if self._keep_fp32 and qs.fp32_model is not None:
+                fp32_metrics = eval_fn(qs.fp32_model, eval_data)
+            quant_metrics = eval_fn(qs, eval_data)
+            if fp32_metrics is not None:
+                delta = {
+                    k: fp32_metrics[k] - quant_metrics[k]
+                    for k in fp32_metrics
+                }
 
-        return optimizer.optimize(self.qmodel, self.fp32_model, calib_data, eval_fn=eval_fn)
+        # ------------------------------------------------------------------
+        # 11. Cost (only when needed by the requested outputs)
+        # ------------------------------------------------------------------
+        cost: Any = None
+        cost_fp32: Any = None
+        if needs_cost:
+            cost = qs.estimate_cost(fp32=False)
+            if self._keep_fp32:
+                cost_fp32 = qs.estimate_cost(fp32=True)
 
-    @staticmethod
-    def _infer_out_channels(module) -> int:
-        """Infer output channel count for a module."""
-        if hasattr(module, "out_features"):
-            return module.out_features
-        if hasattr(module, "out_channels"):
-            return module.out_channels
-        if hasattr(module, "num_features"):
-            return module.num_features
-        return None
+        # ------------------------------------------------------------------
+        # 12. Return result
+        # ------------------------------------------------------------------
+        return SessionResult(
+            name=self._config.name,
+            config=self._config,
+            fp32_metrics=fp32_metrics,
+            quant_metrics=quant_metrics,
+            delta=delta,
+            qsnr_per_layer=qsnr_per_layer,
+            mse_per_layer=mse_per_layer,
+            observers_data=observers_data,
+            cost=cost,
+            cost_fp32=cost_fp32,
+            sq_transforms=sq_transforms,
+        )
 
-    @staticmethod
-    def _collect_input_amax(
-        calib_data: Any,
-        model: nn.Module,
-        *,
-        channel_axis: int = -1,
-        granularity: str = "per_tensor",
-        eval_fn: Optional[Callable] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """Collect per-module input activation max-abs via forward hooks.
 
-        Runs a forward pass with *calib_data* on *model*, hooking into
-        every quantized module's input to compute amax.
+# ---------------------------------------------------------------------------
+# SessionResult
+# ---------------------------------------------------------------------------
 
-        Args:
-            calib_data: Calibration data passed through to ``eval_fn``.
-                When ``eval_fn`` is None, must be ``List[Tensor]``.
-                When ``eval_fn`` is provided, can be any type.
-            model: Quantized model.
-            channel_axis: Which dim is the channel (default -1, last dim).
-            granularity: ``"per_tensor"`` — scalar amax per module;
-                         ``"per_channel"`` — 1D amax along channel_axis.
-            eval_fn: ``(model, data) -> Any``. Controls how the model is
-                called during activation capture. When None, falls back to
-                ``for batch in calib_data: model(batch)``.
 
-        Returns:
-            Dict mapping module name → amax tensor (shape ``()`` for
-            per_tensor, ``(C,)`` for per_channel).
-        """
-        from src.calibration.lsq_optimizer import _get_quantized_modules
+@dataclass
+class SessionResult:
+    """Result of running a single Session (one QuantConfig).
 
-        amax_store: Dict[str, torch.Tensor] = {}
-        handles = []
+    This replaces pipeline/runner.py:ExperimentResult with the addition
+    of the config field and sq_transforms cache (fixing C1).
+    """
 
-        def _make_hook(name):
-            def _fn(_module, inp, _out):
-                x = inp[0].detach()
-                if granularity == "per_channel":
-                    ndim = x.ndim
-                    ax = channel_axis if channel_axis >= 0 else ndim + channel_axis
-                    reduce_dims = tuple(d for d in range(ndim) if d != ax)
-                    batch_amax = torch.amax(torch.abs(x), dim=reduce_dims)
-                else:
-                    batch_amax = torch.amax(torch.abs(x)).reshape(1)
-                if name in amax_store:
-                    amax_store[name] = torch.maximum(amax_store[name], batch_amax)
-                else:
-                    amax_store[name] = batch_amax
-            return _fn
-
-        for qname, qmod in _get_quantized_modules(model):
-            handles.append(qmod.register_forward_hook(_make_hook(qname)))
-
-        try:
-            with torch.no_grad():
-                if eval_fn is not None:
-                    eval_fn(model, calib_data)
-                else:
-                    for batch in calib_data:
-                        model(batch)
-        finally:
-            for h in handles:
-                h.remove()
-
-        return amax_store
-
-    # ------------------------------------------------------------------
-    # Delegation
-    # ------------------------------------------------------------------
-
-    def train(self, mode: bool = True) -> "QuantSession":
-        """Set training mode on both fp32 and quantized models."""
-        self.qmodel.train(mode)
-        if self.fp32_model is not None:
-            self.fp32_model.train(mode)
-        return self
-
-    def eval(self) -> "QuantSession":
-        """Set evaluation mode on both fp32 and quantized models."""
-        return self.train(False)
-
-    def parameters(self):
-        """Return an iterator over the quantized model's parameters."""
-        return self.qmodel.parameters()
-
-    def state_dict(self):
-        """Return the quantized model's state_dict."""
-        return self.qmodel.state_dict()
-
-    def load_state_dict(self, state_dict, strict: bool = True):
-        """Load a state_dict into the quantized model."""
-        return self.qmodel.load_state_dict(state_dict, strict=strict)
+    name: str
+    config: QuantConfig
+    fp32_metrics: Optional[Dict[str, float]] = None
+    quant_metrics: Optional[Dict[str, float]] = None
+    delta: Optional[Dict[str, float]] = None
+    qsnr_per_layer: Dict[str, float] = field(default_factory=dict)
+    mse_per_layer: Dict[str, float] = field(default_factory=dict)
+    observers_data: Dict[str, Any] = field(default_factory=dict)
+    cost: Any = None
+    cost_fp32: Any = None
+    sq_transforms: Optional[Dict[str, Any]] = None
