@@ -556,9 +556,12 @@ def _replace_module(
     only elemwise (storage) quantization is applied.  This matches MX architecture
     where non-linear ops only go through ``quantize_elemwise_op``.
 
-    When *quantize_nonlinear* is True (default), the same storage-only derivation
-    applies today.  The flag is reserved for future "extra quantization" steps
-    beyond MX (e.g. applying MX per_block compute to non-linear ops).
+    When *quantize_nonlinear* is True (default), norm modules (BatchNorm,
+    LayerNorm, GroupNorm, RMSNorm) receive the full per_block compute scheme
+    via ``_nonlinear_true_cfg(cfg)`` — operand entry gets storage → per_block
+    two-level quantization matching matmul-family ops.  Activation, softmax,
+    and pooling modules currently apply storage-only derivation (per_block
+    entry quant is added in a follow-up task).
     """
     # Skip if already quantized (has cfg attribute)
     if hasattr(module, "cfg"):
