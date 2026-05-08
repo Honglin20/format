@@ -1390,3 +1390,405 @@ class TestQuantizeNonLinearSwitch:
         # Both modes produce identical output: storage applied to nonlinear in both cases
         assert torch.equal(out_false, out_true), \
             "True and False should produce identical output with current configs"
+
+    # ------------------------------------------------------------------
+    # quantize_nonlinear=False — backward gradient integrity
+    # ------------------------------------------------------------------
+
+    def test_backward_gradients_not_zero_with_storage(self):
+        """quantize_nonlinear=False + bf16 storage: backward gradients are non-zero.
+
+        Regression test for Bug 1: pre/post quantize() calls outside autograd
+        Function boundaries created zero-gradient edges via torch.floor.
+        """
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="int8",
+            storage_bits=16,
+            storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = _make_model_with_all_op_types()
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=False)
+        qmodel.train()
+
+        x = torch.randn(2, 3, 8, 8, requires_grad=True)
+        out = qmodel(x)
+        loss = out.sum()
+        loss.backward()
+
+        # Every parameter with requires_grad must have non-None gradient
+        for name, param in qmodel.named_parameters():
+            assert param.grad is not None, \
+                f"param {name} has None gradient (zero-gradient edge?)"
+            assert param.grad.abs().sum() > 0, \
+                f"param {name} has all-zero gradient (zero-gradient edge?)"
+
+        # Input gradient must also be non-zero
+        assert x.grad is not None, "x.grad is None"
+        assert x.grad.abs().sum() > 0, "x.grad is all-zero"
+
+    def test_norm_quantize_backprop_is_true_with_storage(self):
+        """Regression test for Bug 2: norm constructors must receive
+        quantize_backprop=True when storage is present.
+
+        _make_ln/gn/bn/rms_norm were passing cfg.is_training from the original
+        cfg (backward fields all None → False), causing norm backward to run
+        in fp32 instead of bf16-quantized.
+        """
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="int8",
+            storage_bits=16,
+            storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = _make_model_with_all_op_types()
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=False)
+
+        # All QuantizedLayerNorm/BatchNorm/GroupNorm/RMSNorm must have
+        # quantize_backprop=True when storage is present
+        from src.ops.norm import (
+            QuantizedLayerNorm, QuantizedBatchNorm1d, QuantizedBatchNorm2d,
+            QuantizedBatchNorm3d, QuantizedGroupNorm, QuantizedRMSNorm,
+        )
+        norm_types = (
+            QuantizedLayerNorm, QuantizedBatchNorm1d, QuantizedBatchNorm2d,
+            QuantizedBatchNorm3d, QuantizedGroupNorm, QuantizedRMSNorm,
+        )
+        found = False
+        for name, mod in qmodel.named_modules():
+            if isinstance(mod, norm_types):
+                found = True
+                assert mod.quantize_backprop is True, \
+                    f"{name} ({type(mod).__name__}) has quantize_backprop={mod.quantize_backprop}, expected True"
+                assert mod.cfg.is_training, \
+                    f"{name} ({type(mod).__name__}) cfg.is_training=False (backward fields missing?)"
+        assert found, "No norm modules found in quantized model"
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for config derivation helpers
+# ---------------------------------------------------------------------------
+
+class TestNonMatmulCfg:
+    """Direct unit tests for _non_matmul_cfg, _activation_cfg, _norm_inner_scheme."""
+
+    @staticmethod
+    def _make_bf16_storage():
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
+        return QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+
+    @staticmethod
+    def _make_fp8_per_block():
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.base import FormatBase
+        fmt = FormatBase.from_str("fp8_e4m3")
+        return QuantScheme(format=fmt, granularity=GranularitySpec.per_block(size=32, axis=-1))
+
+    @staticmethod
+    def _make_per_tensor_elemwise():
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
+        return QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+
+    # ---- _non_matmul_cfg ----
+
+    def test_non_matmul_cfg_with_storage(self):
+        """Case 1: storage present → backward fields populated from storage."""
+        from src.session._model import _non_matmul_cfg
+
+        storage = self._make_bf16_storage()
+        per_block = self._make_fp8_per_block()
+        cfg = OpQuantConfig(input=per_block, weight=per_block, storage=storage)
+
+        result = _non_matmul_cfg(cfg)
+
+        assert result.storage is storage
+        assert result.grad_output is storage  # cfg.grad_output was None, falls back to storage
+        assert result.grad_input is storage
+        assert result.grad_weight is storage
+        assert result.grad_bias is storage
+        assert result.is_training is True
+
+    def test_non_matmul_cfg_mx_per_block_no_storage(self):
+        """Case 2: MX per_block compute, no storage → empty config."""
+        from src.session._model import _non_matmul_cfg
+
+        per_block = self._make_fp8_per_block()
+        cfg = OpQuantConfig(input=per_block, weight=per_block, storage=None)
+
+        result = _non_matmul_cfg(cfg)
+
+        assert result == OpQuantConfig()
+        assert result.storage is None
+        assert result.is_training is False
+
+    def test_non_matmul_cfg_compat_per_tensor(self):
+        """Case 3: compat-style config with per_tensor input → pass through."""
+        from src.session._model import _non_matmul_cfg
+
+        per_tensor = self._make_per_tensor_elemwise()
+        cfg = OpQuantConfig(input=per_tensor, weight=per_tensor, storage=None)
+
+        result = _non_matmul_cfg(cfg)
+
+        assert result is cfg  # pass through unchanged
+        assert result.input is per_tensor
+
+    # ---- _activation_cfg ----
+
+    def test_activation_cfg_with_storage(self):
+        """Case 1: storage present → input=storage, grad_input=storage."""
+        from src.session._model import _activation_cfg
+
+        storage = self._make_bf16_storage()
+        per_block = self._make_fp8_per_block()
+        cfg = OpQuantConfig(input=per_block, weight=per_block, storage=storage)
+
+        result = _activation_cfg(cfg)
+
+        assert result.storage is storage
+        assert result.input is storage  # input set to storage
+        assert result.grad_input is storage  # backward field populated
+        assert result.is_training is True
+
+    def test_activation_cfg_mx_per_block_no_storage(self):
+        """Case 2: MX per_block compute, no storage → empty config."""
+        from src.session._model import _activation_cfg
+
+        per_block = self._make_fp8_per_block()
+        cfg = OpQuantConfig(input=per_block, weight=per_block, storage=None)
+
+        result = _activation_cfg(cfg)
+
+        assert result == OpQuantConfig()
+        assert result.is_training is False
+
+    def test_activation_cfg_compat_per_tensor(self):
+        """Case 3: compat-style config with per_tensor input → pass through."""
+        from src.session._model import _activation_cfg
+
+        per_tensor = self._make_per_tensor_elemwise()
+        cfg = OpQuantConfig(input=per_tensor, storage=None)
+
+        result = _activation_cfg(cfg)
+
+        assert result is cfg  # pass through unchanged
+
+    # ---- _norm_inner_scheme ----
+
+    def test_norm_inner_scheme_with_storage(self):
+        """storage present → return storage."""
+        from src.session._model import _norm_inner_scheme
+
+        storage = self._make_bf16_storage()
+        per_block = self._make_fp8_per_block()
+        cfg = OpQuantConfig(input=per_block, storage=storage)
+
+        assert _norm_inner_scheme(cfg) is storage
+
+    def test_norm_inner_scheme_per_tensor_no_storage(self):
+        """storage=None, input=per_tensor → return input."""
+        from src.session._model import _norm_inner_scheme
+
+        per_tensor = self._make_per_tensor_elemwise()
+        cfg = OpQuantConfig(input=per_tensor, storage=None)
+
+        assert _norm_inner_scheme(cfg) is per_tensor
+
+    def test_norm_inner_scheme_per_block_no_storage(self):
+        """storage=None, input=per_block → return None (MX bfloat=0)."""
+        from src.session._model import _norm_inner_scheme
+
+        per_block = self._make_fp8_per_block()
+        cfg = OpQuantConfig(input=per_block, storage=None)
+
+        assert _norm_inner_scheme(cfg) is None
+
+    def test_norm_inner_scheme_all_none(self):
+        """storage=None, input=None → return None."""
+        from src.session._model import _norm_inner_scheme
+
+        assert _norm_inner_scheme(OpQuantConfig()) is None
+
+    # ---- _nonlinear_true_cfg ----
+
+    def test_nonlinear_true_cfg_with_storage_and_per_block(self):
+        """storage + per_block compute: keeps compute fields, populates backward from storage."""
+        from src.session._model import _nonlinear_true_cfg
+
+        storage = self._make_bf16_storage()
+        per_block = self._make_fp8_per_block()
+        cfg = OpQuantConfig(input=per_block, weight=per_block, bias=per_block, storage=storage)
+
+        result = _nonlinear_true_cfg(cfg)
+
+        # Forward compute fields preserved
+        assert result.storage is storage
+        assert result.input is per_block       # NOT stripped
+        assert result.weight is per_block      # NOT stripped
+        assert result.bias is per_block        # NOT stripped
+        # Backward fields populated from storage
+        assert result.grad_output is storage
+        assert result.grad_input is storage
+        assert result.grad_weight is storage
+        assert result.grad_bias is storage
+        assert result.is_training is True
+
+    def test_nonlinear_true_cfg_mx_per_block_no_storage(self):
+        """MX per_block compute, no storage → keeps compute, backward stays None."""
+        from src.session._model import _nonlinear_true_cfg
+
+        per_block = self._make_fp8_per_block()
+        cfg = OpQuantConfig(input=per_block, weight=per_block, storage=None)
+
+        result = _nonlinear_true_cfg(cfg)
+
+        assert result.storage is None
+        assert result.input is per_block        # kept
+        assert result.weight is per_block       # kept
+        assert result.grad_output is None       # no storage → no backward
+        assert result.is_training is False
+
+    def test_nonlinear_true_cfg_compat_per_tensor(self):
+        """Compat-style per_tensor → pass through unchanged (same as _non_matmul_cfg)."""
+        from src.session._model import _nonlinear_true_cfg
+
+        per_tensor = self._make_per_tensor_elemwise()
+        cfg = OpQuantConfig(input=per_tensor, storage=None)
+
+        result = _nonlinear_true_cfg(cfg)
+
+        assert result is cfg  # pass through unchanged
+
+    def test_nonlinear_true_cfg_preserves_explicit_backward(self):
+        """When cfg has explicit backward fields, they take precedence over storage fallback."""
+        from src.session._model import _nonlinear_true_cfg
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
+
+        storage = self._make_bf16_storage()
+        per_block = self._make_fp8_per_block()
+        # explicit backward scheme different from storage
+        explicit_bw = QuantScheme(
+            format=BFloat16Format(), granularity=GranularitySpec.per_tensor()
+        )
+        cfg = OpQuantConfig(
+            input=per_block, weight=per_block,
+            storage=storage,
+            grad_input=explicit_bw,   # explicit takes precedence
+        )
+
+        result = _nonlinear_true_cfg(cfg)
+
+        assert result.grad_input is explicit_bw  # explicit preserved, not storage
+        assert result.grad_output is storage     # fallback to storage
+
+    def test_nonlinear_true_cfg_empty_cfg(self):
+        """Empty cfg → returns empty cfg."""
+        from src.session._model import _nonlinear_true_cfg
+
+        cfg = OpQuantConfig()
+        result = _nonlinear_true_cfg(cfg)
+
+        assert result.storage is None
+        assert result.input is None
+        assert result.weight is None
+        assert result.is_training is False
+
+
+# ---------------------------------------------------------------------------
+# QuantConfig storage_format tests
+# ---------------------------------------------------------------------------
+
+class TestStorageFormat:
+    """QuantConfig storage_format: explicit format name for element-wise storage."""
+
+    def test_fp8_e4m3_storage(self):
+        cfg = QuantConfig(storage_format="fp8_e4m3")
+        op_cfg = cfg.to_op_config()
+
+        assert op_cfg.storage is not None
+        fmt = op_cfg.storage.format
+        assert fmt.name == "fp8_e4m3"
+        assert fmt.ebits == 4
+        assert fmt.mbits == 5
+        assert op_cfg.storage.granularity.mode.name == "PER_TENSOR"
+
+    def test_fp4_e2m1_storage(self):
+        cfg = QuantConfig(storage_format="fp4_e2m1")
+        op_cfg = cfg.to_op_config()
+
+        assert op_cfg.storage is not None
+        fmt = op_cfg.storage.format
+        assert fmt.name == "fp4_e2m1"
+        assert fmt.ebits == 2
+        assert fmt.mbits == 3
+        assert op_cfg.storage.granularity.mode.name == "PER_TENSOR"
+
+    def test_fp8_e5m2_storage(self):
+        cfg = QuantConfig(storage_format="fp8_e5m2")
+        op_cfg = cfg.to_op_config()
+
+        assert op_cfg.storage is not None
+        fmt = op_cfg.storage.format
+        assert fmt.name == "fp8_e5m2"
+        assert fmt.ebits == 5
+        assert fmt.mbits == 4
+
+    def test_bfloat16_storage_via_format(self):
+        cfg = QuantConfig(storage_format="bfloat16")
+        op_cfg = cfg.to_op_config()
+
+        assert op_cfg.storage is not None
+        fmt = op_cfg.storage.format
+        assert fmt.name == "bfloat16"
+        assert fmt.ebits == 8
+        assert fmt.mbits == 9
+
+    def test_storage_format_takes_precedence_over_bits(self):
+        """storage_format and storage_bits cannot coexist."""
+        with pytest.raises(ValueError, match="cannot be set together"):
+            QuantConfig(storage_format="fp8_e4m3", storage_bits=8)
+
+    def test_invalid_storage_format_raises(self):
+        with pytest.raises(ValueError, match="Unknown storage_format"):
+            QuantConfig(storage_format="fp99_eXmY")
+
+    def test_from_descriptor_storage_format(self):
+        desc = {"format": "int8", "granularity": "per_tensor",
+                "storage_format": "fp4_e2m1"}
+        cfg = QuantConfig.from_descriptor(desc)
+        op_cfg = cfg.to_op_config()
+
+        assert op_cfg.storage is not None
+        assert op_cfg.storage.format.name == "fp4_e2m1"
+
+    def test_from_descriptor_storage_format_invalid_type(self):
+        desc = {"format": "int8", "granularity": "per_tensor",
+                "storage_format": 123}
+        with pytest.raises(TypeError, match="'storage_format' must be a string"):
+            QuantConfig.from_descriptor(desc)
+
+    def test_legacy_fp_key_still_works(self):
+        """Legacy 'fp' key in from_descriptor still produces correct fp8_e5m2."""
+        desc = {"format": "int8", "granularity": "per_tensor", "fp": 8}
+        cfg = QuantConfig.from_descriptor(desc)
+        op_cfg = cfg.to_op_config()
+
+        assert op_cfg.storage is not None
+        assert op_cfg.storage.format.name == "fp8"
+        assert op_cfg.storage.format.ebits == 5
+        assert op_cfg.storage.format.mbits == 4  # correct fp8_e5m2

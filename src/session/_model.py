@@ -98,6 +98,43 @@ def _activation_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
     return cfg  # compat-style: input carries per_tensor elemwise scheme
 
 
+def _nonlinear_true_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
+    """Derive an OpQuantConfig that keeps per_block compute for operand entry.
+
+    Used when ``quantize_nonlinear=True`` — norm/activation/pool operands
+    receive the same storage -> per_block two-level quantization as matmul ops,
+    while backward fields stay storage-only.
+
+    Three cases:
+    - Two-level model with storage: keep storage + input/weight/bias per_block,
+      populate backward from storage.
+    - MX with bfloat=0 (storage=None, input is per_block MX compute):
+      keep per_block compute, backward stays None.
+    - Compat-style config where input carries per_tensor elemwise scheme:
+      pass through unchanged (no separate compute quant to add).
+    """
+    if cfg.storage is not None:
+        return OpQuantConfig(
+            storage=cfg.storage,
+            input=cfg.input,              # per_block compute kept
+            weight=cfg.weight,            # per_block compute kept
+            bias=cfg.bias,                # per_block compute kept
+            grad_output=cfg.grad_output or cfg.storage,
+            grad_input=cfg.grad_input or cfg.storage,
+            grad_weight=cfg.grad_weight or cfg.storage,
+            grad_bias=cfg.grad_bias or cfg.storage,
+        )
+    # No storage: either compat-style (input is per_tensor elemwise) or MX bfloat=0
+    if _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
+        # MX bfloat=0: keep compute, backward stays None
+        return OpQuantConfig(
+            input=cfg.input,
+            weight=cfg.weight,
+            bias=cfg.bias,
+        )
+    return cfg  # compat-style: input/weight carry per_tensor elemwise schemes
+
+
 # ---------------------------------------------------------------------------
 # Module type → Quantized constructor + param extractor
 # ---------------------------------------------------------------------------
