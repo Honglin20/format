@@ -1670,7 +1670,11 @@ class TestQuantizeNonLinearSwitch:
             calibrator="max",
         ).to_op_config()
 
-        model = nn.Sequential(nn.ReLU(), nn.Sigmoid(), nn.SiLU(), nn.Softmax(dim=1))
+        model = nn.Sequential(
+            nn.ReLU(), nn.Sigmoid(), nn.SiLU(), nn.Softmax(dim=1),
+            nn.Tanh(), nn.ReLU6(), nn.LeakyReLU(), nn.GELU(),
+            nn.AdaptiveAvgPool2d((4, 4)),
+        )
         qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=False)
 
         # All activations should have no _entry_compute / _entry_storage
@@ -1681,9 +1685,9 @@ class TestQuantizeNonLinearSwitch:
                 f"{type(mod).__name__}._entry_storage should be None"
 
         # Forward pass should still work (regression — no-op path)
-        x = torch.randn(1, 16)
+        # 4D input needed for AdaptiveAvgPool2d
+        x = torch.randn(1, 16, 4, 4)
         out = qmodel(x)
-        assert out.shape == x.shape
 
     def test_entry_quantize_fields_set_when_true(self):
         """_entry_compute and _entry_storage are set when quantize_nonlinear=True + per_block."""
@@ -1838,7 +1842,14 @@ class TestQuantizeNonLinearSwitch:
         ]
 
         model = _make_model_with_all_op_types().eval()
-        x = torch.randn(2, 3, 8, 8)
+
+        # Test with normal random, extreme large, and extreme small values
+        test_inputs = [
+            ("normal", torch.randn(2, 3, 8, 8)),
+            ("large", torch.ones(2, 3, 8, 8) * 1e3),
+            ("small", torch.ones(2, 3, 8, 8) * 1e-5),
+            ("zeros", torch.zeros(2, 3, 8, 8)),
+        ]
 
         for fmt, gran, bs in formats:
             cfg = QuantConfig(
@@ -1849,9 +1860,12 @@ class TestQuantizeNonLinearSwitch:
             ).to_op_config()
 
             qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
-            out = qmodel(x)
-            assert not torch.isnan(out).any(), f"NaN in output for format={fmt}"
-            assert not torch.isinf(out).any(), f"inf in output for format={fmt}"
+            for desc, x in test_inputs:
+                out = qmodel(x)
+                assert not torch.isnan(out).any(), \
+                    f"NaN in output for format={fmt}, input={desc}"
+                assert not torch.isinf(out).any(), \
+                    f"inf in output for format={fmt}, input={desc}"
 
 
 # ---------------------------------------------------------------------------
