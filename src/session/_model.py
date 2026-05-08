@@ -133,7 +133,15 @@ def _nonlinear_true_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
                 grad_weight=cfg.grad_weight or cfg.storage,
                 grad_bias=cfg.grad_bias or cfg.storage,
             )
-        return OpQuantConfig(storage=cfg.storage)
+        # Storage present but no non-trivial compute (per_tensor or None):
+        # apply storage-only with backward, matching _non_matmul_cfg behavior.
+        return OpQuantConfig(
+            storage=cfg.storage,
+            grad_output=cfg.grad_output or cfg.storage,
+            grad_input=cfg.grad_input or cfg.storage,
+            grad_weight=cfg.grad_weight or cfg.storage,
+            grad_bias=cfg.grad_bias or cfg.storage,
+        )
     # No storage: either compat-style (input is per_tensor elemwise) or MX bfloat=0
     if _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
         # MX bfloat=0: keep compute, backward stays None

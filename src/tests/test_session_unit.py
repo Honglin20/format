@@ -2103,6 +2103,33 @@ class TestNonMatmulCfg:
         assert result.weight is None
         assert result.is_training is False
 
+    def test_nonlinear_true_cfg_storage_per_tensor_compute(self):
+        """storage + per_tensor compute (has_compute=False): backward populated, compute stripped.
+
+        This is the key edge case: when storage exists but input/weight are only
+        per_tensor (not per_block), the function should behave like
+        _non_matmul_cfg — populate backward fields from storage without
+        preserving the per_tensor compute fields.
+        """
+        from src.session._model import _nonlinear_true_cfg
+
+        storage = self._make_bf16_storage()
+        per_tensor = self._make_per_tensor_elemwise()
+        cfg = OpQuantConfig(input=per_tensor, weight=per_tensor, storage=storage)
+
+        result = _nonlinear_true_cfg(cfg)
+
+        assert result.storage is storage
+        # per_tensor compute fields should NOT be preserved (no per_block)
+        assert result.input is None
+        assert result.weight is None
+        # Backward fields populated from storage (matches _non_matmul_cfg)
+        assert result.grad_output is storage
+        assert result.grad_input is storage
+        assert result.grad_weight is storage
+        assert result.grad_bias is storage
+        assert result.is_training is True
+
 
 # ---------------------------------------------------------------------------
 # QuantConfig storage_format tests
