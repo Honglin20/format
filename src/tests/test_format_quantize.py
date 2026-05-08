@@ -434,3 +434,123 @@ def test_per_channel_negative_axis():
     result_neg1 = fmt.quantize(x, GranularitySpec.per_channel(axis=-1), "nearest")
     result_pos = fmt.quantize(x, GranularitySpec.per_channel(axis=x.ndim - 1), "nearest")
     assert torch.allclose(result_neg1, result_pos, atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# 16. FormatBase._quantize_per_block() — direct method tests
+# ---------------------------------------------------------------------------
+
+class TestPerBlockQuantizeDirect:
+
+    @pytest.mark.parametrize("fmt_name", ["int8", "fp8_e4m3", "fp8_e5m2",
+                                           "fp6_e3m2", "fp4_e2m1"])
+    def test_same_as_format_quantize_dispatch(self, fmt_name):
+        """_quantize_per_block() == fmt.quantize(x, PER_BLOCK, ...)."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+        gran = GranularitySpec.per_block(32)
+
+        via_dispatch = fmt.quantize(x, gran, "nearest")
+        via_direct = fmt._quantize_per_block(x, gran, "nearest")
+        assert torch.equal(via_dispatch, via_direct), \
+            f"{fmt_name}: dispatch != direct"
+
+    @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "int8"])
+    def test_output_finite(self, fmt_name):
+        """Per-block quantized output should always be finite."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+        result = fmt._quantize_per_block(
+            x, GranularitySpec.per_block(32), "nearest")
+        assert result.isfinite().all(), \
+            f"{fmt_name}: non-finite values in output"
+
+    @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "fp4_e2m1"])
+    def test_idempotent(self, fmt_name):
+        """Quantizing twice should be idempotent (or nearly)."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+        gran = GranularitySpec.per_block(32)
+
+        once = fmt._quantize_per_block(x, gran, "nearest")
+        twice = fmt._quantize_per_block(once, gran, "nearest")
+        assert torch.allclose(once, twice, atol=1e-6), \
+            f"{fmt_name}: not idempotent"
+
+    @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "int8"])
+    @pytest.mark.parametrize("block_size", [16, 32, 64])
+    def test_various_block_sizes(self, fmt_name, block_size):
+        """Different block sizes should produce finite outputs."""
+        torch.manual_seed(42)
+        x = torch.randn(4, block_size * 3)
+        fmt = FormatBase.from_str(fmt_name)
+        result = fmt._quantize_per_block(
+            x, GranularitySpec.per_block(block_size), "nearest")
+        assert result.isfinite().all()
+
+    def test_round_mode_effect(self):
+        """floor vs nearest should differ for low-precision formats."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str("fp4_e2m1")
+        gran = GranularitySpec.per_block(32)
+
+        nearest = fmt._quantize_per_block(x, gran, "nearest")
+        floor = fmt._quantize_per_block(x, gran, "floor")
+        assert not torch.equal(nearest, floor), \
+            "floor and nearest should differ for fp4"
+
+    def test_shape_preserved(self):
+        """Output shape must equal input shape for various tensor ranks."""
+        torch.manual_seed(42)
+        fmt = FormatBase.from_str("fp8_e4m3")
+        gran = GranularitySpec.per_block(32)
+
+        for shape in [(4, 64), (2, 3, 64), (1, 2, 3, 128)]:
+            x = torch.randn(*shape)
+            result = fmt._quantize_per_block(x, gran, "nearest")
+            assert result.shape == x.shape, \
+                f"shape mismatch: {result.shape} != {x.shape}"
+
+    @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "int8"])
+    def test_small_values(self, fmt_name):
+        """Values near zero should not become NaN or Inf."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64) * 1e-6
+        fmt = FormatBase.from_str(fmt_name)
+        result = fmt._quantize_per_block(
+            x, GranularitySpec.per_block(32), "nearest")
+        assert result.isfinite().all(), \
+            f"{fmt_name}: small values produced non-finite results"
+
+    @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "int8"])
+    def test_large_values(self, fmt_name):
+        """Large values should not become NaN."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64) * 1e6
+        fmt = FormatBase.from_str(fmt_name)
+        result = fmt._quantize_per_block(
+            x, GranularitySpec.per_block(32), "nearest")
+        assert not result.isnan().any(), \
+            f"{fmt_name}: large values produced NaN"
+
+    def test_zero_input(self):
+        """Zero input should produce zero output."""
+        x = torch.zeros(4, 64)
+        fmt = FormatBase.from_str("fp8_e4m3")
+        result = fmt._quantize_per_block(
+            x, GranularitySpec.per_block(32), "nearest")
+        assert (result == 0).all()
+
+    @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "int8"])
+    def test_no_nan_in_output(self, fmt_name):
+        """Output should never contain NaN for random normal inputs."""
+        torch.manual_seed(42)
+        x = torch.randn(8, 128)
+        fmt = FormatBase.from_str(fmt_name)
+        result = fmt._quantize_per_block(
+            x, GranularitySpec.per_block(32), "nearest")
+        assert not result.isnan().any()
