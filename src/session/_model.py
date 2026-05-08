@@ -114,16 +114,26 @@ def _nonlinear_true_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
       pass through unchanged (no separate compute quant to add).
     """
     if cfg.storage is not None:
-        return OpQuantConfig(
-            storage=cfg.storage,
-            input=cfg.input,              # per_block compute kept
-            weight=cfg.weight,            # per_block compute kept
-            bias=cfg.bias,                # per_block compute kept
-            grad_output=cfg.grad_output or cfg.storage,
-            grad_input=cfg.grad_input or cfg.storage,
-            grad_weight=cfg.grad_weight or cfg.storage,
-            grad_bias=cfg.grad_bias or cfg.storage,
+        # Only keep input/weight/bias when they carry non-trivial compute
+        # (per_block or per_channel). Per_tensor schemes represent elemwise
+        # (storage-level) quantization — keeping them would add an extra
+        # quantization step on top of storage, which is not intended.
+        has_compute = (
+            (cfg.input is not None and cfg.input.granularity.mode.name != "PER_TENSOR")
+            or (cfg.weight is not None and cfg.weight.granularity.mode.name != "PER_TENSOR")
         )
+        if has_compute:
+            return OpQuantConfig(
+                storage=cfg.storage,
+                input=cfg.input,
+                weight=cfg.weight,
+                bias=cfg.bias,
+                grad_output=cfg.grad_output or cfg.storage,
+                grad_input=cfg.grad_input or cfg.storage,
+                grad_weight=cfg.grad_weight or cfg.storage,
+                grad_bias=cfg.grad_bias or cfg.storage,
+            )
+        return OpQuantConfig(storage=cfg.storage)
     # No storage: either compat-style (input is per_tensor elemwise) or MX bfloat=0
     if _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
         # MX bfloat=0: keep compute, backward stays None

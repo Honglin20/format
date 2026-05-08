@@ -1352,17 +1352,18 @@ class TestQuantizeNonLinearSwitch:
                 f"{name} ({type_name}) should be Quantized*"
 
     def test_storage_bits_nonlinear_modes_differ_with_wired_flag(self):
-        """With storage_bits>0 + compat config, modes now differ.
+        """With storage_bits>0 + per_block weight, modes now differ.
 
         quantize_nonlinear=True preserves input/weight compute schemes for
-        nonlinear ops, while False strips to storage-only. Outputs therefore
-        differ — True applies extra compute quantization on top of storage.
+        nonlinear ops, while False strips to storage-only. Directly verifies
+        norm module cfg fields rather than output (output comparison is flaky
+        because random tensors sometimes align with the int8 quantization grid).
         """
         import copy
         from src.session._model import quantize_model
 
         cfg = QuantConfig(
-            w_format="int8",
+            w_format="int8", w_granularity="per_block", w_block_size=32,
             storage_bits=16,
             storage_kind="bfloat",
             calibrator="max",
@@ -1383,14 +1384,47 @@ class TestQuantizeNonLinearSwitch:
         )
         qmodel_true.eval()
 
+        from src.ops.norm import (
+            QuantizedLayerNorm, QuantizedBatchNorm1d, QuantizedBatchNorm2d,
+            QuantizedBatchNorm3d, QuantizedGroupNorm, QuantizedRMSNorm,
+        )
+        norm_types = (
+            QuantizedLayerNorm, QuantizedBatchNorm1d, QuantizedBatchNorm2d,
+            QuantizedBatchNorm3d, QuantizedGroupNorm, QuantizedRMSNorm,
+        )
+
+        # True: norm modules have per_block weight (and per_tensor input kept
+        # because has_compute is True when weight is per_block).
+        found_true = False
+        for name, mod in qmodel_true.named_modules():
+            if isinstance(mod, norm_types):
+                found_true = True
+                assert mod.cfg.input is not None, \
+                    f"True {name} input should not be None (weight is per_block)"
+                assert mod.cfg.weight is not None, \
+                    f"True {name} weight should not be None"
+                assert mod.cfg.weight.granularity.mode.name == "PER_BLOCK", \
+                    f"True {name} weight gran={mod.cfg.weight.granularity.mode.name}, expected PER_BLOCK"
+        assert found_true, "No norm modules in True model"
+
+        # False: norm modules have storage-only (input/weight stripped)
+        found_false = False
+        for name, mod in qmodel_false.named_modules():
+            if isinstance(mod, norm_types):
+                found_false = True
+                assert mod.cfg.input is None, \
+                    f"False {name} input should be None (stripped to storage)"
+                assert mod.cfg.weight is None, \
+                    f"False {name} weight should be None (stripped to storage)"
+        assert found_false, "No norm modules in False model"
+
+        # Forward pass still works
         x = torch.randn(2, 3, 8, 8)
         with torch.no_grad():
+            out = qmodel_true(x)
             out_false = qmodel_false(x)
-            out_true = qmodel_true(x)
-
-        # True adds compute quantization on norm/activation inputs, so outputs differ
-        assert not torch.equal(out_false, out_true), \
-            "True and False should differ — True adds compute quantization to nonlinear ops"
+        assert out.shape == (2, 10)
+        assert not torch.isnan(out).any()
 
     # ------------------------------------------------------------------
     # quantize_nonlinear=False — backward gradient integrity
@@ -1472,6 +1506,153 @@ class TestQuantizeNonLinearSwitch:
                 assert mod.cfg.is_training, \
                     f"{name} ({type(mod).__name__}) cfg.is_training=False (backward fields missing?)"
         assert found, "No norm modules found in quantized model"
+
+    # ------------------------------------------------------------------
+    # quantize_nonlinear=True — norm per_block compute verification
+    # ------------------------------------------------------------------
+
+    def test_quantize_nonlinear_true_norm_has_per_block_input(self):
+        """True + per_block compute: norm modules receive cfg.input = per_block (not stripped)."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32,
+            a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+            storage_bits=16, storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = nn.Sequential(
+            nn.Conv2d(3, 8, 3, padding=1),
+            nn.BatchNorm2d(8),
+            nn.LayerNorm(8),
+        )
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+
+        # BatchNorm should have per_block input/weight
+        bn = qmodel[1]
+        assert bn.cfg.input is not None, "BatchNorm cfg.input should not be None"
+        assert bn.cfg.input.granularity.mode.name == "PER_BLOCK", \
+            f"BatchNorm input gran={bn.cfg.input.granularity.mode.name}, expected PER_BLOCK"
+        assert bn.cfg.weight is not None, "BatchNorm cfg.weight should not be None"
+        assert bn.cfg.weight.granularity.mode.name == "PER_BLOCK", \
+            f"BatchNorm weight gran={bn.cfg.weight.granularity.mode.name}, expected PER_BLOCK"
+
+        # LayerNorm should have per_block input/weight
+        ln = qmodel[2]
+        assert ln.cfg.input is not None, "LayerNorm cfg.input should not be None"
+        assert ln.cfg.input.granularity.mode.name == "PER_BLOCK", \
+            f"LayerNorm input gran={ln.cfg.input.granularity.mode.name}, expected PER_BLOCK"
+        assert ln.cfg.weight is not None, "LayerNorm cfg.weight should not be None"
+        assert ln.cfg.weight.granularity.mode.name == "PER_BLOCK", \
+            f"LayerNorm weight gran={ln.cfg.weight.granularity.mode.name}, expected PER_BLOCK"
+
+        # Backward fields should be populated (storage exists => is_training=True)
+        assert bn.cfg.is_training is True, "BatchNorm is_training should be True"
+        assert ln.cfg.is_training is True, "LayerNorm is_training should be True"
+        assert bn.quantize_backprop is True, "BatchNorm quantize_backprop should be True"
+        assert ln.quantize_backprop is True, "LayerNorm quantize_backprop should be True"
+
+    def test_quantize_nonlinear_true_norm_inner_scheme_unchanged(self):
+        """True: norm inner_scheme stays at storage (not upgraded to per_block)."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32,
+            a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+            storage_bits=16, storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = nn.Sequential(nn.LayerNorm(8))
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+
+        ln = qmodel[0]
+        # inner_scheme must be storage (PER_TENSOR), NOT per_block
+        assert ln.inner_scheme is not None, "inner_scheme should not be None"
+        assert ln.inner_scheme.granularity.mode.name == "PER_TENSOR", \
+            f"inner_scheme gran={ln.inner_scheme.granularity.mode.name}, expected PER_TENSOR"
+        # The inner_scheme should be the storage scheme (same object)
+        assert ln.inner_scheme is cfg.storage, \
+            "inner_scheme should be cfg.storage (same object)"
+
+    def test_quantize_nonlinear_true_vs_false_bit_exact_no_per_block(self):
+        """Without per_block compute, True and False produce bit-exact same output.
+
+        When cfg has no per_block compute (per_tensor only), True should not
+        add any extra quantization -- the two paths are bit-exact equivalent.
+        """
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="int8", w_granularity="per_tensor",
+            storage_bits=16, storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = nn.Sequential(
+            nn.Conv2d(3, 8, 3, padding=1),
+            nn.BatchNorm2d(8),
+            nn.ReLU(),
+        ).eval()
+
+        x = torch.randn(1, 3, 8, 8)
+
+        torch.manual_seed(42)
+        model_false = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=False)
+        out_false = model_false(x)
+
+        torch.manual_seed(42)
+        model_true = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+        out_true = model_true(x)
+
+        assert torch.equal(out_true, out_false), \
+            "True and False must be bit-exact when cfg has no per_block compute"
+
+    def test_quantize_nonlinear_true_norm_forward_backward(self):
+        """True mode: norm forward+backward produces valid non-zero gradients."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32,
+            a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+            storage_bits=16, storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = nn.Sequential(
+            nn.Conv2d(3, 8, 3, padding=1),
+            nn.BatchNorm2d(8),
+            nn.LayerNorm(8),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((4, 4)),
+            nn.Flatten(),
+            nn.Linear(128, 10),
+        )
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+        qmodel.train()
+
+        x = torch.randn(2, 3, 8, 8, requires_grad=True)
+        out = qmodel(x)
+        loss = out.sum()
+        loss.backward()
+
+        # No NaN in output
+        assert not torch.isnan(out).any(), "NaN in output"
+        assert not torch.isinf(out).any(), "inf in output"
+
+        # All parameters must have non-zero gradients (no zero-gradient edges)
+        for name, param in qmodel.named_parameters():
+            assert param.grad is not None, f"{name} has None gradient"
+            assert param.grad.abs().sum() > 0, f"{name} has all-zero gradient"
+
+        # Input gradient must be non-zero
+        assert x.grad is not None, "x.grad is None"
+        assert x.grad.abs().sum() > 0, "x.grad is all-zero"
 
 
 # ---------------------------------------------------------------------------
