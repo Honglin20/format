@@ -1,3 +1,4 @@
+from src.viz._helpers import _compute_best_transform_per_layer
 from src.viz.figures import (
     qsnr_line_chart,
     mse_box_plot,
@@ -8,7 +9,6 @@ from src.viz.figures import (
     transform_delta,
     error_vs_distribution,
     layer_type_qsnr,
-    _compute_best_transform_per_layer,
     _get_acc_val,
 )
 from src.viz.figures import save_figure

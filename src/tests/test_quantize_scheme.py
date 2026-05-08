@@ -155,7 +155,7 @@ def test_quantize_bfloat_subnorms_false_matches_old():
                                        "bfloat16", "float16"])
 def test_quantize_equiv_old_elemwise_op(fmt_name):
     """quantize(x, per_tensor/fmt) should match old quantize_elemwise_op path."""
-    from src.quantize.elemwise import _quantize_elemwise
+    from src.tests._compat import _quantize_elemwise
 
     torch.manual_seed(42)
     x = torch.randn(4, 32)

@@ -12,7 +12,8 @@ from src.formats.int_formats import IntFormat
 from src.formats.fp_formats import FPFormat
 from src.formats.bf16_fp16 import BFloat16Format, Float16Format
 from src.scheme.granularity import GranularitySpec, GranularityMode
-from src.quantize.elemwise import _quantize_elemwise_core, _quantize_elemwise, _quantize_bfloat, _quantize_fp
+from src.quantize.elemwise import _quantize_elemwise_core
+from src.tests._compat import _quantize_elemwise, _quantize_bfloat, _quantize_fp
 from src.quantize.mx_quantize import _quantize_mx
 
 

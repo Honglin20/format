@@ -111,6 +111,9 @@ class CalibrationSession:
     def save_scales(self, filepath: str, scales: Optional[Dict[str, torch.Tensor]] = None) -> str:
         """Save scale factors to disk.
 
+        .. deprecated::
+           Use the standalone ``save_scales(scales, filepath)`` function instead.
+
         Args:
             filepath: Path to save the scales dict (e.g. ``"scales.pt"``).
             scales: Dict mapping module names to scale tensors.
@@ -131,6 +134,9 @@ class CalibrationSession:
     ) -> Dict[str, torch.Tensor]:
         """Load scales from disk and optionally assign to model modules.
 
+        .. deprecated::
+           Use the standalone ``load_scales(filepath)`` function instead.
+
         Args:
             filepath: Path to the saved scales file (e.g. ``"scales.pt"``).
             assign: If True (default), assign scales as ``_output_scale``
@@ -147,6 +153,9 @@ class CalibrationSession:
     @staticmethod
     def load_scales_from(filepath: str) -> Dict[str, torch.Tensor]:
         """Load scales from disk (standalone, no model required).
+
+        .. deprecated::
+           Use the standalone ``load_scales(filepath)`` function instead.
 
         Args:
             filepath: Path to the saved scales file.

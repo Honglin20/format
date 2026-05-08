@@ -22,15 +22,10 @@ QuantSession = _QuantSession
 
 __all__ = [
     "QuantConfig",
-    "resolve_config",
     "Session",
     "SessionResult",
     "Study",
     "per_layer_optimal",
-    "QuantSession",
     "QuantizeContext",
     "quantize_model",
-    "install_stack_hooks",
-    "remove_stack_hooks",
-    "STUDY_CONFIG",
 ]

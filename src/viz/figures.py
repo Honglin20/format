@@ -13,11 +13,12 @@ from __future__ import annotations
 import math
 import os
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+from src.viz._helpers import _compute_best_transform_per_layer
 from src.viz.theme import FALLBACK_CYCLE
 
 
@@ -41,34 +42,10 @@ def save_figure(fig, output_dir: str, name: str) -> str:
 
 import torch
 
-import matplotlib.pyplot as plt
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _compute_best_transform_per_layer(
-    variant_qsnr: Dict[str, Dict[str, float]],
-) -> Dict[str, str]:
-    """Return ``{layer_name: best_transform_name}`` by QSNR.
-
-    For each layer, picks the transform variant (one of the dict keys in
-    ``variant_qsnr``) that maximizes per-layer QSNR.  Ties go to the
-    first transform encountered in dict insertion order.
-    """
-    all_layers: set = set()
-    for qsnr_dict in variant_qsnr.values():
-        all_layers.update(qsnr_dict.keys())
-    result: Dict[str, str] = {}
-    tx_names = list(variant_qsnr.keys())
-    for layer in all_layers:
-        result[layer] = max(
-            tx_names,
-            key=lambda tx, l=layer: variant_qsnr[tx].get(l, -float("inf")),
-        )
-    return result
-
 
 def _get_acc_val(data) -> float:
     """Extract scalar accuracy value from a result dict entry.

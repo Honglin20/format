@@ -30,7 +30,7 @@ from src.transform.smooth_quant import (
     SmoothQuantTransform,
     fuse_smoothquant_weights,
 )
-from src.viz.figures import _compute_best_transform_per_layer
+from src.viz._helpers import _compute_best_transform_per_layer
 
 _logger = logging.getLogger(__name__)
 

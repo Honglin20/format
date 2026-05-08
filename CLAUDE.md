@@ -106,9 +106,9 @@ x_q = quantize(x, scheme)
 
 - **Branch**: `feature/refactor-src`（主开发），`claude/<desc>`（单任务），不推 master/main
 - **Commit**: `<type>(<scope>): <描述>` — type: feat/fix/refactor/test/docs/chore
-- **测试门（快速）**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q -m "not slow"`（1,837 passed）
-- **全量测试**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`（含 slow，2,034 passed）
-- **E2E 全算子**: `pytest src/tests/test_e2e_all_ops.py -q`（21 模块 + 10 inline op，parametrized）
+- **测试门（快速）**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q -m "not slow"`（1,857 passed）
+- **全量测试**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`（含 slow，2,070 passed）
+- **E2E 全算子**: `pytest src/tests/test_e2e_all_ops.py -q`（21 模块 + 10 inline op，49 parametrized）
 
 ---
 

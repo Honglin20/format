@@ -134,5 +134,6 @@ class AnalysisReport:
                 writer.writerows(rows)
 
 
-# Backward-compatible alias; prefer AnalysisReport in new code.
+# Deprecated backward-compatible alias. Use SessionReport or StudyReport from
+# src.report instead, or AnalysisReport for raw observer data access.
 Report = AnalysisReport

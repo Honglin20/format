@@ -106,7 +106,7 @@
 
 `pytest src/tests/` 有 26 个预存在失败（非本分支引入）：
 - `test_golden_equiv.py` — 26 tests FileNotFoundError（golden data `.pt` 文件未 staging）
-- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 2,034 passed
+- 排除 golden 测试后全部通过：`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 2,069 passed
 
 ## 关键经验记录
 
@@ -121,6 +121,8 @@
 
 ## 最近变更
 
+- 2026-05-08: **Pure MX backward 渐变验证**。E2E backward 测试现在也覆盖 pure MX（`mxfp8e4m3`），验证梯度在 1e-2 atol 内一致。`_BACKWARD_SMOKE_SPECS` 排除条件放宽为仅过滤 `quantize_backprop=True`（之前也排除 pure MX）。已知限制：pure MX backward 使用 `allclose` 而非 `torch.equal`，因为 `_compat.py` 的 backward cfg 函数对 pure MX 返回 `gi_elem`/`gw_elem` = None（无 bfloat storage → `_elem_scheme` 返回 None），而 mx 模块 API 使用 `_bp` 格式 fallback 量化渐变。操作符级等价性测试（`mx.linear()` 函数 API）与 pure MX backward 的 `torch.equal` 匹配（函数 API 也不量化 backward）。全量 2,070 passed（+1）。
+- 2026-05-08: **E2E 测试矩阵扩展完成**。`test_e2e_all_ops.py` 新增 6 个测试类，覆盖 8 种格式 × 3 种 storage × 2 种 QBP 的完整参数矩阵。测试类：TestE2EAllOpsSmoke（5 configs）、Full（9 configs, slow）、BF10Smoke/Full（4/9 configs）、PureMX（9 configs, slow）、STE（5 configs）、UnifiedCfg（2 tests）、PatternMatch（5 configs）、Backward（5 configs，4 bit-exact + 1 allclose）。全量 2,069 passed（+35）。
 - 2026-05-08: **quantize_nonlinear 开关**。`QuantConfig.quantize_nonlinear=False` 使 norm / activation / pool 保持 fp32，仅 Linear / Conv 做量化。`QuantSession` 公开别名加入 `__all__`。README 和 quickstart-details 文档全面更新，与代码一致。全量 2,034 passed。
 - 2026-05-07: **Session 内部三层委托关系文档化**。ADR-008 §5.1.1 记录了 `Session` → `_QuantSession` → `quantize_model()` 的分层委托关系和各自的使用场景。
 - 2026-05-07: **全算子端到端等价性验证通过**。`tools/verify_layer_equiv.py` 验证了全部 21 种模块类型 + 全部 inline ops 的 bit-exact 等价性。修复了 5 个 bug：`bfloat=16` → `storage_bits/storage_kind` 参数重命名、`model.eval()` 必须在 `quantize_model()` 之后调用、`to_op_config()`/`resolve_config()` 不应设置 `output` field（MX 不施加 per-block 输出量化）、per-module dict 模式需要显式 `op_cfgs` 以配置 inline matmul 系列 op、MX 参考链中 combine-add 的结合律需与模型 forward 一致（左结合）。全量 1,712 passed。

@@ -15,7 +15,7 @@ Two modes:
               cmp.record(fp32_out, q_out, labels)
       result = cmp.evaluate(eval_fn)
 """
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn

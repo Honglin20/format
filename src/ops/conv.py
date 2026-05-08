@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import grad as nn_grad
-from torch.nn.modules.utils import _single, _pair, _triple
 
 from src.scheme.op_config import OpQuantConfig
 from src.quantize import quantize

@@ -12,16 +12,8 @@ import torch.nn as nn
 
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
-from src.transform.pre_scale import PreScaleTransform
-
-
-def _get_quantized_modules(model: nn.Module) -> List[tuple]:
-    """Return [(name, module), ...] for all Quantized* modules with cfg."""
-    result = []
-    for name, module in model.named_modules():
-        if hasattr(module, "cfg") and not getattr(module, "_is_passthrough", False):
-            result.append((name, module))
-    return result
+from src.session._model import _get_quantized_modules
+from src.transform.pre_scale import PreScaleTransform, _pot_scale
 
 
 def _replace_transform(cfg: OpQuantConfig, transform) -> OpQuantConfig:
@@ -209,9 +201,7 @@ class LayerwiseScaleOptimizer:
                     opt.step()
                     if self.pot:
                         with torch.no_grad():
-                            pre_scale.data = 2 ** torch.round(
-                                torch.log2(pre_scale.data)
-                            )
+                            pre_scale.data = _pot_scale(pre_scale.data)
             module.eval()
 
             # Freeze: store optimized scale

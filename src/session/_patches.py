@@ -11,6 +11,7 @@ IMPORTANT: existing Function files (matmul.py, bmm.py, linear.py) save
 module-level _orig_* references so their internal torch calls don't re-enter
 these patches and cause infinite recursion.
 """
+import functools
 import torch
 import torch.nn.functional as F
 
@@ -104,50 +105,50 @@ def _simd_inner_scheme(cfg):
     return scheme
 
 
+def _patched(op_name, orig_fn):
+    """Decorator factory: wraps a fn with state/cfg guard for patched torch ops.
+
+    The decorated function signature is ``fn(state, cfg, *args, **kwargs)``.
+    The guard (no active context, _EMPTY_CFG passthrough) is handled automatically.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            state = _get_state()
+            if state is None:
+                return orig_fn(*args, **kwargs)
+            cfg = state.resolve(op_name)
+            if cfg == _EMPTY_CFG:
+                return orig_fn(*args, **kwargs)
+            return fn(state, cfg, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
 # ---------------------------------------------------------------------------
 # Matmul / Linear family
 # ---------------------------------------------------------------------------
 
-def _patched_matmul(a, b):
-    state = _get_state()
-    if state is None:
-        return _orig_torch_matmul(a, b)
-    cfg = state.resolve("matmul")
-    if cfg == _EMPTY_CFG:
-        return _orig_torch_matmul(a, b)
+@_patched("matmul", _orig_torch_matmul)
+def _patched_matmul(state, cfg, a, b):
     name = get_layer_name()
     return MatMulFunction.apply(a, b, None, cfg, name, "aa", _make_emit_fn(state, name, "matmul"))
 
 
-def _patched_mm(a, b):
-    state = _get_state()
-    if state is None:
-        return _orig_torch_mm(a, b)
-    cfg = state.resolve("mm")
-    if cfg == _EMPTY_CFG:
-        return _orig_torch_mm(a, b)
+@_patched("mm", _orig_torch_mm)
+def _patched_mm(state, cfg, a, b):
     name = get_layer_name()
     return MatMulFunction.apply(a, b, None, cfg, name, "aa", _make_emit_fn(state, name, "mm"))
 
 
-def _patched_bmm(a, b):
-    state = _get_state()
-    if state is None:
-        return _orig_torch_bmm(a, b)
-    cfg = state.resolve("bmm")
-    if cfg == _EMPTY_CFG:
-        return _orig_torch_bmm(a, b)
+@_patched("bmm", _orig_torch_bmm)
+def _patched_bmm(state, cfg, a, b):
     name = get_layer_name()
     return BMMFunction.apply(a, b, cfg, name, _make_emit_fn(state, name, "bmm"))
 
 
-def _patched_F_linear(input, weight, bias=None):
-    state = _get_state()
-    if state is None:
-        return _orig_F_linear(input, weight, bias)
-    cfg = state.resolve("linear")
-    if cfg == _EMPTY_CFG:
-        return _orig_F_linear(input, weight, bias)
+@_patched("linear", _orig_F_linear)
+def _patched_F_linear(state, cfg, input, weight, bias=None):
     name = get_layer_name()
     return LinearFunction.apply(input, weight, bias, cfg, name, _make_emit_fn(state, name, "linear"))
 
@@ -156,46 +157,34 @@ def _patched_F_linear(input, weight, bias=None):
 # SIMD arithmetic (binary)
 # ---------------------------------------------------------------------------
 
-def _patched_add(a, b, *, alpha=1):
-    state = _get_state()
-    if state is None or not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
-        return _orig_torch_add(a, b, alpha=alpha)
-    cfg = state.resolve("add")
-    if cfg == _EMPTY_CFG:
+@_patched("add", _orig_torch_add)
+def _patched_add(state, cfg, a, b, *, alpha=1):
+    if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         return _orig_torch_add(a, b, alpha=alpha)
     if alpha != 1:
         b = b * alpha
     return SIMDAdd.apply(a, b, _simd_inner_scheme(cfg), True)
 
 
-def _patched_sub(a, b, *, alpha=1):
-    state = _get_state()
-    if state is None or not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
-        return _orig_torch_sub(a, b, alpha=alpha)
-    cfg = state.resolve("sub")
-    if cfg == _EMPTY_CFG:
+@_patched("sub", _orig_torch_sub)
+def _patched_sub(state, cfg, a, b, *, alpha=1):
+    if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         return _orig_torch_sub(a, b, alpha=alpha)
     if alpha != 1:
         b = b * alpha
     return SIMDSub.apply(a, b, _simd_inner_scheme(cfg), True)
 
 
-def _patched_mul(a, b):
-    state = _get_state()
-    if state is None or not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
-        return _orig_torch_mul(a, b)
-    cfg = state.resolve("mul")
-    if cfg == _EMPTY_CFG:
+@_patched("mul", _orig_torch_mul)
+def _patched_mul(state, cfg, a, b):
+    if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         return _orig_torch_mul(a, b)
     return SIMDMul.apply(a, b, _simd_inner_scheme(cfg), True)
 
 
-def _patched_div(a, b):
-    state = _get_state()
-    if state is None or not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
-        return _orig_torch_div(a, b)
-    cfg = state.resolve("div")
-    if cfg == _EMPTY_CFG:
+@_patched("div", _orig_torch_div)
+def _patched_div(state, cfg, a, b):
+    if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         return _orig_torch_div(a, b)
     return SIMDDiv.apply(a, b, _simd_inner_scheme(cfg), True)
 
@@ -204,23 +193,13 @@ def _patched_div(a, b):
 # SIMD unary
 # ---------------------------------------------------------------------------
 
-def _patched_exp(x):
-    state = _get_state()
-    if state is None:
-        return _orig_torch_exp(x)
-    cfg = state.resolve("exp")
-    if cfg == _EMPTY_CFG:
-        return _orig_torch_exp(x)
+@_patched("exp", _orig_torch_exp)
+def _patched_exp(state, cfg, x):
     return SIMDExp.apply(x, _simd_inner_scheme(cfg), True)
 
 
-def _patched_log(x):
-    state = _get_state()
-    if state is None:
-        return _orig_torch_log(x)
-    cfg = state.resolve("log")
-    if cfg == _EMPTY_CFG:
-        return _orig_torch_log(x)
+@_patched("log", _orig_torch_log)
+def _patched_log(state, cfg, x):
     return SIMDLog.apply(x, _simd_inner_scheme(cfg), True)
 
 

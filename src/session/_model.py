@@ -14,12 +14,21 @@ Inline ops         → QuantizeContext wrapping (automatic, no model surgery)
 Both paths converge at the same XxxFunction.apply() for bit-exact consistency.
 """
 import types
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import torch.nn as nn
 
 from src.scheme.op_config import OpQuantConfig
-from src.session._context import QuantizeContext
+from src.session._context import QuantizeContext, _EMPTY_CFG
+from src.ops.conv import (
+    QuantizedConv1d,
+    QuantizedConv2d,
+    QuantizedConv3d,
+    QuantizedConvTranspose1d,
+    QuantizedConvTranspose2d,
+    QuantizedConvTranspose3d,
+)
+from src.ops.norm import QuantizedBatchNorm1d, QuantizedBatchNorm2d, QuantizedBatchNorm3d
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -63,95 +72,31 @@ def _make_linear(orig: nn.Linear, cfg: OpQuantConfig, name: str):
     )
 
 
-def _make_conv1d(orig: nn.Conv1d, cfg: OpQuantConfig, name: str):
-    from src.ops.conv import QuantizedConv1d
-    return QuantizedConv1d(
+def _make_conv(orig, cfg, name, conv_cls):
+    """Generic factory for QuantizedConv{1,2,3}d."""
+    return conv_cls(
         in_channels=orig.in_channels, out_channels=orig.out_channels,
-        kernel_size=orig.kernel_size, stride=orig.stride, padding=orig.padding,
+        kernel_size=orig.kernel_size, stride=orig.stride,
+        padding=orig.padding, dilation=orig.dilation,
+        groups=orig.groups, bias=orig.bias is not None,
+        cfg=cfg, name=name,
+    )
+
+
+def _make_conv_transpose(orig, cfg, name, conv_cls):
+    """Generic factory for QuantizedConvTranspose{1,2,3}d."""
+    return conv_cls(
+        in_channels=orig.in_channels, out_channels=orig.out_channels,
+        kernel_size=orig.kernel_size, stride=orig.stride,
+        padding=orig.padding, output_padding=orig.output_padding,
         dilation=orig.dilation, groups=orig.groups,
         bias=orig.bias is not None, cfg=cfg, name=name,
     )
 
 
-def _make_conv2d(orig: nn.Conv2d, cfg: OpQuantConfig, name: str):
-    from src.ops.conv import QuantizedConv2d
-    return QuantizedConv2d(
-        in_channels=orig.in_channels, out_channels=orig.out_channels,
-        kernel_size=orig.kernel_size, stride=orig.stride, padding=orig.padding,
-        dilation=orig.dilation, groups=orig.groups,
-        bias=orig.bias is not None, cfg=cfg, name=name,
-    )
-
-
-def _make_conv3d(orig: nn.Conv3d, cfg: OpQuantConfig, name: str):
-    from src.ops.conv import QuantizedConv3d
-    return QuantizedConv3d(
-        in_channels=orig.in_channels, out_channels=orig.out_channels,
-        kernel_size=orig.kernel_size, stride=orig.stride, padding=orig.padding,
-        dilation=orig.dilation, groups=orig.groups,
-        bias=orig.bias is not None, cfg=cfg, name=name,
-    )
-
-
-def _make_conv_transpose1d(orig: nn.ConvTranspose1d, cfg: OpQuantConfig, name: str):
-    from src.ops.conv import QuantizedConvTranspose1d
-    return QuantizedConvTranspose1d(
-        in_channels=orig.in_channels, out_channels=orig.out_channels,
-        kernel_size=orig.kernel_size, stride=orig.stride, padding=orig.padding,
-        output_padding=orig.output_padding, dilation=orig.dilation,
-        groups=orig.groups, bias=orig.bias is not None, cfg=cfg, name=name,
-    )
-
-
-def _make_conv_transpose2d(orig: nn.ConvTranspose2d, cfg: OpQuantConfig, name: str):
-    from src.ops.conv import QuantizedConvTranspose2d
-    return QuantizedConvTranspose2d(
-        in_channels=orig.in_channels, out_channels=orig.out_channels,
-        kernel_size=orig.kernel_size, stride=orig.stride, padding=orig.padding,
-        output_padding=orig.output_padding, dilation=orig.dilation,
-        groups=orig.groups, bias=orig.bias is not None, cfg=cfg, name=name,
-    )
-
-
-def _make_conv_transpose3d(orig: nn.ConvTranspose3d, cfg: OpQuantConfig, name: str):
-    from src.ops.conv import QuantizedConvTranspose3d
-    return QuantizedConvTranspose3d(
-        in_channels=orig.in_channels, out_channels=orig.out_channels,
-        kernel_size=orig.kernel_size, stride=orig.stride, padding=orig.padding,
-        output_padding=orig.output_padding, dilation=orig.dilation,
-        groups=orig.groups, bias=orig.bias is not None, cfg=cfg, name=name,
-    )
-
-
-def _make_bn1d(orig: nn.BatchNorm1d, cfg: OpQuantConfig, name: str):
-    from src.ops.norm import QuantizedBatchNorm1d
-    mod = QuantizedBatchNorm1d(
-        num_features=orig.num_features, eps=orig.eps,
-        momentum=orig.momentum, affine=orig.affine,
-        track_running_stats=orig.track_running_stats,
-        cfg=_non_matmul_cfg(cfg),
-        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
-    )
-    _copy_bn_state(orig, mod)
-    return mod
-
-
-def _make_bn2d(orig: nn.BatchNorm2d, cfg: OpQuantConfig, name: str):
-    from src.ops.norm import QuantizedBatchNorm2d
-    mod = QuantizedBatchNorm2d(
-        num_features=orig.num_features, eps=orig.eps,
-        momentum=orig.momentum, affine=orig.affine,
-        track_running_stats=orig.track_running_stats,
-        cfg=_non_matmul_cfg(cfg),
-        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
-    )
-    _copy_bn_state(orig, mod)
-    return mod
-
-
-def _make_bn3d(orig: nn.BatchNorm3d, cfg: OpQuantConfig, name: str):
-    from src.ops.norm import QuantizedBatchNorm3d
-    mod = QuantizedBatchNorm3d(
+def _make_bn(orig, cfg, name, bn_cls):
+    """Generic factory for QuantizedBatchNorm{1,2,3}d."""
+    mod = bn_cls(
         num_features=orig.num_features, eps=orig.eps,
         momentum=orig.momentum, affine=orig.affine,
         track_running_stats=orig.track_running_stats,
@@ -270,8 +215,13 @@ def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, na
     )
 
 
-# --- Empty passthrough (no quantization) ---
-_EMPTY_CFG = OpQuantConfig()
+def _get_quantized_modules(model: nn.Module) -> List[tuple]:
+    """Return [(name, module), ...] for all Quantized* modules with cfg."""
+    result = []
+    for name, module in model.named_modules():
+        if hasattr(module, "cfg") and not getattr(module, "_is_passthrough", False):
+            result.append((name, module))
+    return result
 
 
 def _resolve_context_cfg(
@@ -322,15 +272,15 @@ _MATMUL_TYPES = (
 
 _MODULE_MAPPING = {
     nn.Linear: _make_linear,
-    nn.Conv1d: _make_conv1d,
-    nn.Conv2d: _make_conv2d,
-    nn.Conv3d: _make_conv3d,
-    nn.ConvTranspose1d: _make_conv_transpose1d,
-    nn.ConvTranspose2d: _make_conv_transpose2d,
-    nn.ConvTranspose3d: _make_conv_transpose3d,
-    nn.BatchNorm1d: _make_bn1d,
-    nn.BatchNorm2d: _make_bn2d,
-    nn.BatchNorm3d: _make_bn3d,
+    nn.Conv1d: lambda orig, cfg, name: _make_conv(orig, cfg, name, QuantizedConv1d),
+    nn.Conv2d: lambda orig, cfg, name: _make_conv(orig, cfg, name, QuantizedConv2d),
+    nn.Conv3d: lambda orig, cfg, name: _make_conv(orig, cfg, name, QuantizedConv3d),
+    nn.ConvTranspose1d: lambda orig, cfg, name: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose1d),
+    nn.ConvTranspose2d: lambda orig, cfg, name: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose2d),
+    nn.ConvTranspose3d: lambda orig, cfg, name: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose3d),
+    nn.BatchNorm1d: lambda orig, cfg, name: _make_bn(orig, cfg, name, QuantizedBatchNorm1d),
+    nn.BatchNorm2d: lambda orig, cfg, name: _make_bn(orig, cfg, name, QuantizedBatchNorm2d),
+    nn.BatchNorm3d: lambda orig, cfg, name: _make_bn(orig, cfg, name, QuantizedBatchNorm3d),
     nn.LayerNorm: _make_ln,
     nn.GroupNorm: _make_gn,
     nn.Sigmoid: _make_sigmoid,

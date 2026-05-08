@@ -12,7 +12,6 @@ Public API:
 import math
 
 import torch
-import torch.nn.functional as F
 
 from src.quantize.elemwise import _enter_quantize, _exit_quantize
 from src.ops.vec_ops import (

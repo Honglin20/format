@@ -345,8 +345,9 @@ class _QuantSession:
             Number of modules that received pre-scale tensors.
         """
         from src.transform.pre_scale import PreScaleTransform
+        from src.session._model import _get_quantized_modules
         from src.calibration.lsq_optimizer import (
-            _get_quantized_modules, _replace_transform,
+            _replace_transform,
             _replace_transform_activation_only, _INPUT_ACTIVATION_ROLES,
         )
 
@@ -482,7 +483,7 @@ class _QuantSession:
             Dict mapping module name → amax tensor (shape ``()`` for
             per_tensor, ``(C,)`` for per_channel).
         """
-        from src.calibration.lsq_optimizer import _get_quantized_modules
+        from src.session._model import _get_quantized_modules
 
         amax_store: Dict[str, torch.Tensor] = {}
         handles = []

@@ -4,6 +4,7 @@ import pytest
 import matplotlib
 matplotlib.use("Agg")
 
+from src.viz._helpers import _compute_best_transform_per_layer
 from src.viz.figures import (
     qsnr_line_chart,
     mse_box_plot,
@@ -16,7 +17,6 @@ from src.viz.figures import (
     layer_type_qsnr,
     block_sweep_line_chart,
     hierarchical_delta_bar,
-    _compute_best_transform_per_layer,
     _get_acc_val,
 )
 

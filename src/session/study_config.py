@@ -35,6 +35,10 @@ Available table keys: ``accuracy``, ``pot_delta``, ``transform_matrix``,
 Available figure keys: ``qsnr_line``, ``mse_box``, ``pot_delta_bar``, ``transform_heatmap``,
 ``transform_pie``, ``transform_delta``, ``histogram``, ``error_vs_dist``,
 ``layer_type_qsnr``, ``block_sweep``, ``hierarchical_delta``
+
+.. deprecated::
+   ``STUDY_CONFIG`` is deprecated. Use :class:`QuantConfig` instances with
+   :class:`Study` for multi-config experiments. See the README for examples.
 """
 
 from __future__ import annotations

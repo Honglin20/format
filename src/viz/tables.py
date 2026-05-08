@@ -8,7 +8,7 @@ import os
 from collections import defaultdict
 from typing import Dict
 
-from src.viz.figures import _compute_best_transform_per_layer
+from src.viz._helpers import _compute_best_transform_per_layer
 
 
 def accuracy_table(results: dict, *, title: str, output_dir: str, filename: str) -> str:
