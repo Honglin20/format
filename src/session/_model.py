@@ -139,7 +139,7 @@ def _nonlinear_true_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
 # Module type → Quantized constructor + param extractor
 # ---------------------------------------------------------------------------
 
-def _make_linear(orig: nn.Linear, cfg: OpQuantConfig, name: str):
+def _make_linear(orig: nn.Linear, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.linear import QuantizedLinear
     return QuantizedLinear(
         in_features=orig.in_features, out_features=orig.out_features,
@@ -147,7 +147,7 @@ def _make_linear(orig: nn.Linear, cfg: OpQuantConfig, name: str):
     )
 
 
-def _make_conv(orig, cfg, name, conv_cls):
+def _make_conv(orig, cfg, name, conv_cls, quantize_nonlinear=False):
     """Generic factory for QuantizedConv{1,2,3}d."""
     return conv_cls(
         in_channels=orig.in_channels, out_channels=orig.out_channels,
@@ -158,7 +158,7 @@ def _make_conv(orig, cfg, name, conv_cls):
     )
 
 
-def _make_conv_transpose(orig, cfg, name, conv_cls):
+def _make_conv_transpose(orig, cfg, name, conv_cls, quantize_nonlinear=False):
     """Generic factory for QuantizedConvTranspose{1,2,3}d."""
     return conv_cls(
         in_channels=orig.in_channels, out_channels=orig.out_channels,
@@ -169,9 +169,9 @@ def _make_conv_transpose(orig, cfg, name, conv_cls):
     )
 
 
-def _make_bn(orig, cfg, name, bn_cls):
+def _make_bn(orig, cfg, name, bn_cls, quantize_nonlinear=False):
     """Generic factory for QuantizedBatchNorm{1,2,3}d."""
-    norm_cfg = _non_matmul_cfg(cfg)
+    norm_cfg = _nonlinear_true_cfg(cfg) if quantize_nonlinear else _non_matmul_cfg(cfg)
     mod = bn_cls(
         num_features=orig.num_features, eps=orig.eps,
         momentum=orig.momentum, affine=orig.affine,
@@ -192,12 +192,12 @@ def _copy_bn_state(orig, target):
         target.running_var = orig.running_var.clone()
 
 
-def _make_ln(orig: nn.LayerNorm, cfg: OpQuantConfig, name: str):
+def _make_ln(orig: nn.LayerNorm, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.norm import QuantizedLayerNorm
     normalized_shape = orig.normalized_shape
     if isinstance(normalized_shape, int):
         normalized_shape = (normalized_shape,)
-    norm_cfg = _non_matmul_cfg(cfg)
+    norm_cfg = _nonlinear_true_cfg(cfg) if quantize_nonlinear else _non_matmul_cfg(cfg)
     mod = QuantizedLayerNorm(
         normalized_shape=list(normalized_shape), eps=orig.eps,
         elementwise_affine=orig.elementwise_affine,
@@ -210,9 +210,9 @@ def _make_ln(orig: nn.LayerNorm, cfg: OpQuantConfig, name: str):
     return mod
 
 
-def _make_gn(orig: nn.GroupNorm, cfg: OpQuantConfig, name: str):
+def _make_gn(orig: nn.GroupNorm, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.norm import QuantizedGroupNorm
-    norm_cfg = _non_matmul_cfg(cfg)
+    norm_cfg = _nonlinear_true_cfg(cfg) if quantize_nonlinear else _non_matmul_cfg(cfg)
     mod = QuantizedGroupNorm(
         num_groups=orig.num_groups, num_channels=orig.num_channels,
         eps=orig.eps, affine=orig.affine,
@@ -225,12 +225,12 @@ def _make_gn(orig: nn.GroupNorm, cfg: OpQuantConfig, name: str):
     return mod
 
 
-def _make_rms_norm(orig, cfg: OpQuantConfig, name: str):
+def _make_rms_norm(orig, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.norm import QuantizedRMSNorm
     normalized_shape = orig.normalized_shape
     if isinstance(normalized_shape, int):
         normalized_shape = (normalized_shape,)
-    norm_cfg = _non_matmul_cfg(cfg)
+    norm_cfg = _nonlinear_true_cfg(cfg) if quantize_nonlinear else _non_matmul_cfg(cfg)
     mod = QuantizedRMSNorm(
         normalized_shape=list(normalized_shape), eps=orig.eps,
         elementwise_affine=orig.elementwise_affine,
@@ -244,27 +244,27 @@ def _make_rms_norm(orig, cfg: OpQuantConfig, name: str):
 
 # --- Activation constructors ---
 
-def _make_sigmoid(orig: nn.Sigmoid, cfg: OpQuantConfig, name: str):
+def _make_sigmoid(orig: nn.Sigmoid, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.activations import QuantizedSigmoid
     return QuantizedSigmoid(cfg=_activation_cfg(cfg), name=name)
 
 
-def _make_tanh(orig: nn.Tanh, cfg: OpQuantConfig, name: str):
+def _make_tanh(orig: nn.Tanh, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.activations import QuantizedTanh
     return QuantizedTanh(cfg=_activation_cfg(cfg), name=name)
 
 
-def _make_relu(orig: nn.ReLU, cfg: OpQuantConfig, name: str):
+def _make_relu(orig: nn.ReLU, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.activations import QuantizedReLU
     return QuantizedReLU(inplace=orig.inplace, cfg=_activation_cfg(cfg), name=name)
 
 
-def _make_relu6(orig: nn.ReLU6, cfg: OpQuantConfig, name: str):
+def _make_relu6(orig: nn.ReLU6, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.activations import QuantizedReLU6
     return QuantizedReLU6(inplace=orig.inplace, cfg=_activation_cfg(cfg), name=name)
 
 
-def _make_leaky_relu(orig: nn.LeakyReLU, cfg: OpQuantConfig, name: str):
+def _make_leaky_relu(orig: nn.LeakyReLU, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.activations import QuantizedLeakyReLU
     return QuantizedLeakyReLU(
         negative_slope=orig.negative_slope, inplace=orig.inplace,
@@ -272,22 +272,22 @@ def _make_leaky_relu(orig: nn.LeakyReLU, cfg: OpQuantConfig, name: str):
     )
 
 
-def _make_silu(orig: nn.SiLU, cfg: OpQuantConfig, name: str):
+def _make_silu(orig: nn.SiLU, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.activations import QuantizedSiLU
     return QuantizedSiLU(inplace=orig.inplace, cfg=_activation_cfg(cfg), name=name)
 
 
-def _make_gelu(orig: nn.GELU, cfg: OpQuantConfig, name: str):
+def _make_gelu(orig: nn.GELU, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.activations import QuantizedGELU
     return QuantizedGELU(cfg=_activation_cfg(cfg), name=name)
 
 
-def _make_softmax(orig: nn.Softmax, cfg: OpQuantConfig, name: str):
+def _make_softmax(orig: nn.Softmax, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.softmax import QuantizedSoftmax
     return QuantizedSoftmax(dim=orig.dim, cfg=_activation_cfg(cfg), name=name)
 
 
-def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, name: str):
+def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, name: str, quantize_nonlinear=False):
     from src.ops.pooling import QuantizedAdaptiveAvgPool2d
     return QuantizedAdaptiveAvgPool2d(
         output_size=orig.output_size, cfg=_activation_cfg(cfg), name=name,
@@ -360,27 +360,27 @@ _MATMUL_TYPES = (
 # ---------------------------------------------------------------------------
 
 _MODULE_MAPPING = {
-    nn.Linear: _make_linear,
-    nn.Conv1d: lambda orig, cfg, name: _make_conv(orig, cfg, name, QuantizedConv1d),
-    nn.Conv2d: lambda orig, cfg, name: _make_conv(orig, cfg, name, QuantizedConv2d),
-    nn.Conv3d: lambda orig, cfg, name: _make_conv(orig, cfg, name, QuantizedConv3d),
-    nn.ConvTranspose1d: lambda orig, cfg, name: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose1d),
-    nn.ConvTranspose2d: lambda orig, cfg, name: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose2d),
-    nn.ConvTranspose3d: lambda orig, cfg, name: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose3d),
-    nn.BatchNorm1d: lambda orig, cfg, name: _make_bn(orig, cfg, name, QuantizedBatchNorm1d),
-    nn.BatchNorm2d: lambda orig, cfg, name: _make_bn(orig, cfg, name, QuantizedBatchNorm2d),
-    nn.BatchNorm3d: lambda orig, cfg, name: _make_bn(orig, cfg, name, QuantizedBatchNorm3d),
-    nn.LayerNorm: _make_ln,
-    nn.GroupNorm: _make_gn,
-    nn.Sigmoid: _make_sigmoid,
-    nn.Tanh: _make_tanh,
-    nn.ReLU: _make_relu,
-    nn.ReLU6: _make_relu6,
-    nn.LeakyReLU: _make_leaky_relu,
-    nn.SiLU: _make_silu,
-    nn.GELU: _make_gelu,
-    nn.Softmax: _make_softmax,
-    nn.AdaptiveAvgPool2d: _make_adaptive_avg_pool2d,
+    nn.Linear: lambda orig, cfg, name, **kw: _make_linear(orig, cfg, name, **kw),
+    nn.Conv1d: lambda orig, cfg, name, **kw: _make_conv(orig, cfg, name, QuantizedConv1d, **kw),
+    nn.Conv2d: lambda orig, cfg, name, **kw: _make_conv(orig, cfg, name, QuantizedConv2d, **kw),
+    nn.Conv3d: lambda orig, cfg, name, **kw: _make_conv(orig, cfg, name, QuantizedConv3d, **kw),
+    nn.ConvTranspose1d: lambda orig, cfg, name, **kw: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose1d, **kw),
+    nn.ConvTranspose2d: lambda orig, cfg, name, **kw: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose2d, **kw),
+    nn.ConvTranspose3d: lambda orig, cfg, name, **kw: _make_conv_transpose(orig, cfg, name, QuantizedConvTranspose3d, **kw),
+    nn.BatchNorm1d: lambda orig, cfg, name, **kw: _make_bn(orig, cfg, name, QuantizedBatchNorm1d, **kw),
+    nn.BatchNorm2d: lambda orig, cfg, name, **kw: _make_bn(orig, cfg, name, QuantizedBatchNorm2d, **kw),
+    nn.BatchNorm3d: lambda orig, cfg, name, **kw: _make_bn(orig, cfg, name, QuantizedBatchNorm3d, **kw),
+    nn.LayerNorm: lambda orig, cfg, name, **kw: _make_ln(orig, cfg, name, **kw),
+    nn.GroupNorm: lambda orig, cfg, name, **kw: _make_gn(orig, cfg, name, **kw),
+    nn.Sigmoid: lambda orig, cfg, name, **kw: _make_sigmoid(orig, cfg, name, **kw),
+    nn.Tanh: lambda orig, cfg, name, **kw: _make_tanh(orig, cfg, name, **kw),
+    nn.ReLU: lambda orig, cfg, name, **kw: _make_relu(orig, cfg, name, **kw),
+    nn.ReLU6: lambda orig, cfg, name, **kw: _make_relu6(orig, cfg, name, **kw),
+    nn.LeakyReLU: lambda orig, cfg, name, **kw: _make_leaky_relu(orig, cfg, name, **kw),
+    nn.SiLU: lambda orig, cfg, name, **kw: _make_silu(orig, cfg, name, **kw),
+    nn.GELU: lambda orig, cfg, name, **kw: _make_gelu(orig, cfg, name, **kw),
+    nn.Softmax: lambda orig, cfg, name, **kw: _make_softmax(orig, cfg, name, **kw),
+    nn.AdaptiveAvgPool2d: lambda orig, cfg, name, **kw: _make_adaptive_avg_pool2d(orig, cfg, name, **kw),
 }
 
 
@@ -573,7 +573,7 @@ def _replace_module(
         # Explicit empty cfg but the user may want passthrough
         pass
 
-    mod = make_fn(module, resolved_cfg, name)
+    mod = make_fn(module, resolved_cfg, name, quantize_nonlinear=quantize_nonlinear)
 
     # Copy weights for modules that have state_dict
     if hasattr(mod, "load_state_dict"):

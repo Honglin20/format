@@ -1351,11 +1351,12 @@ class TestQuantizeNonLinearSwitch:
             assert type_name.startswith("Quantized"), \
                 f"{name} ({type_name}) should be Quantized*"
 
-    def test_storage_bits_nonlinear_both_modes_identical(self):
-        """With storage_bits>0 + compat config, both modes apply storage to nonlinear.
+    def test_storage_bits_nonlinear_modes_differ_with_wired_flag(self):
+        """With storage_bits>0 + compat config, modes now differ.
 
-        quantize_nonlinear=True is reserved for future extra-quantization steps.
-        For now, both modes produce identical output.
+        quantize_nonlinear=True preserves input/weight compute schemes for
+        nonlinear ops, while False strips to storage-only. Outputs therefore
+        differ — True applies extra compute quantization on top of storage.
         """
         import copy
         from src.session._model import quantize_model
@@ -1387,9 +1388,9 @@ class TestQuantizeNonLinearSwitch:
             out_false = qmodel_false(x)
             out_true = qmodel_true(x)
 
-        # Both modes produce identical output: storage applied to nonlinear in both cases
-        assert torch.equal(out_false, out_true), \
-            "True and False should produce identical output with current configs"
+        # True adds compute quantization on norm/activation inputs, so outputs differ
+        assert not torch.equal(out_false, out_true), \
+            "True and False should differ — True adds compute quantization to nonlinear ops"
 
     # ------------------------------------------------------------------
     # quantize_nonlinear=False — backward gradient integrity
