@@ -145,6 +145,18 @@ def _nonlinear_true_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
     return cfg  # compat-style: input/weight carry per_tensor elemwise schemes
 
 
+def _set_entry_fields(mod, cfg: OpQuantConfig, quantize_nonlinear: bool) -> None:
+    """Set _entry_storage/_entry_compute on a module for quantize_nonlinear=True.
+
+    When ``quantize_nonlinear`` is True and *cfg.input* carries per_block MX
+    compute, stash the storage and compute schemes so the module's
+    ``_entry_quantize()`` can apply two-stage operand-entry quantization.
+    """
+    if quantize_nonlinear and cfg.input is not None and _is_mx_compute(cfg.input):
+        mod._entry_storage = cfg.storage
+        mod._entry_compute = cfg.input
+
+
 # ---------------------------------------------------------------------------
 # Module type → Quantized constructor + param extractor
 # ---------------------------------------------------------------------------
@@ -258,9 +270,7 @@ def _make_sigmoid(orig: nn.Sigmoid, cfg: OpQuantConfig, name: str, quantize_nonl
     from src.ops.activations import QuantizedSigmoid
     act_cfg = _activation_cfg(cfg)
     mod = QuantizedSigmoid(cfg=act_cfg, name=name)
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -268,9 +278,7 @@ def _make_tanh(orig: nn.Tanh, cfg: OpQuantConfig, name: str, quantize_nonlinear=
     from src.ops.activations import QuantizedTanh
     act_cfg = _activation_cfg(cfg)
     mod = QuantizedTanh(cfg=act_cfg, name=name)
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -278,9 +286,7 @@ def _make_relu(orig: nn.ReLU, cfg: OpQuantConfig, name: str, quantize_nonlinear=
     from src.ops.activations import QuantizedReLU
     act_cfg = _activation_cfg(cfg)
     mod = QuantizedReLU(inplace=orig.inplace, cfg=act_cfg, name=name)
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -288,9 +294,7 @@ def _make_relu6(orig: nn.ReLU6, cfg: OpQuantConfig, name: str, quantize_nonlinea
     from src.ops.activations import QuantizedReLU6
     act_cfg = _activation_cfg(cfg)
     mod = QuantizedReLU6(inplace=orig.inplace, cfg=act_cfg, name=name)
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -301,9 +305,7 @@ def _make_leaky_relu(orig: nn.LeakyReLU, cfg: OpQuantConfig, name: str, quantize
         negative_slope=orig.negative_slope, inplace=orig.inplace,
         cfg=act_cfg, name=name,
     )
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -311,9 +313,7 @@ def _make_silu(orig: nn.SiLU, cfg: OpQuantConfig, name: str, quantize_nonlinear=
     from src.ops.activations import QuantizedSiLU
     act_cfg = _activation_cfg(cfg)
     mod = QuantizedSiLU(inplace=orig.inplace, cfg=act_cfg, name=name)
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -321,9 +321,7 @@ def _make_gelu(orig: nn.GELU, cfg: OpQuantConfig, name: str, quantize_nonlinear=
     from src.ops.activations import QuantizedGELU
     act_cfg = _activation_cfg(cfg)
     mod = QuantizedGELU(cfg=act_cfg, name=name)
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -331,9 +329,7 @@ def _make_softmax(orig: nn.Softmax, cfg: OpQuantConfig, name: str, quantize_nonl
     from src.ops.softmax import QuantizedSoftmax
     act_cfg = _activation_cfg(cfg)
     mod = QuantizedSoftmax(dim=orig.dim, cfg=act_cfg, name=name)
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -343,9 +339,7 @@ def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, na
     mod = QuantizedAdaptiveAvgPool2d(
         output_size=orig.output_size, cfg=act_cfg, name=name,
     )
-    if quantize_nonlinear and cfg.input is not None and cfg.input.granularity.mode.name == "PER_BLOCK":
-        mod._entry_storage = cfg.storage
-        mod._entry_compute = cfg.input
+    _set_entry_fields(mod, cfg, quantize_nonlinear)
     return mod
 
 
@@ -615,8 +609,9 @@ def _replace_module(
     LayerNorm, GroupNorm, RMSNorm) receive the full per_block compute scheme
     via ``_nonlinear_true_cfg(cfg)`` — operand entry gets storage → per_block
     two-level quantization matching matmul-family ops.  Activation, softmax,
-    and pooling modules currently apply storage-only derivation (per_block
-    entry quant is added in a follow-up task).
+    and pooling modules also receive per_block entry quantization via
+    ``_entry_storage`` / ``_entry_compute`` fields on the mixin, applied
+    by ``_entry_quantize()`` before the main forward pass.
     """
     # Skip if already quantized (has cfg attribute)
     if hasattr(module, "cfg"):
