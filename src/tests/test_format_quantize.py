@@ -130,8 +130,8 @@ def test_per_block_quantize_vs_mx_round_modes(fmt_name):
             f"{fmt_name}/per_block(32)/{rm}: mismatch"
 
 
-def test_per_block_quantize_vs_mx_shared_exp_none():
-    """fmt.quantize(PER_BLOCK) default == _quantize_mx with shared_exp_method='max'."""
+def test_per_block_quantize_default_shared_exp_method():
+    """fmt.quantize(PER_BLOCK) uses shared_exp_method='max' by default."""
     torch.manual_seed(42)
     x = torch.randn(4, 64)
     fmt = FormatBase.from_str("fp8_e4m3")
@@ -144,8 +144,8 @@ def test_per_block_quantize_vs_mx_shared_exp_none():
     assert torch.equal(result, expected)
 
 
-def test_per_block_quantize_vs_mx_flush_subnorms():
-    """fmt.quantize(PER_BLOCK) default == _quantize_mx with flush_fp32_subnorms=False."""
+def test_per_block_quantize_default_flush_fp32_subnorms():
+    """fmt.quantize(PER_BLOCK) uses flush_fp32_subnorms=False by default."""
     torch.manual_seed(42)
     x = torch.randn(4, 64)
     fmt = FormatBase.from_str("fp8_e4m3")

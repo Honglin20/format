@@ -70,7 +70,7 @@ def test_shared_exponents_zeros():
 # ---------------------------------------------------------------------------
 
 def test_reshape_undo_blocks_no_padding():
-    from src.quantize.mx_quantize import _reshape_to_blocks
+    from src.formats._block_utils import _reshape_to_blocks
     A = torch.randn(2, 64)
     old_A, old_axes, old_orig, old_padded = old_reshape(A.clone(), axes=[-1], block_size=32)
     new_A, new_axes, new_orig, new_padded = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
@@ -78,7 +78,7 @@ def test_reshape_undo_blocks_no_padding():
 
 
 def test_reshape_undo_blocks_with_padding():
-    from src.quantize.mx_quantize import _reshape_to_blocks
+    from src.formats._block_utils import _reshape_to_blocks
     A = torch.randn(2, 48)
     old_A, old_axes, old_orig, old_padded = old_reshape(A.clone(), axes=[-1], block_size=32)
     new_A, new_axes, new_orig, new_padded = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
@@ -86,7 +86,7 @@ def test_reshape_undo_blocks_with_padding():
 
 
 def test_reshape_undo_roundtrip_no_padding():
-    from src.quantize.mx_quantize import _reshape_to_blocks, _undo_reshape_to_blocks
+    from src.formats._block_utils import _reshape_to_blocks, _undo_reshape_to_blocks
     A = torch.randn(2, 64)
     reshaped, axes, orig_shape, padded_shape = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
     recovered = _undo_reshape_to_blocks(reshaped, padded_shape, orig_shape, axes)
@@ -94,7 +94,7 @@ def test_reshape_undo_roundtrip_no_padding():
 
 
 def test_reshape_undo_roundtrip_with_padding():
-    from src.quantize.mx_quantize import _reshape_to_blocks, _undo_reshape_to_blocks
+    from src.formats._block_utils import _reshape_to_blocks, _undo_reshape_to_blocks
     A = torch.randn(2, 48)
     reshaped, axes, orig_shape, padded_shape = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)
     recovered = _undo_reshape_to_blocks(reshaped, padded_shape, orig_shape, axes)
@@ -102,7 +102,7 @@ def test_reshape_undo_roundtrip_with_padding():
 
 
 def test_reshape_undo_blocks_3d():
-    from src.quantize.mx_quantize import _reshape_to_blocks
+    from src.formats._block_utils import _reshape_to_blocks
     A = torch.randn(2, 4, 64)
     old_A, old_axes, old_orig, old_padded = old_reshape(A.clone(), axes=[-1], block_size=32)
     new_A, new_axes, new_orig, new_padded = _reshape_to_blocks(A.clone(), axes=[-1], block_size=32)

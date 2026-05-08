@@ -192,7 +192,9 @@ class FormatBase(ABC):
         return x_q * amax
 
     def _quantize_per_block(self, x, granularity, round_mode, scale=None,
-                              scale_storage="fp32"):
+                              scale_storage="fp32",
+                              _shared_exp_method="max",
+                              _flush_fp32_subnorms=False):
         """Per-block quantization with MX-style shared exponents.
 
         Same structure as _quantize_per_channel:
@@ -208,6 +210,7 @@ class FormatBase(ABC):
             _reshape_to_blocks,
             _undo_reshape_to_blocks,
             _shared_exponents,
+            FP32_EXPONENT_BIAS,
         )
 
         block_size = granularity.block_size
@@ -223,7 +226,11 @@ class FormatBase(ABC):
         # Step 3: compute shared exponents per block
         shared_exp_axes = [a + 1 for a in axes]
         shared_exp = _shared_exponents(
-            A, method="max", axes=shared_exp_axes, ebits=0)
+            A, method=_shared_exp_method, axes=shared_exp_axes, ebits=0)
+
+        # Step 3b: flush subnormal FP32 inputs to zero (legacy mx path)
+        if _flush_fp32_subnorms:
+            A = A * (shared_exp > -FP32_EXPONENT_BIAS).type(A.dtype)
 
         # Step 4: offset by format's max representable exponent
         shared_exp = shared_exp - self.emax
