@@ -2,103 +2,82 @@
 MX block quantization: _quantize_mx, quantize_mx.
 
 The canonical per-block implementation is FormatBase._quantize_per_block().
-Block utility functions (_reshape_to_blocks, _shared_exponents, etc.) live in
-src.formats._block_utils.
+These wrappers exist for backward compatibility with callers (primarily tests)
+that pass legacy mx parameter names.
+
+New code should use::
+
+    quantize(x, QuantScheme.mxfp(fmt, block_size=32))
+    # or directly:
+    fmt.quantize(x, GranularitySpec.per_block(32), round_mode)
 """
 import torch
 from src.formats.base import FormatBase
 from src.formats._block_utils import (
     FP32_EXPONENT_BIAS,
-    FP32_MIN_NORMAL,
     _shared_exponents,
     _reshape_to_blocks,
     _undo_reshape_to_blocks,
 )
 
 
-# ---------------------------------------------------------------------------
-# Core MX quantization
-# ---------------------------------------------------------------------------
+def _quantize_mx(A, scale_bits, elem_format,
+                 shared_exp_method="max", axes=None, block_size=0,
+                 round_mode="nearest", flush_fp32_subnorms=False, scale=None):
+    """Per-block quantize with shared exponents (backward-compat wrapper).
 
-def _quantize_mx(
-    A,
-    scale_bits,
-    elem_format,
-    shared_exp_method="max",
-    axes=None,
-    block_size=0,
-    round_mode="nearest",
-    flush_fp32_subnorms=False,
-    scale=None,
-):
-    """Quantize tensor A using MX-style per-block shared exponents.
-
-    Args:
-        scale: Optional pre-computed shared exponent tensor.  If provided,
-            ``_shared_exponents()`` is skipped and this is used directly.
-            Must have the correct shape for broadcasting with the
-            (possibly tiled) ``A`` tensor.
+    Delegates to ``FormatBase._quantize_per_block()`` for the standard path
+    (shared_exp_method='max', flush_fp32_subnorms=False, block_size>0).
+    Non-standard and per_tensor paths are handled by ``_mx_legacy``.
     """
-    # Shortcut for no quantization
     if elem_format is None:
         return A
 
-    if scale_bits <= 0:
-        raise ValueError("scale_bits must be > 0")
+    fmt = FormatBase.from_str(elem_format) if isinstance(elem_format, str) else elem_format
 
-    # Make sure axes is a list of non-negative numbers
-    axes = [axes] if type(axes) == int else axes
-    axes = [x + A.ndim if x < 0 else x for x in axes]
+    # Per-tensor MX (block_size=0) uses shared exponents without tiling —
+    # not the same as _quantize_per_tensor (which skips shared exponents).
+    if block_size <= 0 or shared_exp_method != "max" or flush_fp32_subnorms:
+        return _mx_legacy(A, fmt, block_size, axes, round_mode,
+                          shared_exp_method, flush_fp32_subnorms)
 
-    # Get format instance
-    if isinstance(elem_format, str):
-        fmt = FormatBase.from_str(elem_format)
-    else:
-        fmt = elem_format
+    from src.scheme.granularity import GranularitySpec
+    axis = axes[0] if isinstance(axes, list) else axes
+    gran = GranularitySpec.per_block(block_size, axis=axis)
+    return fmt._quantize_per_block(A, gran, round_mode)
 
-    # Perform tiling to the hardware vector size
+
+def _mx_legacy(A, fmt, block_size, axes, round_mode,
+                shared_exp_method, flush_fp32_subnorms):
+    """Non-standard shared_exp / flush / per_tensor paths (mx compat only)."""
+    axes = [axes] if isinstance(axes, int) else (axes or [])
+    axes = [A.ndim + a if a < 0 else a for a in axes]
+
     if block_size > 0:
         A, axes, orig_shape, padded_shape = _reshape_to_blocks(A, axes, block_size)
 
-    if scale is not None:
-        shared_exp = scale
-    else:
-        # Quantize
-        shared_exp_axes = [x + 1 for x in axes] if block_size > 0 else axes
+    shared_exp_axes = [a + 1 for a in axes] if block_size > 0 else axes
+    shared_exp = _shared_exponents(A, method=shared_exp_method,
+                                   axes=shared_exp_axes, ebits=0)
 
-        # Get shared exponents
-        shared_exp = _shared_exponents(
-            A, method=shared_exp_method, axes=shared_exp_axes, ebits=0,
-        )
-
-    # Flush subnormal FP32 inputs to zero
     if flush_fp32_subnorms:
         A = A * (shared_exp > -FP32_EXPONENT_BIAS).type(A.dtype)
 
-    # Offset the max exponent by the largest representable exponent
     shared_exp = shared_exp - fmt.emax
-
-    scale_emax = 2**(scale_bits-1) - 1
+    scale_emax = 2**(8-1) - 1
     shared_exp[shared_exp > scale_emax] = float("NaN")
     shared_exp[shared_exp < -scale_emax] = -scale_emax
 
     A = A / (2**shared_exp)
-
     A = fmt.quantize_elemwise(A, round_mode=round_mode,
-                              allow_denorm=True, saturate_normals=True)
-
+                               allow_denorm=True, saturate_normals=True)
     A = A * (2**shared_exp)
 
-    # Undo tile reshaping
     if block_size:
         A = _undo_reshape_to_blocks(A, padded_shape, orig_shape, axes)
 
     return A
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def quantize_mx(
     A,
