@@ -180,17 +180,17 @@ def test_quantize_mx_floor_round(fmt):
 
 
 # ---------------------------------------------------------------------------
-# 4. quantize_mx(scheme) equivalence
+# 4. quantize(x, scheme) equivalence (per_block via QuantScheme)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("fmt", MX_FORMATS)
 def test_quantize_mx_scheme(fmt):
-    from src.quantize.mx_quantize import quantize_mx
+    from src.quantize.elemwise import quantize
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     config = {"w_elem_format": fmt, "a_elem_format": fmt, "block_size": 32, "bfloat": 16}
     old_specs = old_finalize(config.copy())
     scheme = QuantScheme.mxfp(fmt, block_size=32)
     old_out = old_qmx_op(A.clone(), mx_specs=old_specs, elem_format=fmt, axes=[-1])
-    new_out = quantize_mx(A.clone(), scheme=scheme, axes=[-1])
+    new_out = quantize(A.clone(), scheme)
     assert torch.equal(old_out, new_out), f"mx scheme mismatch for {fmt}"
