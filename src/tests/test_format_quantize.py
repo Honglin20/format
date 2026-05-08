@@ -111,6 +111,84 @@ def test_per_block_various_sizes(block_size):
 
 
 # ---------------------------------------------------------------------------
+# 4b. PER_BLOCK safety net: fmt.quantize(PER_BLOCK) ≡ _quantize_mx (all paths)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "fp4_e2m1", "int8"])
+def test_per_block_quantize_vs_mx_round_modes(fmt_name):
+    """fmt.quantize(x, per_block, round) == _quantize_mx for all round modes."""
+    torch.manual_seed(42)
+    x = torch.randn(4, 64)
+    fmt = FormatBase.from_str(fmt_name)
+    gran = GranularitySpec.per_block(32)
+
+    for rm in ["nearest", "floor"]:
+        result = fmt.quantize(x, gran, rm)
+        expected = _quantize_mx(x, scale_bits=8, elem_format=fmt,
+                                block_size=32, axes=-1, round_mode=rm)
+        assert torch.equal(result, expected), \
+            f"{fmt_name}/per_block(32)/{rm}: mismatch"
+
+
+def test_per_block_quantize_vs_mx_shared_exp_none():
+    """fmt.quantize(PER_BLOCK) default == _quantize_mx with shared_exp_method='max'."""
+    torch.manual_seed(42)
+    x = torch.randn(4, 64)
+    fmt = FormatBase.from_str("fp8_e4m3")
+    gran = GranularitySpec.per_block(32)
+
+    result = fmt.quantize(x, gran, "nearest")
+    expected = _quantize_mx(x, scale_bits=8, elem_format=fmt,
+                            block_size=32, axes=-1, round_mode="nearest",
+                            shared_exp_method="max")
+    assert torch.equal(result, expected)
+
+
+def test_per_block_quantize_vs_mx_flush_subnorms():
+    """fmt.quantize(PER_BLOCK) default == _quantize_mx with flush_fp32_subnorms=False."""
+    torch.manual_seed(42)
+    x = torch.randn(4, 64)
+    fmt = FormatBase.from_str("fp8_e4m3")
+    gran = GranularitySpec.per_block(32)
+
+    result = fmt.quantize(x, gran, "nearest")
+    expected = _quantize_mx(x, scale_bits=8, elem_format=fmt,
+                            block_size=32, axes=-1, round_mode="nearest",
+                            flush_fp32_subnorms=False)
+    assert torch.equal(result, expected)
+
+
+@pytest.mark.parametrize("block_size", [16, 32, 64])
+def test_per_block_quantize_vs_mx_various_blocks(block_size):
+    """fmt.quantize(x, per_block(N)) == _quantize_mx for various block sizes."""
+    torch.manual_seed(42)
+    x = torch.randn(4, block_size * 4)
+    fmt = FormatBase.from_str("fp8_e4m3")
+    gran = GranularitySpec.per_block(block_size)
+
+    result = fmt.quantize(x, gran, "nearest")
+    expected = _quantize_mx(x, scale_bits=8, elem_format=fmt,
+                            block_size=block_size, axes=-1, round_mode="nearest")
+    assert torch.equal(result, expected)
+
+
+@pytest.mark.parametrize("shape", [
+    (4, 64), (2, 3, 64), (2, 3, 4, 64),
+])
+def test_per_block_quantize_vs_mx_multi_dim(shape):
+    """fmt.quantize(x, per_block) == _quantize_mx for multi-dim tensors."""
+    torch.manual_seed(42)
+    x = torch.randn(*shape)
+    fmt = FormatBase.from_str("fp8_e4m3")
+    gran = GranularitySpec.per_block(32)
+
+    result = fmt.quantize(x, gran, "nearest")
+    expected = _quantize_mx(x, scale_bits=8, elem_format=fmt,
+                            block_size=32, axes=-1, round_mode="nearest")
+    assert torch.equal(result, expected)
+
+
+# ---------------------------------------------------------------------------
 # 5. IntFormat specialization — ebits=0 means saturate_normals (clamp, no Inf)
 # ---------------------------------------------------------------------------
 
