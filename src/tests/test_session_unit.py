@@ -1007,8 +1007,13 @@ class TestQuantizeNonLinearSwitch:
     # quantize_nonlinear=False — module type verification
     # ------------------------------------------------------------------
 
-    def test_nonlinear_modules_skipped(self):
-        """quantize_nonlinear=False leaves norm/activation/pool as original types."""
+    def test_nonlinear_modules_replaced(self):
+        """quantize_nonlinear=False still replaces norm/activation/pool modules.
+
+        Non-linear modules receive storage-only OpQuantConfig (MX per_block
+        compute stripped by _non_matmul_cfg / _activation_cfg), matching
+        MX architecture where non-linear ops only go through elemwise quantization.
+        """
         from src.session._model import quantize_model
         from src.scheme.op_config import OpQuantConfig
 
@@ -1018,17 +1023,31 @@ class TestQuantizeNonLinearSwitch:
         qmodel = quantize_model(model, cfg, quantize_nonlinear=False)
 
         types = _get_module_types(qmodel)
-        # Matmul modules should be replaced
-        assert types["0"].startswith("Quantized")   # Conv2d
-        assert types["5"].startswith("Quantized")   # Linear
-        assert types["8"].startswith("Quantized")   # Linear
+        # All supported modules (matmul AND nonlinear) should be Quantized*
+        unsupported = {"Flatten"}
+        for name, type_name in types.items():
+            if type_name in unsupported:
+                continue
+            assert type_name.startswith("Quantized"), \
+                f"{name} ({type_name}) should be Quantized*"
 
-        # Nonlinear modules should stay as original nn.* types
-        assert types["1"] == "BatchNorm2d"          # NOT QuantizedBatchNorm2d
-        assert types["2"] == "ReLU"                  # NOT QuantizedReLU
-        assert types["3"] == "AdaptiveAvgPool2d"    # NOT QuantizedAdaptiveAvgPool2d
-        assert types["6"] == "LayerNorm"            # NOT QuantizedLayerNorm
-        assert types["7"] == "SiLU"                  # NOT QuantizedSiLU
+        # Verify nonlinear modules have NO MX per_block compute
+        for name, mod in qmodel.named_modules():
+            if not hasattr(mod, 'cfg') or name == '':
+                continue
+            t = type(mod).__name__
+            # Only linear/conv should retain MX compute (per_block or per_channel)
+            if 'Linear' in t or 'Conv' in t:
+                continue
+            # Non-linear modules: storage-only (no MX per_block)
+            if mod.cfg.input is not None:
+                gran = mod.cfg.input.granularity.mode.name
+                assert gran == "PER_TENSOR", \
+                    f"{name} ({t}) has input gran={gran}, expected PER_TENSOR (storage-only)"
+            if mod.cfg.weight is not None:
+                gran = mod.cfg.weight.granularity.mode.name
+                assert gran == "PER_TENSOR", \
+                    f"{name} ({t}) has weight gran={gran}, expected PER_TENSOR (storage-only)"
 
     def test_only_matmul_types_in_matmul_tuple(self):
         """_MATMUL_TYPES contains exactly the matmul module classes."""
@@ -1104,8 +1123,13 @@ class TestQuantizeNonLinearSwitch:
         assert out.shape == (2, 10)
         assert not torch.isnan(out).any()
 
-    def test_forward_values_differ_between_modes(self):
-        """quantize_nonlinear=False vs True produce different output values."""
+    def test_nonlinear_same_output_both_modes(self):
+        """With compat per_tensor configs, True and False produce identical output.
+
+        Both modes apply the same storage-only configs to nonlinear modules
+        (_non_matmul_cfg / _activation_cfg).  True is reserved for future
+        extra-quantization steps beyond MX.
+        """
         import copy
         from src.session._model import quantize_model
 
@@ -1131,9 +1155,10 @@ class TestQuantizeNonLinearSwitch:
             out_false = qmodel_false(x)
             out_true = qmodel_true(x)
 
-        # Outputs differ because nonlinear modules are quantized in one
-        # but not the other.
-        assert not torch.allclose(out_false, out_true)
+        # Both modes produce identical output because they apply the same
+        # storage-only configs to non-linear modules.
+        assert torch.equal(out_false, out_true), \
+            "True and False should produce identical output with current configs"
 
     # ------------------------------------------------------------------
     # Session high-level API integration
@@ -1169,12 +1194,13 @@ class TestQuantizeNonLinearSwitch:
         assert result.fp32_metrics is not None
         assert result.quant_metrics is not None
 
-        # Verify module types: BatchNorm and ReLU are untouched
+        # Verify module types: ALL modules (incl. BN, ReLU) are Quantized*
         types = _get_module_types(session.qmodel)
-        assert types["1"] == "BatchNorm2d"
-        assert types["2"] == "ReLU"
-        assert types["0"].startswith("Quantized")   # Conv2d quantized
-        assert types["4"].startswith("Quantized")   # Linear quantized
+        for name, type_name in types.items():
+            if type_name == "Flatten":
+                continue
+            assert type_name.startswith("Quantized"), \
+                f"{name} ({type_name}) should be Quantized*"
 
     def test_session_chainable_api_quantize_nonlinear_false(self):
         """Chainable API works with quantize_nonlinear=False."""
@@ -1199,11 +1225,11 @@ class TestQuantizeNonLinearSwitch:
         result = session.result
         assert isinstance(result, SessionResult)
 
-        # ReLU should be untouched
+        # All modules (including ReLU) should be Quantized*
         types = _get_module_types(session.qmodel)
-        assert types["1"] == "ReLU"
-        assert types["0"].startswith("Quantized")
-        assert types["2"].startswith("Quantized")
+        for name, type_name in types.items():
+            assert type_name.startswith("Quantized"), \
+                f"{name} ({type_name}) should be Quantized*"
 
     def test_session_forward_quantize_nonlinear_false(self):
         """session(x) works with quantize_nonlinear=False."""
@@ -1272,7 +1298,11 @@ class TestQuantizeNonLinearSwitch:
                 f"{name} should be quantized (matmul-only model)"
 
     def test_model_with_only_nonlinear_modules(self):
-        """quantize_nonlinear=False on a nonlinear-only model skips everything."""
+        """quantize_nonlinear=False on a nonlinear-only model still replaces modules.
+
+        Non-linear modules receive storage-only configs via _non_matmul_cfg /
+        _activation_cfg, matching MX elemwise-only quantization.
+        """
         from src.session._model import quantize_model
 
         model = nn.Sequential(nn.ReLU(), nn.Sigmoid(), nn.Tanh())
@@ -1281,9 +1311,9 @@ class TestQuantizeNonLinearSwitch:
         qmodel = quantize_model(model, cfg, quantize_nonlinear=False)
 
         types = _get_module_types(qmodel)
-        assert types["0"] == "ReLU"
-        assert types["1"] == "Sigmoid"
-        assert types["2"] == "Tanh"
+        assert types["0"].startswith("Quantized"), f"ReLU should be Quantized*, got {types['0']}"
+        assert types["1"].startswith("Quantized"), f"Sigmoid should be Quantized*, got {types['1']}"
+        assert types["2"].startswith("Quantized"), f"Tanh should be Quantized*, got {types['2']}"
 
     def test_per_block_mx_with_quantize_nonlinear_false(self):
         """MX per_block format + quantize_nonlinear=False works correctly."""
@@ -1317,13 +1347,16 @@ class TestQuantizeNonLinearSwitch:
         assert not torch.isnan(out).any()
 
         types = _get_module_types(qmodel)
-        assert types["0"].startswith("Quantized")
-        assert types["1"] == "BatchNorm1d"
-        assert types["2"] == "ReLU"
-        assert types["3"].startswith("Quantized")
+        for name, type_name in types.items():
+            assert type_name.startswith("Quantized"), \
+                f"{name} ({type_name}) should be Quantized*"
 
-    def test_storage_bits_nonlinear_true_vs_false_difference(self):
-        """With storage_bits>0, quantize_nonlinear toggle changes nonlinear behaviour."""
+    def test_storage_bits_nonlinear_both_modes_identical(self):
+        """With storage_bits>0 + compat config, both modes apply storage to nonlinear.
+
+        quantize_nonlinear=True is reserved for future extra-quantization steps.
+        For now, both modes produce identical output.
+        """
         import copy
         from src.session._model import quantize_model
 
@@ -1354,5 +1387,6 @@ class TestQuantizeNonLinearSwitch:
             out_false = qmodel_false(x)
             out_true = qmodel_true(x)
 
-        # Storage quant + nonlinear quant → difference
-        assert not torch.allclose(out_false, out_true)
+        # Both modes produce identical output: storage applied to nonlinear in both cases
+        assert torch.equal(out_false, out_true), \
+            "True and False should produce identical output with current configs"

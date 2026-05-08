@@ -45,11 +45,17 @@ class DistributionObserver(SliceAwareObserver):
         max_entropy = torch.log2(torch.tensor(self.hist_bins, dtype=torch.float32)).item()
         norm_entropy = entropy_raw / (max_entropy + 1e-30)
 
+        rms = f.pow(2).mean().sqrt()
+        peak = f_abs.max()
+
         return {
             "min": f.min().item(),
             "max": f.max().item(),
             "mean": mean.item(),
             "std": std.item(),
+            "peak": peak.item(),
+            "rms": rms.item(),
+            "crest_factor": (peak / (rms + 1e-30)).item(),
             "skewness": skew,
             "kurtosis": kurt,
             "excess_kurtosis": excess_kurt,

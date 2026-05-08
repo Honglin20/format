@@ -385,14 +385,17 @@ class TestMxEquivalence:
     # ---- SIMD ops: identity with direct src/ops calls ----
 
     def test_simd_add_identity_mxint8(self):
-        """QuantizeContext(torch.add, mxint8) == simd_add(inner_scheme=mxint8)."""
-        from src.ops.elemwise import simd_add
+        """QuantizeContext(torch.add, bf16) == simd_add(inner_scheme=bf16).
 
-        s = _mx_scheme_from_specs({
-            "bfloat": 16, "a_elem_format": "int8",
-            "w_elem_format": "int8", "block_size": 32,
-        })
-        cfg = OpQuantConfig(input=s, output=s)
+        MX SIMD ops use elemwise (storage) quantization only — not per_block MX compute.
+        """
+        from src.ops.elemwise import simd_add
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
+
+        s = QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(storage=s)
 
         a, b = torch.randn(4, 32), torch.randn(4, 32) * 0.5
         direct = simd_add(a.clone(), b.clone(), inner_scheme=s, quantize_backprop=True)
@@ -403,14 +406,14 @@ class TestMxEquivalence:
         _assert_bit_exact(ctx_result, direct, "add-identity-mxint8")
 
     def test_simd_div_identity_mxint8(self):
-        """QuantizeContext(torch.div, mxint8) == simd_div(inner_scheme=mxint8)."""
+        """QuantizeContext(torch.div, bf16) == simd_div(inner_scheme=bf16)."""
         from src.ops.elemwise import simd_div
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
 
-        s = _mx_scheme_from_specs({
-            "bfloat": 16, "a_elem_format": "int8",
-            "w_elem_format": "int8", "block_size": 32,
-        })
-        cfg = OpQuantConfig(input=s, output=s)
+        s = QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(storage=s)
 
         a = torch.randn(4, 32)
         b = torch.randn(4, 32).abs() + 0.5
@@ -422,14 +425,14 @@ class TestMxEquivalence:
         _assert_bit_exact(ctx_result, direct, "div-identity-mxint8")
 
     def test_simd_exp_identity_mxint8(self):
-        """QuantizeContext(torch.exp, mxint8) == simd_exp(inner_scheme=mxint8)."""
+        """QuantizeContext(torch.exp, bf16) == simd_exp(inner_scheme=bf16)."""
         from src.ops.elemwise import simd_exp
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
 
-        s = _mx_scheme_from_specs({
-            "bfloat": 16, "a_elem_format": "int8",
-            "w_elem_format": "int8", "block_size": 32,
-        })
-        cfg = OpQuantConfig(input=s, output=s)
+        s = QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(storage=s)
 
         x = torch.randn(4, 32)
         direct = simd_exp(x.clone(), inner_scheme=s, quantize_backprop=True)
@@ -442,12 +445,12 @@ class TestMxEquivalence:
     def test_simd_add_backward_identity_mxint8(self):
         """QuantizeContext(torch.add).backward() == simd_add().backward()."""
         from src.ops.elemwise import simd_add
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
 
-        s = _mx_scheme_from_specs({
-            "bfloat": 16, "a_elem_format": "int8",
-            "w_elem_format": "int8", "block_size": 32,
-        })
-        cfg = OpQuantConfig(input=s, output=s)
+        s = QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(storage=s)
 
         a, b = torch.randn(4, 32), torch.randn(4, 32) * 0.5
 

@@ -81,6 +81,37 @@ class TestDistributionObserver:
         assert metrics["norm_entropy"] > 0.85
         assert abs(metrics["skewness"]) < 0.5
 
+    def test_crest_factor_fields(self):
+        """Verify peak, rms, and crest_factor are computed correctly."""
+        obs = DistributionObserver()
+        # Known values: [2.0, 3.0]
+        # peak = max(abs([2, 3])) = 3.0
+        # rms = sqrt(mean([4, 9])) = sqrt(6.5) ≈ 2.5495
+        # crest_factor = 3.0 / 2.5495 ≈ 1.1767
+        f = torch.tensor([2.0, 3.0])
+        q = f.clone()
+
+        metrics = obs._measure(("tensor",), f, q)
+
+        assert "peak" in metrics
+        assert "rms" in metrics
+        assert "crest_factor" in metrics
+        assert metrics["peak"] == pytest.approx(3.0)
+        assert metrics["rms"] == pytest.approx(2.5495, abs=1e-4)
+        assert metrics["crest_factor"] == pytest.approx(1.1767, abs=1e-4)
+
+    def test_crest_factor_negative_values(self):
+        """peak = max(|x|), crest should work for signed tensors."""
+        obs = DistributionObserver()
+        # [-5.0, 2.0] → peak = 5.0, rms = sqrt((25+4)/2) = sqrt(14.5) ≈ 3.8079
+        f = torch.tensor([-5.0, 2.0])
+        q = f.clone()
+
+        metrics = obs._measure(("tensor",), f, q)
+
+        assert metrics["peak"] == pytest.approx(5.0)
+        assert metrics["crest_factor"] == pytest.approx(5.0 / 3.8079, abs=1e-4)
+
     def test_dynamic_range_bits(self):
         """Known range: [1e-6, 1.0] → dynamic_range_bits ≈ log2(1e6) ≈ 20."""
         obs = DistributionObserver()

@@ -1,11 +1,11 @@
 """Output-driven reporting layer.
 
-Users declare desired outputs ("accuracy", "qsnr", "histogram", ...).
-The system derives needed observers and evaluation.
+Post-hoc visualization is available via ``report.plot`` on ``StudyReport``.
+Observer selection is driven by output key specs in ``_spec.py``.
 """
 
 from src.report._session_report import SessionReport
-from src.report._spec import PRESETS, _OUTPUT_SPEC, resolve_outputs
+from src.report._spec import resolve_outputs
 from src.report._study_report import StudyReport
 
 __all__ = [

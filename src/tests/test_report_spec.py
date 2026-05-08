@@ -126,8 +126,8 @@ class TestPresets:
         assert set(PRESETS["all"]) == set(_OUTPUT_SPEC.keys())
 
     def test_all_preset_count(self):
-        """All preset has exactly 17 keys."""
-        assert len(PRESETS["all"]) == 17
+        """All preset contains every key from _OUTPUT_SPEC."""
+        assert len(PRESETS["all"]) == len(_OUTPUT_SPEC)
 
 
 class TestOutputSpec:

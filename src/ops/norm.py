@@ -396,9 +396,6 @@ class QuantizedBatchNorm2d(ObservableMixin, nn.BatchNorm2d):
         self._analysis_name = name
 
     def forward(self, x):
-        if self.cfg == OpQuantConfig() and self.inner_scheme is None:
-            return super().forward(x)
-
         self._check_input_dim(x)
 
         if self.momentum is None:
@@ -444,9 +441,6 @@ class QuantizedBatchNorm1d(ObservableMixin, nn.BatchNorm1d):
         self._analysis_name = name
 
     def forward(self, x):
-        if self.cfg == OpQuantConfig() and self.inner_scheme is None:
-            return super().forward(x)
-
         self._check_input_dim(x)
 
         if self.momentum is None:
@@ -492,9 +486,6 @@ class QuantizedBatchNorm3d(ObservableMixin, nn.BatchNorm3d):
         self._analysis_name = name
 
     def forward(self, x):
-        if self.cfg == OpQuantConfig() and self.inner_scheme is None:
-            return super().forward(x)
-
         self._check_input_dim(x)
 
         if self.momentum is None:
@@ -626,9 +617,6 @@ class QuantizedLayerNorm(ObservableMixin, nn.LayerNorm):
         self._analysis_name = name
 
     def forward(self, x):
-        if self.cfg == OpQuantConfig() and self.inner_scheme is None:
-            return super().forward(x)
-
         emit_fn = self._emit if self._observers else None
         return LayerNormFunction.apply(
             x, self.weight, self.bias, self.eps,
@@ -745,9 +733,6 @@ class QuantizedGroupNorm(ObservableMixin, nn.GroupNorm):
         self._analysis_name = name
 
     def forward(self, x):
-        if self.cfg == OpQuantConfig() and self.inner_scheme is None:
-            return super().forward(x)
-
         emit_fn = self._emit if self._observers else None
         return GroupNormFunction.apply(
             x, self.num_groups, self.weight, self.bias, self.eps,
@@ -869,8 +854,6 @@ class QuantizedRMSNorm(ObservableMixin, nn.LayerNorm):
         self._analysis_name = name
 
     def forward(self, x):
-        if self.cfg == OpQuantConfig() and self.inner_scheme is None:
-            return super().forward(x)
         emit_fn = self._emit if self._observers else None
         return RMSNormFunction.apply(
             x, self.weight, self.bias, self.eps,

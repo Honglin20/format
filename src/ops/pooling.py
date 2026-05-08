@@ -124,12 +124,8 @@ class QuantizedAdaptiveAvgPool2d(_QuantizedModuleMixin, ObservableMixin, nn.Modu
         if inner_scheme is None:
             return _f_adaptive_avg_pool2d(input, self.output_size)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
         result = AdaptiveAvgPool2dFunction.apply(
             input, self.output_size, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result

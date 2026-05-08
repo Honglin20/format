@@ -39,6 +39,8 @@ class ObservableMixin:
 
         No-op when no observers are attached (zero overhead).
         """
+        if scheme is None:
+            return
         observers = self._observers
         if not observers:
             return

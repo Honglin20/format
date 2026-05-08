@@ -48,8 +48,8 @@ class SessionReport:
         Each dict has keys ``"layer"``, ``"qsnr"`` (if available),
         and ``"mse"`` (if available).
 
-        This format is compatible with :func:`extract_metric_per_layer`
-        in ``_converters.py``.
+        Returns a list of dicts, each with ``"layer"``, ``"qsnr"``,
+        and ``"mse"`` keys (when available).
         """
         rows: List[Dict[str, Any]] = []
         layers: set = set()

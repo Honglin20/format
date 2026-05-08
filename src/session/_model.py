@@ -34,30 +34,68 @@ from src.ops.norm import QuantizedBatchNorm1d, QuantizedBatchNorm2d, QuantizedBa
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _norm_inner_scheme(cfg: OpQuantConfig):
+    """Extract inner scheme for norm ops (quantizing every intermediate step).
+
+    - If ``cfg.storage`` exists (bf16/fp8 storage), use it — MX with storage
+      quantizes every intermediate result.
+    - If ``cfg.storage`` is None and ``cfg.input`` is a per_tensor elemwise
+      scheme (compat-style config), use it — input carries the elemwise scheme.
+    - If ``cfg.storage`` is None and ``cfg.input`` is a per_block MX compute
+      scheme (MX bfloat=0), return None — MX without storage runs norms in fp32.
+    """
+    if cfg.storage is not None:
+        return cfg.storage
+    if cfg.input is not None and cfg.input.granularity.mode.name == "PER_TENSOR":
+        return cfg.input
+    return None
+
+
+def _is_mx_compute(scheme) -> bool:
+    """True if a scheme is MX per_block compute, not elemwise storage."""
+    if scheme is None:
+        return False
+    return scheme.granularity.mode.name == "PER_BLOCK"
+
+
 def _non_matmul_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
     """Derive an OpQuantConfig for norm ops — strip MX compute, keep elemwise.
 
-    When ``cfg`` has a ``storage`` scheme (two-level model from QuantConfig),
-    drop the per-role MX block schemes so only element-wise storage is applied.
-    When ``cfg`` has no ``storage`` (compat-style configs where input/weight
-    already carry the elemwise scheme), pass it through unchanged.
+    Three cases:
+    - Two-level model with storage (e.g. bf16): keep only storage + backward fields.
+    - Compat-style config where input carries per_tensor elemwise scheme:
+      pass through unchanged (no separate storage field).
+    - MX with bfloat=0 (storage=None, input is per_block MX compute):
+      return empty — MX applies identity to all vec_* / elemwise operations.
     """
-    if cfg.storage is None:
-        return cfg
-    return OpQuantConfig(
-        storage=cfg.storage,
-        grad_output=cfg.grad_output,
-        grad_input=cfg.grad_input,
-        grad_weight=cfg.grad_weight,
-        grad_bias=cfg.grad_bias,
-    )
+    if cfg.storage is not None:
+        return OpQuantConfig(
+            storage=cfg.storage,
+            grad_output=cfg.grad_output or cfg.storage,
+            grad_input=cfg.grad_input or cfg.storage,
+            grad_weight=cfg.grad_weight or cfg.storage,
+            grad_bias=cfg.grad_bias or cfg.storage,
+        )
+    # No storage: either compat-style (input is per_tensor elemwise) or MX bfloat=0
+    if _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
+        return OpQuantConfig()  # MX bfloat=0 — no quantization for non-matmul ops
+    return cfg  # compat-style: input/weight carry per_tensor elemwise schemes
 
 
 def _activation_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
-    """Derive an OpQuantConfig for activation/softmax/pool ops — strip MX compute."""
-    if cfg.storage is None:
-        return cfg
-    return OpQuantConfig(storage=cfg.storage, input=cfg.storage)
+    """Derive an OpQuantConfig for activation/softmax/pool ops — strip MX compute.
+
+    Three cases (same discrimination as ``_non_matmul_cfg``).
+    """
+    if cfg.storage is not None:
+        return OpQuantConfig(
+            storage=cfg.storage,
+            input=cfg.storage,
+            grad_input=cfg.storage,
+        )
+    if _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
+        return OpQuantConfig()  # MX bfloat=0 — no quantization for activation/softmax
+    return cfg  # compat-style: input carries per_tensor elemwise scheme
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +134,13 @@ def _make_conv_transpose(orig, cfg, name, conv_cls):
 
 def _make_bn(orig, cfg, name, bn_cls):
     """Generic factory for QuantizedBatchNorm{1,2,3}d."""
+    norm_cfg = _non_matmul_cfg(cfg)
     mod = bn_cls(
         num_features=orig.num_features, eps=orig.eps,
         momentum=orig.momentum, affine=orig.affine,
         track_running_stats=orig.track_running_stats,
-        cfg=_non_matmul_cfg(cfg),
-        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
+        cfg=norm_cfg,
+        inner_scheme=_norm_inner_scheme(cfg), quantize_backprop=norm_cfg.is_training, name=name,
     )
     _copy_bn_state(orig, mod)
     return mod
@@ -121,11 +160,12 @@ def _make_ln(orig: nn.LayerNorm, cfg: OpQuantConfig, name: str):
     normalized_shape = orig.normalized_shape
     if isinstance(normalized_shape, int):
         normalized_shape = (normalized_shape,)
+    norm_cfg = _non_matmul_cfg(cfg)
     mod = QuantizedLayerNorm(
         normalized_shape=list(normalized_shape), eps=orig.eps,
         elementwise_affine=orig.elementwise_affine,
-        cfg=_non_matmul_cfg(cfg),
-        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
+        cfg=norm_cfg,
+        inner_scheme=_norm_inner_scheme(cfg), quantize_backprop=norm_cfg.is_training, name=name,
     )
     if orig.elementwise_affine:
         mod.weight.data = orig.weight.data.clone()
@@ -135,11 +175,12 @@ def _make_ln(orig: nn.LayerNorm, cfg: OpQuantConfig, name: str):
 
 def _make_gn(orig: nn.GroupNorm, cfg: OpQuantConfig, name: str):
     from src.ops.norm import QuantizedGroupNorm
+    norm_cfg = _non_matmul_cfg(cfg)
     mod = QuantizedGroupNorm(
         num_groups=orig.num_groups, num_channels=orig.num_channels,
         eps=orig.eps, affine=orig.affine,
-        cfg=_non_matmul_cfg(cfg),
-        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
+        cfg=norm_cfg,
+        inner_scheme=_norm_inner_scheme(cfg), quantize_backprop=norm_cfg.is_training, name=name,
     )
     if orig.affine:
         mod.weight.data = orig.weight.data.clone()
@@ -152,11 +193,12 @@ def _make_rms_norm(orig, cfg: OpQuantConfig, name: str):
     normalized_shape = orig.normalized_shape
     if isinstance(normalized_shape, int):
         normalized_shape = (normalized_shape,)
+    norm_cfg = _non_matmul_cfg(cfg)
     mod = QuantizedRMSNorm(
         normalized_shape=list(normalized_shape), eps=orig.eps,
         elementwise_affine=orig.elementwise_affine,
-        cfg=_non_matmul_cfg(cfg),
-        inner_scheme=cfg.storage or cfg.input, quantize_backprop=cfg.is_training, name=name,
+        cfg=norm_cfg,
+        inner_scheme=_norm_inner_scheme(cfg), quantize_backprop=norm_cfg.is_training, name=name,
     )
     if orig.elementwise_affine:
         mod.weight.data = orig.weight.data.clone()
@@ -230,13 +272,23 @@ def _resolve_context_cfg(
 ) -> OpQuantConfig:
     """Resolve a single OpQuantConfig for QuantizeContext inline-op quantization.
 
-    When cfg is a singleton OpQuantConfig, it is used directly for inline ops.
+    When cfg is a singleton OpQuantConfig, it is passed through ``_non_matmul_cfg``
+    to strip MX per_block compute — SIMD/non-linear ops only receive elemwise
+    (storage) quantization, matching MX architecture.  matmul-family inline ops
+    get the full config via ``op_cfgs`` (auto-populated in ``quantize_model``).
+
     When cfg is a dict (per-module configs), the storage scheme from the first
-    config that has one is extracted as the default for inline ops, so that
-    residual adds and other torch.* calls still get element-wise quantization.
-    Per-op overrides from ``op_cfgs`` take precedence.
+    config that has one is extracted as the default for inline ops.
     """
     if isinstance(cfg, OpQuantConfig):
+        # When MX per_block compute is present, strip it from the default cfg.
+        # MX never applies per_block compute to SIMD/non-linear operations — only
+        # elemwise storage. Use the same discrimination as _non_matmul_cfg:
+        #   - storage present → keep storage only
+        #   - MX per_block → empty (bfloat=0 → identity)
+        #   - compat-style per_tensor → pass through unchanged
+        if cfg.storage is not None or _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
+            return _non_matmul_cfg(cfg)
         return cfg
     # cfg is a dict — extract storage (or per_tensor input) for inline-op defaults
     storage = None
@@ -416,7 +468,17 @@ def quantize_model(
     # Step 2: Patch forward on the root model only
     if _patch_root:
         ctx_cfg = _resolve_context_cfg(cfg, op_cfgs)
-        _patch_forward(model, ctx_cfg, op_cfgs=op_cfgs, observers=observers)
+
+        # When cfg has MX per_block compute, auto-populate matmul-family op_cfgs
+        # with the full config. The default ctx_cfg is storage-only (strip MX
+        # compute for SIMD/non-linear ops), so matmul inline ops need explicit
+        # entries to receive MX per_block quantization.
+        _final_op_cfgs = dict(op_cfgs) if op_cfgs else {}
+        if isinstance(cfg, OpQuantConfig) and (_is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight)):
+            for matmul_op in ("matmul", "mm", "bmm", "linear"):
+                if matmul_op not in _final_op_cfgs:
+                    _final_op_cfgs[matmul_op] = cfg
+        _patch_forward(model, ctx_cfg, op_cfgs=_final_op_cfgs or None, observers=observers)
 
     return model
 
@@ -449,17 +511,24 @@ def _replace_module(
     *,
     quantize_nonlinear: bool = True,
 ):
-    """Replace a single module with its quantized version, or return None."""
+    """Replace a single module with its quantized version, or return None.
+
+    When *quantize_nonlinear* is False, non-linear modules still get replaced — but
+    the ``_make_*`` functions derive a storage-only ``OpQuantConfig`` via
+    ``_non_matmul_cfg`` / ``_activation_cfg``, stripping MX per_block compute so
+    only elemwise (storage) quantization is applied.  This matches MX architecture
+    where non-linear ops only go through ``quantize_elemwise_op``.
+
+    When *quantize_nonlinear* is True (default), the same storage-only derivation
+    applies today.  The flag is reserved for future "extra quantization" steps
+    beyond MX (e.g. applying MX per_block compute to non-linear ops).
+    """
     # Skip if already quantized (has cfg attribute)
     if hasattr(module, "cfg"):
         return None
 
     make_fn = _MODULE_MAPPING.get(type(module))
     if make_fn is None:
-        return None
-
-    # When quantize_nonlinear=False, skip norm/activation/pool modules entirely.
-    if not quantize_nonlinear and not isinstance(module, _MATMUL_TYPES):
         return None
 
     resolved_cfg = _resolve_cfg(cfg, name)

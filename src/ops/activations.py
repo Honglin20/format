@@ -77,16 +77,10 @@ class QuantizedSigmoid(_QuantizedModuleMixin, ObservableMixin, nn.Sigmoid):
     def forward(self, input):
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
-        if inner_scheme is None:
-            return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
         result = SigmoidFunction.apply(
             input, inner_scheme, quantize_backprop, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result
 
 
@@ -135,16 +129,10 @@ class QuantizedTanh(_QuantizedModuleMixin, ObservableMixin, nn.Tanh):
     def forward(self, input):
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
-        if inner_scheme is None:
-            return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
         result = TanhFunction.apply(
             input, inner_scheme, quantize_backprop, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result
 
 
@@ -201,17 +189,11 @@ class QuantizedReLU(_QuantizedModuleMixin, ObservableMixin, nn.ReLU):
     def forward(self, input):
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
-        if inner_scheme is None:
-            return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
         result = ReLUFunction.apply(
             input, self.inplace, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result
 
 
@@ -268,17 +250,11 @@ class QuantizedReLU6(_QuantizedModuleMixin, ObservableMixin, nn.ReLU6):
     def forward(self, input):
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
-        if inner_scheme is None:
-            return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
         result = ReLU6Function.apply(
             input, self.inplace, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result
 
 
@@ -336,17 +312,11 @@ class QuantizedLeakyReLU(_QuantizedModuleMixin, ObservableMixin, nn.LeakyReLU):
     def forward(self, input):
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
-        if inner_scheme is None:
-            return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
         result = LeakyReLUFunction.apply(
             input, self.negative_slope, self.inplace,
             inner_scheme, quantize_backprop, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result
 
 
@@ -404,17 +374,11 @@ class QuantizedSiLU(_QuantizedModuleMixin, ObservableMixin, nn.SiLU):
     def forward(self, input):
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
-        if inner_scheme is None:
-            return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
         result = SiLUFunction.apply(
             input, self.inplace, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result
 
 
@@ -497,15 +461,9 @@ class QuantizedGELU(_QuantizedModuleMixin, ObservableMixin, nn.GELU):
     def forward(self, input):
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
-        if inner_scheme is None:
-            return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
         result = GELUFunction.apply(
             input, inner_scheme, self.first_order_gelu,
             quantize_backprop, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result

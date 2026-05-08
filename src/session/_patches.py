@@ -68,6 +68,8 @@ def _make_emit_fn(state, layer_name: str, op_suffix: str):
     full_name = f"{layer_name}.{op_suffix}" if layer_name else op_suffix
 
     def emit_fn(role, pipeline_index, stage, fp32, quant, scheme, group_map=None):
+        if scheme is None:
+            return
         from src.observer.events import QuantEvent
         event = QuantEvent(
             layer_name=full_name,
@@ -129,9 +131,34 @@ def _patched(op_name, orig_fn):
 # Matmul / Linear family
 # ---------------------------------------------------------------------------
 
+def _matmul_weight_scheme(weight_scheme):
+    """Return a weight scheme with axis=-2 for matmul in2 quantization.
+
+    MX's mx.matmul always quantizes in2 along axis=-2 (inner dimension),
+    but QuantConfig.w_axis defaults to -1 (correct for Linear weights).
+    This helper produces an axis-adjusted scheme for inline matmul.
+    """
+    from src.scheme.granularity import GranularitySpec
+    if weight_scheme.granularity.mode.name == "PER_BLOCK":
+        new_gran = GranularitySpec.per_block(weight_scheme.granularity.block_size, axis=-2)
+    elif weight_scheme.granularity.mode.name == "PER_CHANNEL":
+        new_gran = GranularitySpec.per_channel(axis=-2)
+    else:
+        return weight_scheme  # per_tensor — axis irrelevant
+    from src.scheme.quant_scheme import QuantScheme
+    return QuantScheme(
+        format=weight_scheme.format, granularity=new_gran,
+        transform=weight_scheme.transform, round_mode=weight_scheme.round_mode,
+        scale_storage=weight_scheme.scale_storage,
+    )
+
+
 @_patched("matmul", _orig_torch_matmul)
 def _patched_matmul(state, cfg, a, b):
     name = get_layer_name()
+    if cfg.weight is not None:
+        from dataclasses import replace
+        cfg = replace(cfg, weight=_matmul_weight_scheme(cfg.weight))
     return MatMulFunction.apply(a, b, None, cfg, name, "aa", _make_emit_fn(state, name, "matmul"))
 
 

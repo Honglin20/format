@@ -1,4 +1,4 @@
-"""Tests for src.report — SessionReport, StudyReport, and converters."""
+"""Tests for src.report — SessionReport, StudyReport, and plot accessor."""
 
 import json
 import os
@@ -6,12 +6,6 @@ import tempfile
 
 import pytest
 
-from src.report._converters import (
-    extract_metric_per_layer,
-    results_to_combined_viz_dict,
-    results_to_nested_viz_dict,
-    results_to_viz_dict,
-)
 from src.report._session_report import SessionReport
 from src.report._study_report import StudyReport
 from src.session._config import QuantConfig
@@ -24,7 +18,6 @@ from src.session._session import SessionResult
 
 @pytest.fixture
 def mock_result_a() -> SessionResult:
-    """A mock SessionResult with metric/observers/cost."""
     return SessionResult(
         name="int8",
         config=QuantConfig(name="int8", w_format="int8", a_format="int8",
@@ -34,15 +27,12 @@ def mock_result_a() -> SessionResult:
         delta={"accuracy": -0.03, "f1": -0.03},
         qsnr_per_layer={"layer_1": 28.5, "layer_2": 32.1, "layer_3": 25.8},
         mse_per_layer={"layer_1": 0.0012, "layer_2": 0.0008, "layer_3": 0.0021},
-        observers_data={"histogram": {"layer_1": {"fp32_hist": [1]}}},
-        cost=100.0,
-        cost_fp32=200.0,
+        observers_data={},
     )
 
 
 @pytest.fixture
 def mock_result_b() -> SessionResult:
-    """A second mock SessionResult with heavier quantization."""
     return SessionResult(
         name="int4",
         config=QuantConfig(name="int4", w_format="int4", a_format="int4",
@@ -52,15 +42,55 @@ def mock_result_b() -> SessionResult:
         delta={"accuracy": -0.10, "f1": -0.11},
         qsnr_per_layer={"layer_1": 22.0, "layer_2": 25.5, "layer_3": 20.1},
         mse_per_layer={"layer_1": 0.0050, "layer_2": 0.0030, "layer_3": 0.0080},
+        observers_data={},
     )
 
 
 @pytest.fixture
 def mock_result_no_metrics() -> SessionResult:
-    """A SessionResult with minimal fields (no metrics)."""
     return SessionResult(
         name="empty",
         config=QuantConfig(name="empty"),
+    )
+
+
+@pytest.fixture
+def mock_result_with_observers() -> SessionResult:
+    """Mock result with merged observer data (QSNR + Distribution)."""
+    return SessionResult(
+        name="int8",
+        config=QuantConfig(name="int8", w_format="int8", w_granularity="per_tensor"),
+        observers_data={
+            "layer_1": {
+                "input": {
+                    "pre_quant[0]": {
+                        ("tensor",): {
+                            "qsnr_db": 35.2,
+                            "peak": 3.5, "rms": 1.8, "crest_factor": 1.94,
+                            "mean": 0.1, "std": 1.2,
+                        }
+                    }
+                },
+                "weight": {
+                    "pre_quant[0]": {
+                        ("tensor",): {
+                            "qsnr_db": 42.1,
+                            "peak": 2.1, "rms": 0.9, "crest_factor": 2.33,
+                        }
+                    }
+                },
+            },
+            "layer_2": {
+                "input": {
+                    "pre_quant[0]": {
+                        ("tensor",): {
+                            "qsnr_db": 30.5,
+                            "peak": 5.2, "rms": 2.1, "crest_factor": 2.48,
+                        }
+                    }
+                },
+            },
+        },
     )
 
 
@@ -107,114 +137,7 @@ class TestSessionReport:
         report = SessionReport(mock_result_a)
         with tempfile.TemporaryDirectory() as tmpdir:
             report.save(tmpdir)
-            # Should create metrics.txt
             assert os.path.exists(os.path.join(tmpdir, "metrics.txt"))
-
-
-# ---------------------------------------------------------------------------
-# Test converters
-# ---------------------------------------------------------------------------
-
-class TestResultsToVizDict:
-
-    def test_single_result(self, mock_result_a):
-        result = results_to_viz_dict([mock_result_a])
-        assert "int8" in result
-        assert result["int8"]["accuracy"] == {"accuracy": 0.92, "f1": 0.90}
-        assert "qsnr_per_layer" in result["int8"]
-        assert "mse_per_layer" in result["int8"]
-        assert "delta" in result["int8"]
-        assert result["int8"]["fp32_accuracy"] == {"accuracy": 0.95, "f1": 0.93}
-
-    def test_multiple_results(self, mock_result_a, mock_result_b):
-        result = results_to_viz_dict([mock_result_a, mock_result_b])
-        assert len(result) == 2
-        assert "int8" in result
-        assert "int4" in result
-
-    def test_result_no_metrics(self, mock_result_no_metrics):
-        result = results_to_viz_dict([mock_result_no_metrics])
-        assert "empty" in result
-        assert result["empty"] == {}
-
-    def test_empty_list(self):
-        result = results_to_viz_dict([])
-        assert result == {}
-
-
-class TestResultsToNestedVizDict:
-
-    def test_nested_structure(self, mock_result_a, mock_result_b):
-        configs = [
-            {"name": "int8", "transform": "none"},
-            {"name": "int4", "transform": "none"},
-        ]
-        result = results_to_nested_viz_dict([mock_result_a, mock_result_b], configs)
-        assert "int8" in result
-        assert "int4" in result
-        assert "None" in result["int8"]
-        assert result["int8"]["None"]["accuracy"] == {"accuracy": 0.92, "f1": 0.90}
-
-    def test_transform_labels(self):
-        had_result = SessionResult(
-            name="int8-Had",
-            config=QuantConfig(name="int8-Had", transform="hadamard"),
-            qsnr_per_layer={"l1": 30.0},
-        )
-        configs = [{"name": "int8-Had", "transform": "hadamard"}]
-        result = results_to_nested_viz_dict([had_result], configs)
-        assert "int8" in result
-        assert "Hadamard" in result["int8"]
-
-    def test_empty_results(self):
-        result = results_to_nested_viz_dict([], [])
-        assert result == {}
-
-
-class TestResultsToCombinedVizDict:
-
-    def test_single_part_single_result(self, mock_result_a):
-        combined = results_to_combined_viz_dict({"part1": [mock_result_a]})
-        assert "part1" in combined
-        assert "int8" in combined["part1"]
-        assert combined["part1"]["int8"]["accuracy"] == {"accuracy": 0.92, "f1": 0.90}
-
-    def test_multiple_parts(self, mock_result_a, mock_result_b):
-        combined = results_to_combined_viz_dict({
-            "part1": [mock_result_a],
-            "part2": [mock_result_b],
-        })
-        assert "part1" in combined
-        assert "part2" in combined
-        assert "int8" in combined["part1"]
-        assert "int4" in combined["part2"]
-
-    def test_empty_results(self):
-        combined = results_to_combined_viz_dict({})
-        assert combined == {}
-
-    def test_empty_part_list(self):
-        combined = results_to_combined_viz_dict({"part1": []})
-        assert "part1" in combined
-        assert combined["part1"] == {}
-
-
-class TestExtractMetricPerLayer:
-
-    def test_extract_qsnr(self, mock_result_a):
-        report = SessionReport(mock_result_a)
-        result = extract_metric_per_layer(report, "qsnr")
-        assert result == {"layer_1": 28.5, "layer_2": 32.1, "layer_3": 25.8}
-
-    def test_extract_mse(self, mock_result_a):
-        report = SessionReport(mock_result_a)
-        result = extract_metric_per_layer(report, "mse")
-        assert result == {"layer_1": 0.0012, "layer_2": 0.0008, "layer_3": 0.0021}
-
-    def test_extract_no_data(self, mock_result_no_metrics):
-        report = SessionReport(mock_result_no_metrics)
-        result = extract_metric_per_layer(report, "qsnr")
-        assert result == {}
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +168,7 @@ class TestStudyReport:
         report = StudyReport({})
         report.print_summary()
         captured = capsys.readouterr()
-        assert "(no results)" not in captured.out  # no parts, nothing printed
+        assert "(no results)" not in captured.out
 
     def test_print_summary(self, mock_result_a, capsys):
         report = StudyReport({"part_1": [mock_result_a]})
@@ -253,8 +176,11 @@ class TestStudyReport:
         captured = capsys.readouterr()
         assert "Part: part_1" in captured.out
         assert "int8" in captured.out
-        assert "28.80" in captured.out  # avg_qsnr = (28.5+32.1+25.8)/3
-        assert "0.001367" in captured.out  # avg_mse = (0.0012+0.0008+0.0021)/3
+        # Verify computed averages from _avg_qsnr_mse
+        # qsnr: (28.5 + 32.1 + 25.8) / 3 = 28.80
+        # mse:   (0.0012 + 0.0008 + 0.0021) / 3 = 0.001367
+        assert "28.80" in captured.out
+        assert "0.001367" in captured.out
 
     def test_print_summary_with_delta(self, mock_result_a, capsys):
         report = StudyReport({"part_1": [mock_result_a]})
@@ -268,12 +194,10 @@ class TestStudyReport:
         assert "part_1" in data
         assert "int8" in data["part_1"]
         assert data["part_1"]["int8"]["accuracy"] == {"accuracy": 0.92, "f1": 0.90}
-        assert "qsnr_per_layer" in data["part_1"]["int8"]
 
     def test_to_serializable_is_json_serializable(self, mock_result_a, mock_result_b):
         report = StudyReport({"part_1": [mock_result_a, mock_result_b]})
         data = report.to_serializable()
-        # Should not raise
         json_str = json.dumps(data, indent=2, default=str)
         assert isinstance(json_str, str)
         parsed = json.loads(json_str)
@@ -300,19 +224,29 @@ class TestStudyReport:
                 data = json.load(f)
             assert "part_1" in data
 
-    def test_save_with_config(self, mock_result_a):
+    def test_save_creates_accuracy_csv_when_eval_present(self, mock_result_a):
         report = StudyReport({"part_1": [mock_result_a]})
-        config = {
-            "part_1": {
-                "output": {
-                    "tables": ["accuracy"],
-                    "figures": ["qsnr"],
-                },
-            },
-        }
         with tempfile.TemporaryDirectory() as tmpdir:
-            report.save(tmpdir, config=config)
-            assert os.path.isfile(os.path.join(tmpdir, "results.json"))
+            report.save(tmpdir)
+            csv_path = os.path.join(tmpdir, "tables", "accuracy.csv")
+            assert os.path.isfile(csv_path)
+
+    def test_save_skips_accuracy_csv_when_no_eval(self, mock_result_no_metrics):
+        report = StudyReport({"part_1": [mock_result_no_metrics]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report.save(tmpdir)
+            csv_path = os.path.join(tmpdir, "tables", "accuracy.csv")
+            assert not os.path.isfile(csv_path)
+
+    def test_save_creates_figures_with_observers(self, mock_result_with_observers):
+        report = StudyReport({"p1": [mock_result_with_observers]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report.save(tmpdir)
+            figures_dir = os.path.join(tmpdir, "figures")
+            assert os.path.isdir(figures_dir)
+            assert os.path.isfile(os.path.join(figures_dir, "qsnr_comparison.png"))
+            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr_input.png"))
+            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr_weight.png"))
 
     def test_save_empty_results(self):
         report = StudyReport({})
@@ -321,15 +255,12 @@ class TestStudyReport:
             assert os.path.isfile(os.path.join(tmpdir, "results.json"))
 
     def test_from_file_round_trip(self, mock_result_a, mock_result_b):
-        """StudyReport.from_file round-trips correctly."""
         original = StudyReport({"part_1": [mock_result_a, mock_result_b]})
         with tempfile.TemporaryDirectory() as tmpdir:
             original.save(tmpdir)
-            # Reload from results.json
             reloaded = StudyReport.from_file(tmpdir)
             assert isinstance(reloaded, StudyReport)
             assert sorted(reloaded.parts) == ["part_1"]
-            # Check serializable form matches
             assert reloaded.to_serializable() == original.to_serializable()
 
     def test_from_file_nonexistent_directory(self):
@@ -345,8 +276,70 @@ class TestStudyReport:
         assert sorted(report.parts) == ["a", "b"]
         assert report.total_experiments == 3
 
-    def test_handles_observers_data(self, mock_result_a):
-        """Observers data doesn't affect StudyReport methods."""
+    # ── to_dataframe ──────────────────────────────────────────────────
+
+    def test_to_dataframe_empty(self):
+        report = StudyReport({})
+        df = report.to_dataframe()
+        assert df is not None
+        assert df.empty
+
+    def test_to_dataframe_no_observers(self, mock_result_a):
         report = StudyReport({"p1": [mock_result_a]})
-        data = report.to_serializable()
-        assert "p1" in data
+        df = report.to_dataframe()
+        # No observers_data → empty
+        assert df is not None
+        assert df.empty
+
+    def test_to_dataframe_with_observers(self, mock_result_with_observers):
+        report = StudyReport({"p1": [mock_result_with_observers]})
+        df = report.to_dataframe()
+        assert df is not None
+        assert len(df) > 0
+        assert "part" in df.columns
+        assert "config" in df.columns
+        assert "format" in df.columns
+        assert "layer" in df.columns
+        assert "role" in df.columns
+        assert "qsnr_db" in df.columns
+        assert "crest_factor" in df.columns
+        # 3 rows: layer_1/input, layer_1/weight, layer_2/input
+        assert len(df) == 3
+
+    def test_to_dataframe_leading_columns(self, mock_result_with_observers):
+        report = StudyReport({"p1": [mock_result_with_observers]})
+        df = report.to_dataframe()
+        # Leading columns are part/config/format/layer/role
+        assert list(df.columns[:5]) == ["part", "config", "format", "layer", "role"]
+
+    # ── plot accessor ─────────────────────────────────────────────────
+
+    def test_plot_accessor_returns_accessor(self, mock_result_a):
+        report = StudyReport({"p1": [mock_result_a]})
+        from src.report._plot import StudyPlotAccessor
+        assert isinstance(report.plot, StudyPlotAccessor)
+
+    def test_qsnr_comparison_smoke(self, mock_result_with_observers):
+        report = StudyReport({"p1": [mock_result_with_observers]})
+        fig = report.plot.qsnr_comparison()
+        assert fig is not None
+
+    def test_qsnr_comparison_no_data(self, mock_result_a):
+        report = StudyReport({"p1": [mock_result_a]})
+        fig = report.plot.qsnr_comparison()
+        assert fig is not None  # graceful fallback
+
+    def test_crest_vs_qsnr_smoke(self, mock_result_with_observers):
+        report = StudyReport({"p1": [mock_result_with_observers]})
+        fig = report.plot.crest_vs_qsnr(role="input")
+        assert fig is not None
+
+    def test_crest_vs_qsnr_no_crest_data(self, mock_result_a):
+        report = StudyReport({"p1": [mock_result_a]})
+        fig = report.plot.crest_vs_qsnr(role="input")
+        assert fig is not None  # graceful fallback
+
+    def test_crest_vs_qsnr_missing_role(self, mock_result_with_observers):
+        report = StudyReport({"p1": [mock_result_with_observers]})
+        fig = report.plot.crest_vs_qsnr(role="output")
+        assert fig is not None  # graceful fallback

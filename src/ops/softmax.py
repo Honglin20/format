@@ -80,17 +80,10 @@ class QuantizedSoftmax(_QuantizedModuleMixin, ObservableMixin, nn.Softmax):
         self.softmax_exp2 = softmax_exp2
 
     def forward(self, input):
-        inner_scheme = self.cfg.input
-        quantize_backprop = self.cfg.grad_input is not None
-        if inner_scheme is None:
-            return super().forward(input)
         emit_fn = self._emit if self._observers else None
-        if self.cfg.storage is not None:
-            input = quantize(input, self.cfg.storage)
+        inner_scheme = self.cfg.input
         result = SoftmaxFunction.apply(
             input, self.dim, inner_scheme, self.softmax_exp2,
-            quantize_backprop, self._analysis_name, emit_fn,
+            self.cfg.grad_input is not None, self._analysis_name, emit_fn,
         )
-        if self.cfg.storage is not None:
-            result = quantize(result, self.cfg.storage)
         return result
