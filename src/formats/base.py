@@ -193,33 +193,60 @@ class FormatBase(ABC):
 
     def _quantize_per_block(self, x, granularity, round_mode, scale=None,
                               scale_storage="fp32"):
-        """Default per-block quantization: delegate to _quantize_mx.
+        """Per-block quantization with MX-style shared exponents.
 
-        During JIT tracing (ONNX export), return x unchanged — the Function's
-        symbolic() method handles quantization in the ONNX graph.  The traced
-        forward() is only used for shape inference.
+        Same structure as _quantize_per_channel:
+        tile into blocks → compute shared exponent → normalize →
+        elemwise quantize → rescale → until back to original shape.
 
-        Note:
-            The ``scale`` parameter is intentionally ignored for PER_BLOCK
-            quantization.  Per-block quantization computes its own block-level
-            shared exponents from the input tensor.  External ``scale`` values
-            (e.g. from calibration) are amax/scale-factor values designed for
-            PER_CHANNEL, not shared exponents; passing them to ``_quantize_mx``
-            would cause a semantic mismatch (amax vs shared exponent) and
-            produce shape incompatibilities.
-
-            The ``scale_storage`` parameter does not apply to PER_BLOCK — MX
-            shared exponents are always integer (power-of-2) by design.
+        During JIT tracing (ONNX export), return x unchanged — the
+        Function's symbolic() method handles quantization in the ONNX graph.
         """
         if torch.jit.is_tracing():
             return x
-        from src.quantize.mx_quantize import _quantize_mx
-        return _quantize_mx(
-            x, scale_bits=8, elem_format=self,
-            block_size=granularity.block_size,
-            axes=granularity.block_axis, round_mode=round_mode,
-            scale=None,
+        from src.formats._block_utils import (
+            _reshape_to_blocks,
+            _undo_reshape_to_blocks,
+            _shared_exponents,
         )
+
+        block_size = granularity.block_size
+        axes = [granularity.block_axis]
+
+        # Step 1: normalize axes to non-negative
+        axes = [a + x.ndim if a < 0 else a for a in axes]
+
+        # Step 2: tile into hardware-vector-sized blocks
+        A, axes, orig_shape, padded_shape = _reshape_to_blocks(
+            x, axes, block_size)
+
+        # Step 3: compute shared exponents per block
+        shared_exp_axes = [a + 1 for a in axes]
+        shared_exp = _shared_exponents(
+            A, method="max", axes=shared_exp_axes, ebits=0)
+
+        # Step 4: offset by format's max representable exponent
+        shared_exp = shared_exp - self.emax
+
+        # Step 5: clamp shared exponents to int8 range (scale_bits=8)
+        scale_emax = 2**(8-1) - 1
+        shared_exp[shared_exp > scale_emax] = float("NaN")
+        shared_exp[shared_exp < -scale_emax] = -scale_emax
+
+        # Step 6: normalize by shared exponent
+        A = A / (2 ** shared_exp)
+
+        # Step 7: element-wise quantize to target format
+        A = self.quantize_elemwise(A, round_mode=round_mode,
+                                   allow_denorm=True, saturate_normals=True)
+
+        # Step 8: rescale
+        A = A * (2 ** shared_exp)
+
+        # Step 9: undo block tiling
+        A = _undo_reshape_to_blocks(A, padded_shape, orig_shape, axes)
+
+        return A
 
     def export_onnx(self, g, x, scheme):
         """Emit ONNX nodes for this format's quantize step.
