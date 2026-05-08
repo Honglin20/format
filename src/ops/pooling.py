@@ -119,6 +119,7 @@ class QuantizedAdaptiveAvgPool2d(_QuantizedModuleMixin, ObservableMixin, nn.Modu
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         if inner_scheme is None:

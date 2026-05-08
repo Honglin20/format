@@ -80,6 +80,7 @@ class QuantizedSoftmax(_QuantizedModuleMixin, ObservableMixin, nn.Softmax):
         self.softmax_exp2 = softmax_exp2
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         emit_fn = self._emit if self._observers else None
         inner_scheme = self.cfg.input
         result = SoftmaxFunction.apply(

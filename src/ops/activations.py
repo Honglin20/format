@@ -75,6 +75,7 @@ class QuantizedSigmoid(_QuantizedModuleMixin, ObservableMixin, nn.Sigmoid):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
@@ -127,6 +128,7 @@ class QuantizedTanh(_QuantizedModuleMixin, ObservableMixin, nn.Tanh):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
@@ -187,6 +189,7 @@ class QuantizedReLU(_QuantizedModuleMixin, ObservableMixin, nn.ReLU):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
@@ -248,6 +251,7 @@ class QuantizedReLU6(_QuantizedModuleMixin, ObservableMixin, nn.ReLU6):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
@@ -310,6 +314,7 @@ class QuantizedLeakyReLU(_QuantizedModuleMixin, ObservableMixin, nn.LeakyReLU):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
@@ -372,6 +377,7 @@ class QuantizedSiLU(_QuantizedModuleMixin, ObservableMixin, nn.SiLU):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
@@ -459,6 +465,7 @@ class QuantizedGELU(_QuantizedModuleMixin, ObservableMixin, nn.GELU):
         self.first_order_gelu = first_order_gelu
 
     def forward(self, input):
+        input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
