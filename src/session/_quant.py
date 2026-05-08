@@ -111,8 +111,11 @@ class _QuantSession:
         else:
             self.fp32_model = None
 
+        # quantize a deepcopy so the user's original model is never mutated.
+        # this also allows the same model object to be passed to multiple
+        # Session / _QuantSession instances without cross-contamination.
         self.qmodel = quantize_model(
-            model,
+            copy.deepcopy(model),
             cfg=cfg,
             op_cfgs=op_cfgs,
             quantize_nonlinear=quantize_nonlinear,

@@ -110,6 +110,60 @@ cfg = QuantConfig(
 )
 ```
 
+### 7. W/A 混合精度与 MX 等价性
+
+以下 QuantConfig 与微軟 MX 库的输出 **比特级一致**（已验证 `torch.equal`）：
+
+```python
+import torch.nn as nn
+import torch
+import mx
+from mx.specs import apply_mx_specs
+from src.session import Session, QuantConfig
+
+# 共享权重和输入
+linear = nn.Linear(64, 128, bias=True).eval()
+x = torch.randn(4, 64)
+
+# ═══ w8a8 (MX int8) ═══
+cfg = QuantConfig(name="w8a8", w_format="int8", w_granularity="per_block",
+                  w_block_size=32, a_format="int8", a_granularity="per_block",
+                  a_block_size=32, storage_bits=16, storage_kind="bfloat")
+session_out = Session(linear, cfg).quantize()(x)
+
+mx_specs = apply_mx_specs({"bfloat": 16, "w_elem_format": "int8",
+                            "a_elem_format": "int8", "block_size": 32})
+mx_out = mx.linear(x, linear.weight, linear.bias, mx_specs=mx_specs)
+assert torch.equal(session_out, mx_out)  # bit-exact ✓
+
+# ═══ w4a8 ═══
+cfg = QuantConfig(name="w4a8", w_format="int4", w_granularity="per_block",
+                  w_block_size=32, a_format="int8", a_granularity="per_block",
+                  a_block_size=32, storage_bits=16, storage_kind="bfloat")
+
+# ═══ w4a4 (mxint4) ═══
+cfg = QuantConfig(name="w4a4", w_format="int4", w_granularity="per_block",
+                  w_block_size=32, a_format="int4", a_granularity="per_block",
+                  a_block_size=32, storage_bits=16, storage_kind="bfloat")
+
+# ═══ mxint2 ═══
+cfg = QuantConfig(name="mxint2", w_format="int2", w_granularity="per_block",
+                  w_block_size=32, a_format="int2", a_granularity="per_block",
+                  a_block_size=32, storage_bits=16, storage_kind="bfloat")
+```
+
+**Session 不会修改传入的模型**：`quantize()` 内部对模型做 deepcopy，原始模型保持不变。同一个模型对象可以安全地传给多个 Session：
+
+```python
+model = MyModel()
+
+# 对比三个配置——同一个 model 对象，互不干扰
+for cfg in [cfg_w8a8, cfg_w4a8, cfg_w4a4]:
+    session = Session(model, cfg).quantize()
+    output = session(x)
+    # model 未被修改，下次循环仍然有效
+```
+
 ## QuantConfig 完整字段
 
 | 字段 | 类型 | 默认值 | 说明 |
