@@ -1654,6 +1654,205 @@ class TestQuantizeNonLinearSwitch:
         assert x.grad is not None, "x.grad is None"
         assert x.grad.abs().sum() > 0, "x.grad is all-zero"
 
+    # ------------------------------------------------------------------
+    # Task 5: Regression tests — _entry_quantize no-op when False
+    # ------------------------------------------------------------------
+
+    def test_entry_quantize_fields_none_when_false(self):
+        """_entry_compute and _entry_storage are None when quantize_nonlinear=False."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32,
+            a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+            storage_bits=16, storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = nn.Sequential(nn.ReLU(), nn.Sigmoid(), nn.SiLU(), nn.Softmax(dim=1))
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=False)
+
+        # All activations should have no _entry_compute / _entry_storage
+        for mod in qmodel:
+            assert getattr(mod, '_entry_compute', None) is None, \
+                f"{type(mod).__name__}._entry_compute should be None"
+            assert getattr(mod, '_entry_storage', None) is None, \
+                f"{type(mod).__name__}._entry_storage should be None"
+
+        # Forward pass should still work (regression — no-op path)
+        x = torch.randn(1, 16)
+        out = qmodel(x)
+        assert out.shape == x.shape
+
+    def test_entry_quantize_fields_set_when_true(self):
+        """_entry_compute and _entry_storage are set when quantize_nonlinear=True + per_block."""
+        import copy
+        from src.session._model import quantize_model
+        from src.ops.activations import (
+            QuantizedReLU, QuantizedSigmoid, QuantizedSiLU,
+            QuantizedTanh, QuantizedReLU6, QuantizedLeakyReLU, QuantizedGELU,
+        )
+        from src.ops.softmax import QuantizedSoftmax
+        from src.ops.pooling import QuantizedAdaptiveAvgPool2d
+
+        cfg = QuantConfig(
+            w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32,
+            a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+            storage_bits=16, storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = nn.Sequential(
+            nn.Conv2d(3, 8, 3, padding=1),
+            nn.ReLU(),
+            nn.Sigmoid(),
+            nn.SiLU(),
+            nn.Tanh(),
+            nn.ReLU6(),
+            nn.LeakyReLU(),
+            nn.GELU(),
+            nn.Softmax(dim=1),
+            nn.AdaptiveAvgPool2d((4, 4)),
+        )
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+
+        nonlinear_types = (
+            QuantizedReLU, QuantizedSigmoid, QuantizedSiLU,
+            QuantizedTanh, QuantizedReLU6, QuantizedLeakyReLU, QuantizedGELU,
+            QuantizedSoftmax, QuantizedAdaptiveAvgPool2d,
+        )
+        found = 0
+        for name, mod in qmodel.named_modules():
+            if isinstance(mod, nonlinear_types):
+                found += 1
+                assert mod._entry_compute is not None, \
+                    f"{name} ({type(mod).__name__}) _entry_compute should be set"
+                assert mod._entry_compute is cfg.input, \
+                    f"{name} _entry_compute should be cfg.input"
+                assert mod._entry_storage is cfg.storage, \
+                    f"{name} _entry_storage should be cfg.storage"
+        assert found >= 9, f"Expected at least 9 nonlinear modules, found {found}"
+
+    # ------------------------------------------------------------------
+    # Task 6: E2E integration tests
+    # ------------------------------------------------------------------
+
+    def test_quantize_nonlinear_true_e2e_forward_backward(self):
+        """Full model forward+backward with quantize_nonlinear=True + per_block compute."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32,
+            a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+            storage_bits=16, storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = _make_model_with_all_op_types()
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+        qmodel.train()
+
+        x = torch.randn(2, 3, 8, 8, requires_grad=True)
+        out = qmodel(x)
+        loss = out.sum()
+        loss.backward()
+
+        # All params should have non-zero gradients
+        for name, param in qmodel.named_parameters():
+            assert param.grad is not None, f"{name} has None grad"
+            assert param.grad.abs().sum() > 0, f"{name} has zero grad"
+
+        # Input gradient must be non-zero
+        assert x.grad is not None
+        assert x.grad.abs().sum() > 0
+
+    def test_quantize_nonlinear_true_mx_no_storage_e2e(self):
+        """MX per_block without storage (bfloat=0): True mode forward+backward."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32,
+            a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+            calibrator="max",
+        ).to_op_config()
+
+        model = _make_model_with_all_op_types()
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+        qmodel.train()
+
+        x = torch.randn(2, 3, 8, 8, requires_grad=True)
+        out = qmodel(x)
+        loss = out.sum()
+        loss.backward()
+
+        # Should complete without NaN or inf
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+        for param in qmodel.parameters():
+            if param.grad is not None:
+                assert not torch.isnan(param.grad).any()
+                assert not torch.isinf(param.grad).any()
+
+    # ------------------------------------------------------------------
+    # Task 7: Property tests
+    # ------------------------------------------------------------------
+
+    def test_quantize_nonlinear_true_idempotent_output(self):
+        """Repeated forward with same input produces identical output."""
+        import copy
+        from src.session._model import quantize_model
+
+        cfg = QuantConfig(
+            w_format="fp8_e4m3", w_granularity="per_block", w_block_size=32,
+            a_format="fp8_e4m3", a_granularity="per_block", a_block_size=32,
+            storage_bits=16, storage_kind="bfloat",
+            calibrator="max",
+        ).to_op_config()
+
+        model = nn.Sequential(
+            nn.Conv2d(3, 8, 3, padding=1),
+            nn.BatchNorm2d(8),
+            nn.ReLU(),
+        ).eval()
+
+        qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+        x = torch.randn(1, 3, 8, 8)
+
+        out1 = qmodel(x)
+        out2 = qmodel(x)
+        assert torch.equal(out1, out2)
+
+    def test_quantize_nonlinear_true_no_nan_inf(self):
+        """quantize_nonlinear=True produces no NaN or inf in outputs across formats."""
+        import copy
+        from src.session._model import quantize_model
+
+        formats = [
+            ("fp8_e4m3", "per_block", 32),
+            ("fp8_e5m2", "per_block", 32),
+            ("int8", "per_tensor", None),
+            ("fp4_e2m1", "per_block", 32),
+        ]
+
+        model = _make_model_with_all_op_types().eval()
+        x = torch.randn(2, 3, 8, 8)
+
+        for fmt, gran, bs in formats:
+            cfg = QuantConfig(
+                w_format=fmt, w_granularity=gran, w_block_size=bs,
+                a_format=fmt, a_granularity=gran, a_block_size=bs,
+                storage_bits=16, storage_kind="bfloat",
+                calibrator="max",
+            ).to_op_config()
+
+            qmodel = quantize_model(copy.deepcopy(model), cfg, quantize_nonlinear=True)
+            out = qmodel(x)
+            assert not torch.isnan(out).any(), f"NaN in output for format={fmt}"
+            assert not torch.isinf(out).any(), f"inf in output for format={fmt}"
+
 
 # ---------------------------------------------------------------------------
 # Direct unit tests for config derivation helpers
