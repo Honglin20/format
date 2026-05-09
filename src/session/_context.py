@@ -159,21 +159,5 @@ class QuantizeContext:
         output_path: str,
         opset_version: int = 17,
     ) -> None:
-        import torch
-        from src.onnx.export import _verify_onnx_graph
-
-        # Handle multi-input types: convert list to tuple, pass tuple as-is,
-        # wrap everything else (Tensor, dict) in a single-element tuple.
-        if isinstance(dummy_input, (tuple, list)):
-            args = tuple(dummy_input)
-        else:
-            args = (dummy_input,)
-        torch.onnx.export(
-            self.model,
-            args,
-            output_path,
-            opset_version=opset_version,
-            custom_opsets={"com.microxscaling": 1},
-            do_constant_folding=False,
-        )
-        _verify_onnx_graph(output_path)
+        from src.onnx.export import export_quantized_model
+        export_quantized_model(self.model, dummy_input, output_path, opset_version)
