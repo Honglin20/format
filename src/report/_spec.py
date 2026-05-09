@@ -36,6 +36,9 @@ _OUTPUT_SPEC: Dict[str, dict] = {
     "block_sweep":       {"observers": ["qsnr"],       "needs_eval": True},
     "hierarchical":      {"observers": ["qsnr", "mse"], "needs_eval": True},
     "pot_delta_bar":     {"observers": [],             "needs_eval": True},
+    # ── Observer aliases (map observer key directly to output key) ───────
+    "distribution":     {"observers": ["distribution"], "needs_eval": False},
+    "fit":              {"observers": ["fit"],           "needs_eval": False},
     # ── New tables ──────────────────────────────────────────────────────
     "distribution_fit": {"observers": ["fit"], "needs_eval": False},
     "per_layer_qsnr":  {"observers": ["qsnr"],            "needs_eval": False},
