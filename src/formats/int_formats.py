@@ -38,6 +38,12 @@ class IntFormat(FormatBase):
         if scheme.granularity.mode == GranularityMode.PER_BLOCK:
             return super().export_onnx(g, x, scheme)
 
+        # int2 cannot be represented with ONNX QuantizeLinear/DequantizeLinear
+        # (no 2-bit integer type support in standard ONNX ops). Fall back to
+        # custom MxQuantize op.
+        if self.mbits <= 2:
+            return super().export_onnx(g, x, scheme)
+
         # Try to get real calibration scale from the current module's
         # output_scale buffer (set by LinearFunction.symbolic()).
         scale_val = 1.0

@@ -496,3 +496,85 @@ class TestScaleWiring:
                 if found_real_scale:
                     break
         assert found_real_scale, "All QDQ scales are placeholder 1.0 in submodule model"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Full format coverage matrix
+# ---------------------------------------------------------------------------
+
+ALL_STANDARD_FORMATS = ["int8", "int4", "fp8_e4m3", "fp8_e5m2"]
+ALL_NARROW_INT_FORMATS = ["int2"]
+ALL_MX_FORMATS = ["fp4_e2m1", "fp6_e3m2", "fp6_e2m3"]
+ALL_LOOKUP_FORMATS = ["nf4"]
+ALL_TRUNC_FORMATS = ["bf16", "fp16"]
+ALL_FORMATS = (ALL_STANDARD_FORMATS + ALL_NARROW_INT_FORMATS
+               + ALL_MX_FORMATS + ALL_LOOKUP_FORMATS + ALL_TRUNC_FORMATS)
+
+
+class TestFormatMatrix:
+    """Every registered format exports valid ONNX for linear and conv2d."""
+
+    @pytest.mark.parametrize("fmt_name", ALL_STANDARD_FORMATS)
+    def test_standard_format_per_tensor_linear(self, fmt_name):
+        cfg = _standard_cfg(fmt_name)
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        x = torch.randn(2, 8)
+        onnx_model = _export(model, x)
+        onnx.checker.check_model(onnx_model)
+        assert _has_op(onnx_model, "QuantizeLinear"), \
+            f"{fmt_name} per_tensor should use QDQ"
+
+    @pytest.mark.parametrize("fmt_name", ALL_STANDARD_FORMATS)
+    def test_standard_format_per_tensor_conv2d(self, fmt_name):
+        cfg = _standard_cfg(fmt_name)
+        model = QuantizedConv2d(4, 8, kernel_size=3, padding=1, cfg=cfg)
+        x = torch.randn(1, 4, 8, 8)
+        onnx_model = _export(model, x)
+        onnx.checker.check_model(onnx_model)
+        assert _has_op(onnx_model, "QuantizeLinear")
+
+    @pytest.mark.parametrize("fmt_name", ALL_MX_FORMATS)
+    def test_mx_format_per_block_linear(self, fmt_name):
+        cfg = _mx_cfg(fmt_name, block_size=32)
+        model = QuantizedLinear(32, 64, cfg=cfg)
+        x = torch.randn(2, 32)
+        onnx_model = _export(model, x)
+        onnx.checker.check_model(onnx_model)
+        assert _has_op(onnx_model, "MxQuantize", "com.microxscaling"), \
+            f"{fmt_name} per_block should use MxQuantize"
+
+    @pytest.mark.parametrize("fmt_name", ALL_MX_FORMATS)
+    def test_mx_format_per_block_conv2d(self, fmt_name):
+        cfg = _mx_cfg(fmt_name, block_size=32)
+        model = QuantizedConv2d(32, 64, kernel_size=3, padding=1, cfg=cfg)
+        x = torch.randn(1, 32, 8, 8)
+        onnx_model = _export(model, x)
+        onnx.checker.check_model(onnx_model)
+        assert _has_op(onnx_model, "MxQuantize", "com.microxscaling")
+
+    @pytest.mark.parametrize("fmt_name", ALL_LOOKUP_FORMATS)
+    def test_lookup_format_per_tensor_linear(self, fmt_name):
+        cfg = _standard_cfg(fmt_name)
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        x = torch.randn(2, 8)
+        onnx_model = _export(model, x)
+        onnx.checker.check_model(onnx_model)
+        assert _has_op(onnx_model, "NF4Quantize", "com.microxscaling")
+
+    @pytest.mark.parametrize("fmt_name", ALL_TRUNC_FORMATS)
+    def test_trunc_format_per_tensor_linear(self, fmt_name):
+        cfg = _standard_cfg(fmt_name)
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        x = torch.randn(2, 8)
+        onnx_model = _export(model, x)
+        onnx.checker.check_model(onnx_model)
+        # Truncation formats use MxQuantize custom op
+        assert _has_op(onnx_model, "MxQuantize", "com.microxscaling")
+
+    @pytest.mark.parametrize("fmt_name", ALL_FORMATS)
+    def test_all_formats_export_passthrough(self, fmt_name):
+        """Passthrough (no cfg) exports cleanly regardless of format."""
+        model = QuantizedLinear(8, 16)  # no cfg → passthrough
+        x = torch.randn(2, 8)
+        onnx_model = _export(model, x)
+        onnx.checker.check_model(onnx_model)
