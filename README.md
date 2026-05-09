@@ -38,6 +38,25 @@ result2 = Session(model, cfg).run(calib_data, eval_fn=eval_fn)
 print(result2.summary())
 ```
 
+## 按 Role 查看 QSNR
+
+`result.qsnr_per_layer` 默认提取 **output** role 的 QSNR——它能跨层横向对比并追踪累积误差传播。input QSNR 在第一层之后是「已量化数据再量化」（虚高），weight QSNR 是静态的与深度无关。
+
+如需按其他 role 查看：
+
+```python
+from src.session._session import _extract_qsnr_mse
+
+# 只看 output（默认）
+qsnr_out, _ = _extract_qsnr_mse(result.observers_data, role="output")
+
+# 只看 weight
+qsnr_w, _ = _extract_qsnr_mse(result.observers_data, role="weight")
+
+# 只看 input（仅第一层有意义）
+qsnr_in, _ = _extract_qsnr_mse(result.observers_data, role="input")
+```
+
 ## 文档导航
 
 ### 使用指南

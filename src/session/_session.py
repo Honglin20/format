@@ -65,32 +65,46 @@ _logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _extract_qsnr_mse(observers_data: dict):
+def _extract_qsnr_mse(observers_data: dict, *, role: str = "output"):
     """Extract per-layer QSNR and MSE from a nested observer report raw dict.
 
+    Only metrics from *role* (default ``"output"``) are considered. Input and
+    weight QSNR are excluded because they measure qualitatively different
+    things: input re-quantization of already-quantized data (vanity metric
+    for all but the first layer) and static weight error (independent of
+    depth). Only output QSNR captures the layer's true end-to-end
+    quantization quality and reflects accumulated error propagation.
+
+    Within the selected role, the worst-case (minimum QSNR, maximum MSE)
+    across all quantization stages and slices is used.
+
+    Args:
+        observers_data: Raw observer report dict.
+        role: Tensor role to extract (``"input"`` / ``"weight"`` /
+            ``"output"`` / ``"bias"``). Default ``"output"``.
+
     Returns:
-        (qsnr_per_layer, mse_per_layer) — each is ``Dict[str, float]``.
+        ``(qsnr_per_layer, mse_per_layer)`` — each is ``Dict[str, float]``.
     """
     qsnr_per_layer: Dict[str, float] = {}
     mse_per_layer: Dict[str, float] = {}
     for layer, roles in observers_data.items():
-        for _role, stages in roles.items():
-            for _stage, slices in stages.items():
-                for _slice_key, metrics in slices.items():
-                    if "qsnr_db" in metrics:
-                        # QSNR: higher = better, so the worst-case
-                        # (bottleneck) is the minimum across all
-                        # quantization steps for the layer.
-                        v = metrics["qsnr_db"]
-                        if v == v:  # exclude nan
-                            prev = qsnr_per_layer.get(layer)
-                            if prev is None or v < prev:
-                                qsnr_per_layer[layer] = v
-                    if "mse" in metrics:
-                        mse_per_layer[layer] = max(
-                            mse_per_layer.get(layer, 0.0),
-                            metrics["mse"],
-                        )
+        stages = roles.get(role)
+        if stages is None:
+            continue
+        for _stage, slices in stages.items():
+            for _slice_key, metrics in slices.items():
+                if "qsnr_db" in metrics:
+                    v = metrics["qsnr_db"]
+                    if v == v:  # exclude nan
+                        prev = qsnr_per_layer.get(layer)
+                        if prev is None or v < prev:
+                            qsnr_per_layer[layer] = v
+                if "mse" in metrics:
+                    mse_per_layer[layer] = max(
+                        mse_per_layer.get(layer, 0.0),
+                        metrics["mse"],
+                    )
     return qsnr_per_layer, mse_per_layer
 
 
