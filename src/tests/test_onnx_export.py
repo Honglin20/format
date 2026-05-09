@@ -578,3 +578,46 @@ class TestFormatMatrix:
         x = torch.randn(2, 8)
         onnx_model = _export(model, x)
         onnx.checker.check_model(onnx_model)
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Session e2e quantize → calibrate → export_onnx pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestSessionE2EExport:
+    """Session -> quantize -> calibrate -> export_onnx pipeline."""
+
+    def test_session_quantize_calibrate_export(self, tmp_path):
+        """Full pipeline: Session.quantize().calibrate().export_onnx() works."""
+        from src.session._session import Session
+        from src.session._config import QuantConfig
+
+        class SimpleModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = torch.nn.Conv2d(4, 8, 3, padding=1)
+                self.linear = torch.nn.Linear(8 * 8 * 8, 16)
+
+            def forward(self, x):
+                x = self.conv(x)
+                x = x.flatten(1)
+                return self.linear(x)
+
+        model = SimpleModel()
+        cfg = QuantConfig(
+            w_format="int8",
+            w_granularity="per_tensor",
+            calibrator="max",
+        )
+
+        session = Session(model.eval(), cfg)
+        session.quantize()
+        x = torch.randn(1, 4, 8, 8)
+        session.calibrate([x])
+        out = str(tmp_path / "session.onnx")
+        session.export_onnx(out)
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+        # Should have QDQ nodes from int8
+        assert _has_op(loaded, "QuantizeLinear"), "Session export should have QDQ"

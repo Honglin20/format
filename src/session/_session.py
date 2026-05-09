@@ -78,10 +78,14 @@ def _extract_qsnr_mse(observers_data: dict):
             for _stage, slices in stages.items():
                 for _slice_key, metrics in slices.items():
                     if "qsnr_db" in metrics:
-                        qsnr_per_layer[layer] = max(
-                            qsnr_per_layer.get(layer, 0.0),
-                            metrics["qsnr_db"],
-                        )
+                        # QSNR: higher = better, so the worst-case
+                        # (bottleneck) is the minimum across all
+                        # quantization steps for the layer.
+                        v = metrics["qsnr_db"]
+                        if v == v:  # exclude nan
+                            prev = qsnr_per_layer.get(layer)
+                            if prev is None or v < prev:
+                                qsnr_per_layer[layer] = v
                     if "mse" in metrics:
                         mse_per_layer[layer] = max(
                             mse_per_layer.get(layer, 0.0),
@@ -805,6 +809,31 @@ class Session:
         if self._quant_session is None:
             raise RuntimeError("Call .quantize() first")
         return self._quant_session.mode
+
+    # ------------------------------------------------------------------
+    # ONNX Export
+    # ------------------------------------------------------------------
+
+    def export_onnx(
+        self,
+        output_path: str,
+        dummy_input: Optional[torch.Tensor] = None,
+        opset_version: int = 17,
+    ) -> None:
+        """Export quantized model to ONNX.
+
+        Delegates to ``_QuantSession.export_onnx()`` which in turn calls
+        ``model.export_onnx()``.  If *dummy_input* is not provided, uses
+        the input from the most recent ``session(x)`` call.
+
+        Raises:
+            RuntimeError: If ``.quantize()`` has not been called yet.
+        """
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        self._quant_session.export_onnx(
+            output_path, dummy_input=dummy_input, opset_version=opset_version,
+        )
 
     # ------------------------------------------------------------------
     # Full pipeline (backward compat)
