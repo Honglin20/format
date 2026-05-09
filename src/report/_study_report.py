@@ -117,6 +117,17 @@ class StudyReport:
 
         return StudyPlotAccessor(self)
 
+    @property
+    def tables(self) -> "StudyTablesAccessor":
+        """Terminal table output accessor.
+
+        Returns a :class:`StudyTablesAccessor` with methods like
+        :meth:`~StudyTablesAccessor.per_layer_qsnr`.
+        """
+        from src.report._tables import StudyTablesAccessor
+
+        return StudyTablesAccessor(self)
+
     # ── _avg_qsnr_mse ────────────────────────────────────────────────────
 
     @staticmethod
@@ -214,6 +225,17 @@ class StudyReport:
         )
         if any_eval:
             self._save_accuracy_csv(output_dir)
+
+        # ── Per-layer QSNR CSV ──────────────────────────────────────
+        any_qsnr = any(
+            r.qsnr_per_layer
+            for part_results in self._results.values()
+            for r in part_results
+        )
+        if any_qsnr:
+            csv_path = self.tables.save_per_layer_qsnr_csv(output_dir)
+            if csv_path:
+                print(f"  per_layer_qsnr.csv: saved to {csv_path}")
 
         # ── QSNR comparison figure ───────────────────────────────────
         if df is not None and not df.empty and "qsnr_db" in df.columns:

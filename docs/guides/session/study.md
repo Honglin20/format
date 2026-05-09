@@ -81,23 +81,24 @@ report = StudyReport.from_file("results/my_study/")
 results/my_study/
 ├── results.json
 ├── tables/
-│   ├── accuracy.csv                     # accuracy / avg_qsnr / avg_mse
-│   ├── table4_format_x_transform.csv    # 格式 x 变换矩阵
-│   ├── table5_transform_distribution.csv # 每层最优变换分布
-│   ├── table6_sensitivity.csv           # 最敏感的 Top-10 层
-│   ├── table7_distribution_fit.csv      # 分布拟合分类
-│   ├── table8_transform_benefit.csv     # 逐层变换增益
-│   └── per_layer_qsnr.csv              # 逐层逐配置 QSNR
+│   ├── accuracy.csv                      # accuracy / avg_qsnr / avg_mse（需 eval_fn）
+│   └── per_layer_qsnr.csv               # 逐层逐配置 QSNR（需 qsnr observer）
 └── figures/
-    ├── qsnr_comparison.png              # 多配置 QSNR 覆盖线图
-    ├── crest_vs_qsnr_input.png          # crest factor vs QSNR 散点
+    ├── qsnr_comparison.png               # 多配置 QSNR 覆盖线图
+    ├── crest_vs_qsnr_input.png           # crest factor vs QSNR 散点（需 distribution）
     ├── crest_vs_qsnr_weight.png
-    ├── outlier_input.png                # outlier 分析
-    ├── per_block_qsnr_input.png         # per-block QSNR 统计
-    ├── correlation_heatmap.png          # 分布特征 x 误差相关矩阵
-    ├── role_distribution.png            # 各 role 分布特征对比
-    ├── pareto_qsnr.png                  # 品质 vs 成本 Pareto 前沿
-    └── cost_decomposition.png           # FLOPs 分解
+    ├── crest_vs_qsnr_output.png
+    ├── outlier_input.png                 # outlier 分析（需 distribution）
+    ├── outlier_weight.png
+    ├── outlier_output.png
+    ├── per_block_qsnr_input.png          # per-block QSNR 统计（需 per_block 粒度）
+    ├── per_block_qsnr_weight.png
+    ├── per_block_qsnr_output.png
+    ├── correlation_heatmap.png           # 分布特征 × 误差相关矩阵（需 distribution）
+    ├── role_distribution.png             # 各 role 分布特征对比（需 distribution）
+    ├── pareto_qsnr.png                   # 品质 vs 成本 Pareto 前沿（需 cost）
+    ├── pareto_accuracy.png               # 精度 vs 成本 Pareto 前沿（需 cost + eval_fn）
+    └── cost_decomposition.png            # FLOPs 分解（需 cost）
 ```
 
 ## 导出 DataFrame
@@ -169,24 +170,33 @@ QSNR per layer 是对层内所有 tensor role（input/weight/output）取 **最�
 
 ### Per-Layer QSNR 对比表
 
-显示同一模型下，不同配置在同一层的 QSNR 数值，方便逐层对照格式差异：
+显示同一模型下，不同配置在同一层的 QSNR 数值，通过 `report.tables` 访问器调用：
 
 ```python
-from src.viz.tables import per_layer_qsnr_table
+# 终端打印逐层 QSNR 对比表
+print(report.tables.per_layer_qsnr())
 
-text = per_layer_qsnr_table(results, output_dir="results/")
-print(text)
-
-# 输出示例：
-# Layer                    int8-pc    int4-pc    fp4-mx     nf4
-# -----------------------------------------------------------------
-# module.0.linear           34.2       22.5       20.1       21.3
-# module.1.norm             45.1       38.7       36.2        -
-# module.2.linear           32.8       19.3       18.7       20.1
-# ...
+# 限制显示层数（默认 60）
+print(report.tables.per_layer_qsnr(max_layers=10))
 ```
 
-> 权重只量化格式（NF4-PC weight-only）对 activation 不量化，对应 activation QSNR 列显示 `-`。
+输出示例：
+
+```
+====================================
+Per-Layer QSNR (dB) — Lower = more quantization-sensitive
+====================================
+Layer      int8-pc    int4-pc    fp4-mx     nf4
+-------------------------------------------------
+0.linear   34.2       22.5       20.1       21.3
+1.norm     45.1       38.7       36.2        -
+2.linear   32.8       19.3       18.7       20.1
+...
+```
+
+> 只量化权重的格式（如 NF4 weight-only）对 activation 不量化，对应列显示 `-`。
+
+`report.save()` 会自动生成 `tables/per_layer_qsnr.csv`。
 
 ### Accuracy 对比表
 
