@@ -44,6 +44,23 @@ results/
     └── cost_decomposition.png        # P1.6
 ```
 
+## 图表前提条件速查
+
+每个图表依赖特定的 observer 和前置步骤：
+
+| 图表方法 | 必须的 `outputs` key | 额外条件 |
+|---------|---------------------|---------|
+| `qsnr_comparison()` | `"qsnr"`（默认） | — |
+| `crest_vs_qsnr(role)` | `"distribution"` + `"qsnr"` | — |
+| `outlier_analysis(role)` | `"distribution"`（推荐 `"qsnr"`） | — |
+| `per_block_qsnr(role)` | `"qsnr"` | per_block 粒度 |
+| `pareto_frontier()` | — | cost 已执行；`metric="accuracy"` 还需 `eval_fn` |
+| `correlation_heatmap()` | `"distribution"` + `"qsnr"` | — |
+| `cost_decomposition()` | — | cost 已执行 |
+| `role_distribution_comparison()` | `"distribution"` | — |
+
+不满足时抛出 `ValueError` 并说明缺少的 observer 或步骤。
+
 # 图表一览
 
 ## 质量评估（核心）
@@ -177,13 +194,15 @@ report = Study(configs, model=model).run(
 
 可用的 output key：
 
-| Key | Observer | 产生的图表 |
-|-----|----------|-----------|
+| Key | Observer | 产生的图表/表格 |
+|-----|----------|-------------|
 | `"qsnr"` | QSNRObserver | qsnr_comparison, per_block_qsnr |
 | `"mse"` | MSEObserver | 增强 correlation_heatmap |
 | `"histogram"` | HistogramObserver | histogram_overlay |
-| `"distribution"` | DistributionObserver | crest_vs_qsnr, outlier_analysis, correlation_heatmap, role_distribution_comparison |
-| `"fit"` | DistributionFitObserver | distribution_fit table |
+| `"distribution"` | DistributionObserver | crest_vs_qsnr, outlier_analysis, correlation_heatmap, role_distribution |
+| `"fit"` | DistributionFitObserver | distribution_fit table（需 `scipy`） |
+| `"accuracy"` | — （无 observer） | accuracy table（需 `eval_fn`） |
+| `"cost"` | — （无 observer） | pareto_frontier, cost_decomposition（需 `needs_cost=True`） |
 
 ---
 

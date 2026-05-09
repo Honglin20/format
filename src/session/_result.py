@@ -84,7 +84,11 @@ class SessionResult:
             acc       0.9500    0.9300    -0.0200
         """
         if not self.fp32_metrics:
-            return "(no accuracy metrics — run with eval_fn)"
+            return (
+                "(no accuracy metrics — pass eval_fn to run() or evaluate())\n"
+                "eval_fn signature: (model, data) -> Dict[str, float]\n"
+                "Example: def eval_fn(m, d): return {'loss': sum(m(b).sum() for b in d).item()}"
+            )
 
         lines = []
         header = f"{'Metric':<12} {'FP32':<10} {'Quant':<10} {'Δ':<10}"

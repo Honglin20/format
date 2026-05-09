@@ -55,6 +55,8 @@ session.analyze(calib_data, outputs=["qsnr", "histogram"])
 result = Session(model, cfg).run(calib_data, outputs=["qsnr", "distribution"])
 ```
 
+**注意**：`evaluate()` 阶段（accuracy 相关输出）需要 `eval_fn`，`cost()` 阶段（pareto / cost_decomposition）需要 `needs_cost=True`。详见 [结果查看](result.md) 的前提条件表。
+
 ## 独立使用 Observer
 
 Observer 可以脱离 Session，直接挂载到任意模型：

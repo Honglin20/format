@@ -68,13 +68,32 @@ output = session(x)        # 再切回量化
 | `session.mode` | 当前推理模式：`"fp32"` 或 `"quant"` |
 | `session.result` | 构建 SessionResult |
 
+## eval_fn 合约
+
+`accuracy_table()`、`summary()` 的准确率列、`pareto_frontier(metric="accuracy")` 依赖 `eval_fn`。
+
+```python
+def eval_fn(model, data) -> dict[str, float]:
+    """在 data 上运行 model，返回 {指标名: 浮点值}。
+
+    model — Session 当前推理模式下的模型（evaluate 阶段会分别传 fp32 和 quant）。
+    data — eval_data（未单独传入时用 calib_data）。
+    """
+    ...
+    return {"loss": 0.1234}             # 单指标
+    # 或
+    return {"loss": 0.12, "acc": 0.95}   # 多指标
+```
+
+**不传 `eval_fn`** → `evaluate()` 阶段被跳过 → `accuracy_table()` 显示 `(no accuracy metrics — run with eval_fn)`。
+
 ## run() 参数
 
 ```python
 Session(model, cfg).run(
     calib_data,              # 校准数据（必传）
     eval_data=None,          # 评估数据（不传则用 calib_data）
-    eval_fn=None,            # (model, data) -> Dict[str, float]
+    eval_fn=None,            # (model, data) -> Dict[str, float]（见上方合约）
     outputs="default",       # "default" / "all" / ["qsnr", "mse", ...]
 )
 ```
