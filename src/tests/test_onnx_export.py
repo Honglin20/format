@@ -293,6 +293,37 @@ class TestMultiInput:
         onnx.checker.check_model(loaded)
 
 
+# ---------------------------------------------------------------------------
+# Task: _last_input auto-recording tests
+# ---------------------------------------------------------------------------
+
+
+class TestAutoInput:
+    """_last_input auto-recording for ONNX export without dummy_input."""
+
+    def test_export_after_forward_uses_recorded_input(self, tmp_path):
+        """Single-tensor forward → export without dummy_input works."""
+        from src.session._quant import _QuantSession
+        cfg = _standard_cfg("int8")
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        session = _QuantSession(model, cfg)
+        x = torch.randn(2, 8)
+        session(x)  # records _last_input
+        out = str(tmp_path / "auto.onnx")
+        session.export_onnx(out)  # no dummy_input
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+    def test_export_without_input_raises(self):
+        """No forward + no dummy_input → ValueError."""
+        from src.session._quant import _QuantSession
+        cfg = _standard_cfg("int8")
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        session = _QuantSession(model, cfg)
+        with pytest.raises(ValueError, match="No dummy_input"):
+            session.export_onnx("nowhere.onnx")
+
+
 def test_export_quantized_model_mixed(tmp_path):
     """Export a small mixed model: one Linear + one Conv2d, both quantized."""
     from src.onnx import export_quantized_model
