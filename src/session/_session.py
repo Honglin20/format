@@ -751,7 +751,7 @@ class Session:
 
         if self._fp32_metrics is not None:
             self._delta = {
-                k: self._fp32_metrics[k] - self._quant_metrics[k]
+                k: self._quant_metrics[k] - self._fp32_metrics[k]
                 for k in self._fp32_metrics
             }
 

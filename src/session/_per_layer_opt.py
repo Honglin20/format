@@ -279,7 +279,7 @@ def per_layer_optimal(
         quant_metrics = eval_fn(qs, eval_data)
         if fp32_metrics is not None:
             delta = {
-                k: fp32_metrics[k] - quant_metrics[k]
+                k: quant_metrics[k] - fp32_metrics[k]
                 for k in fp32_metrics
             }
 

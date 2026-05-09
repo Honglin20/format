@@ -851,7 +851,7 @@ class TestSessionResultAccessors:
             config=QuantConfig(),
             fp32_metrics={"loss": 1.0, "acc": 0.95},
             quant_metrics={"loss": 1.2, "acc": 0.93},
-            delta={"loss": -0.2, "acc": 0.02},
+            delta={"loss": 0.2, "acc": -0.02},
             qsnr_per_layer={
                 "layer.0": 15.0,
                 "layer.1": 30.0,
