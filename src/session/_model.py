@@ -487,13 +487,21 @@ def _patch_forward(
     model._quantize_observers = observers or []
 
     def _export_onnx(self, dummy_input, output_path: str, opset_version: int = 17):
-        with QuantizeContext(
-            self,
-            self._quantize_cfg,
-            op_cfgs=self._quantize_op_cfgs,
-            observers=self._quantize_observers,
-        ) as ctx:
-            ctx.export_onnx(dummy_input, output_path, opset_version=opset_version)
+        from src.onnx.export import export_quantized_model
+        from src.session._context import _export_scales_var
+
+        # Collect real scales from calibrated modules before export.
+        # The patched forward wraps in QuantizeContext during tracing,
+        # so no outer QuantizeContext is needed here.
+        export_scales: Dict[str, torch.Tensor] = {}
+        for name, module in self.named_modules():
+            if hasattr(module, "_output_scale"):
+                export_scales[name] = module._output_scale
+        _export_scales_var.set(export_scales if export_scales else None)
+        try:
+            export_quantized_model(self, dummy_input, output_path, opset_version)
+        finally:
+            _export_scales_var.set(None)
 
     model.export_onnx = types.MethodType(_export_onnx, model)
     model._quantize_forward_patched = True

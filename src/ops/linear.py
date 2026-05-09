@@ -185,6 +185,20 @@ class LinearFunction(torch.autograd.Function):
     @staticmethod
     def symbolic(g, x, w, b, cfg, name, emit_fn, output_scale=None):
         from src.onnx.helpers import _emit_quantize_node
+        from src.session._context import _export_scales_var, _onnx_current_scale_var
+
+        # Look up the module's calibrated output_scale from the pre-collected
+        # scales dict.  This runs during ONNX graph construction (after the
+        # forward pass), so we use name-based lookup instead of module stack.
+        scales = _export_scales_var.get()
+        current_scale = None
+        if scales:
+            current_scale = scales.get(name)
+            if current_scale is None:
+                # Fall back to root-module scale for modules created outside
+                # _MODULE_MAPPING (where _analysis_name defaults to "").
+                current_scale = scales.get("")
+        _onnx_current_scale_var.set(current_scale)
 
         if cfg.storage is not None:
             x = _emit_quantize_node(g, x, cfg.storage)

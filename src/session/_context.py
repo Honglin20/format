@@ -6,6 +6,7 @@ import contextvars
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import torch
 import torch.nn as nn
 
 from src.scheme.op_config import OpQuantConfig
@@ -41,6 +42,37 @@ _ctx_state: contextvars.ContextVar[Optional[_CtxState]] = contextvars.ContextVar
 
 _module_stack: contextvars.ContextVar[Optional[List[str]]] = contextvars.ContextVar(
     "quant_module_stack", default=None
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Export scales (for ONNX QDQ node scale wiring)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_export_scales_var: contextvars.ContextVar[Optional[Dict[str, torch.Tensor]]] = (
+    contextvars.ContextVar("quant_export_scales", default=None)
+)
+
+
+def get_export_scale(name: str) -> Optional[torch.Tensor]:
+    """Look up the export scale for a module from the active QuantizeContext.
+
+    Returns the per-module scale tensor if calibration has been run and the
+    scale was collected before ONNX export. Returns None for uncalibrated
+    or unrecognised module names.
+    """
+    scales = _export_scales_var.get()
+    if scales is None:
+        return None
+    return scales.get(name)
+
+
+# ContextVar for the current module's output_scale during ONNX symbolic tracing.
+# Set by LinearFunction.symbolic() (and similar) before emitting QDQ nodes,
+# read by FormatBase.export_onnx() subclasses to embed calibrated scale values
+# instead of placeholder 1.0.
+_onnx_current_scale_var: contextvars.ContextVar[Optional[torch.Tensor]] = (
+    contextvars.ContextVar("quant_onnx_current_scale", default=None)
 )
 
 
@@ -160,4 +192,14 @@ class QuantizeContext:
         opset_version: int = 17,
     ) -> None:
         from src.onnx.export import export_quantized_model
-        export_quantized_model(self.model, dummy_input, output_path, opset_version)
+
+        # Collect real scales from calibrated modules before export
+        export_scales: Dict[str, torch.Tensor] = {}
+        for name, module in self.model.named_modules():
+            if hasattr(module, "_output_scale"):
+                export_scales[name] = module._output_scale
+        _export_scales_var.set(export_scales if export_scales else None)
+        try:
+            export_quantized_model(self.model, dummy_input, output_path, opset_version)
+        finally:
+            _export_scales_var.set(None)

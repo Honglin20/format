@@ -403,3 +403,96 @@ class TestNF4Export:
                 assert len(levels[0].floats) == len(NF4Format.NF4_LEVELS)
                 return
         pytest.fail("No NF4Quantize node found")
+
+
+# ---------------------------------------------------------------------------
+# Task: Calibration scale wiring into ONNX QDQ nodes
+# ---------------------------------------------------------------------------
+
+
+class TestScaleWiring:
+    """Real calibration scales embedded in ONNX QDQ nodes."""
+
+    def test_calibrated_int8_exports_real_scale(self, tmp_path):
+        """Calibrated int8 model → QDQ nodes use real calibration scale (not 1.0)."""
+        from src.session._quant import _QuantSession
+        from src.calibration.strategies import MaxScaleStrategy
+
+        cfg = _standard_cfg("int8")
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        session = _QuantSession(model, cfg, calibrator=MaxScaleStrategy())
+
+        # Run calibration so _output_scale buffers are registered
+        x = torch.randn(2, 8)
+        with session.calibrate():
+            session(x)
+
+        out = str(tmp_path / "scaled.onnx")
+        session.export_onnx(out)
+
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+        from onnx import numpy_helper
+        # QDQ scale values are embedded in Constant op nodes as float tensor attrs,
+        # not as graph initializers.  Find at least one non-1.0 scalar constant.
+        # Zero-points (int8 dtype=3, value 0) are excluded by dtype and value.
+        found_real_scale = False
+        for node in loaded.graph.node:
+            if node.op_type == "Constant":
+                for attr in node.attribute:
+                    if attr.name == "value" and attr.t.data_type == 1:  # float32
+                        t = attr.t
+                        arr = numpy_helper.to_array(t)
+                        if arr.ndim == 0 and abs(float(arr.item()) - 1.0) > 0.01:
+                            found_real_scale = True
+                            break
+                if found_real_scale:
+                    break
+        assert found_real_scale, "All QDQ scales are placeholder 1.0"
+
+    def test_calibrated_int8_scale_flows_through_submodule(self, tmp_path):
+        """Same check but with a named submodule (not root-only)."""
+
+        # Use nn.Linear so quantize_model / _MODULE_MAPPING creates the
+        # QuantizedLinear with the correct name ("fc") via _make_linear().
+        # This exercises the name-based scale lookup in symbolic().
+
+        class WrapperModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = torch.nn.Linear(8, 16)
+
+            def forward(self, x):
+                return self.fc(x)
+
+        from src.session._quant import _QuantSession
+        from src.calibration.strategies import MaxScaleStrategy
+        cfg = _standard_cfg("int8")
+        model = WrapperModel()
+        session = _QuantSession(model, cfg, calibrator=MaxScaleStrategy())
+
+        x = torch.randn(2, 8)
+        with session.calibrate():
+            session(x)
+
+        out = str(tmp_path / "submodule_scaled.onnx")
+        session.export_onnx(out)
+
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+        from onnx import numpy_helper
+        found_real_scale = False
+        for node in loaded.graph.node:
+            if node.op_type == "Constant":
+                for attr in node.attribute:
+                    if attr.name == "value" and attr.t.data_type == 1:
+                        t = attr.t
+                        arr = numpy_helper.to_array(t)
+                        if arr.ndim == 0 and abs(float(arr.item()) - 1.0) > 0.01:
+                            found_real_scale = True
+                            break
+                if found_real_scale:
+                    break
+        assert found_real_scale, "All QDQ scales are placeholder 1.0 in submodule model"

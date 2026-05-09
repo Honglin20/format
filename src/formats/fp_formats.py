@@ -55,7 +55,15 @@ class FPFormat(FormatBase):
     def export_onnx(self, g, x, scheme):
         from src.scheme.granularity import GranularityMode
         if self.name in ("fp8_e4m3", "fp8_e5m2") and scheme.granularity.mode != GranularityMode.PER_BLOCK:
-            scale = g.op("Constant", value_t=torch.tensor(1.0, dtype=torch.float32))
+            # Try to get real calibration scale from the current module's
+            # output_scale buffer (set by LinearFunction.symbolic()).
+            scale_val = 1.0
+            from src.session._context import _onnx_current_scale_var
+            current_scale = _onnx_current_scale_var.get()
+            if current_scale is not None and current_scale.numel() == 1:
+                scale_val = current_scale.item()
+
+            scale = g.op("Constant", value_t=torch.tensor(scale_val, dtype=torch.float32))
             zp = g.op("Constant", value_t=torch.tensor(0, dtype=torch.int8))
             xq = g.op("QuantizeLinear", x, scale, zp)
             return g.op("DequantizeLinear", xq, scale, zp)
