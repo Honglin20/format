@@ -162,7 +162,12 @@ class QuantizeContext:
         import torch
         from src.onnx.export import _verify_onnx_graph
 
-        args = dummy_input if isinstance(dummy_input, tuple) else (dummy_input,)
+        # Handle multi-input types: convert list to tuple, pass tuple as-is,
+        # wrap everything else (Tensor, dict) in a single-element tuple.
+        if isinstance(dummy_input, (tuple, list)):
+            args = tuple(dummy_input)
+        else:
+            args = (dummy_input,)
         torch.onnx.export(
             self.model,
             args,

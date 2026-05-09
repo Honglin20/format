@@ -10,7 +10,7 @@ import torch.nn as nn
 
 def export_quantized_model(
     model: nn.Module,
-    dummy_input: torch.Tensor,
+    dummy_input,  # Tensor | tuple | list | dict
     output_path: str,
     opset_version: int = 17,
 ) -> None:
@@ -20,7 +20,7 @@ def export_quantized_model(
         model: Module containing QuantizedLinear / QuantizedConv{1,2,3}d layers.
             Must have symbolic() methods on its autograd.Function subclasses
             (added in Phase 5).
-        dummy_input: Representative input tensor (defines input shape in graph).
+        dummy_input: Representative input (Tensor, tuple, list, or dict).
         output_path: Path to write the .onnx file.
         opset_version: ONNX opset version. Default: 17.
 
@@ -31,9 +31,16 @@ def export_quantized_model(
     Note: Scale values in QDQ nodes are placeholder constants (1.0);
     the graph is valid for visualization but not for runtime inference.
     """
+    # Handle multi-input types: torch.onnx.export expects a tuple of positional
+    # arguments; single Tensor gets wrapped, tuple/list are used as-is (list
+    # converted for safety), dict is passed as a single arg.
+    if isinstance(dummy_input, (tuple, list)):
+        args = tuple(dummy_input)
+    else:
+        args = (dummy_input,)
     torch.onnx.export(
         model,
-        (dummy_input,),
+        args,
         output_path,
         opset_version=opset_version,
         custom_opsets={"com.microxscaling": 1},

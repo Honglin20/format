@@ -207,6 +207,85 @@ def test_export_quantized_model_linear(tmp_path):
     assert _has_op(loaded, "QuantizeLinear")
 
 
+# ---------------------------------------------------------------------------
+# Multi-input type tests
+# ---------------------------------------------------------------------------
+
+
+class TestMultiInput:
+    """ONNX export with list / tuple / dict dummy_input."""
+
+    @staticmethod
+    def _make_two_input_model():
+        from src.ops.linear import QuantizedLinear
+        cfg = _standard_cfg("int8")
+
+        class TwoInputModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear1 = QuantizedLinear(8, 16, cfg=cfg)
+                self.linear2 = QuantizedLinear(8, 16, cfg=cfg)
+
+            def forward(self, x, y):
+                return self.linear1(x) + self.linear2(y)
+
+        return TwoInputModel()
+
+    def test_tuple_input(self):
+        model = self._make_two_input_model()
+        x, y = torch.randn(2, 8), torch.randn(2, 8)
+        buf = io.BytesIO()
+        torch.onnx.export(model, (x, y), buf, opset_version=17,
+                          custom_opsets={"com.microxscaling": 1})
+        buf.seek(0)
+        onnx_model = onnx.load(buf)
+        onnx.checker.check_model(onnx_model)
+        assert len(onnx_model.graph.input) >= 2
+
+    def test_list_input(self):
+        """torch.onnx.export does NOT handle list natively (wraps in tuple).
+        This test is kept for documentation; the workaround is to pass tuple
+        directly to torch.onnx.export. Our wrapper export_quantized_model
+        converts list to tuple for the user (see test_export_quantized_model_with_list).
+        """
+        model = self._make_two_input_model()
+        x, y = torch.randn(2, 8), torch.randn(2, 8)
+        buf = io.BytesIO()
+        torch.onnx.export(model, (x, y), buf, opset_version=17,
+                          custom_opsets={"com.microxscaling": 1})
+        buf.seek(0)
+        onnx_model = onnx.load(buf)
+        onnx.checker.check_model(onnx_model)
+
+    def test_dict_input(self):
+        model = self._make_two_input_model()
+        x, y = torch.randn(2, 8), torch.randn(2, 8)
+        buf = io.BytesIO()
+        torch.onnx.export(model, {"x": x, "y": y}, buf, opset_version=17,
+                          custom_opsets={"com.microxscaling": 1})
+        buf.seek(0)
+        onnx_model = onnx.load(buf)
+        onnx.checker.check_model(onnx_model)
+
+    def test_export_quantized_model_with_tuple(self, tmp_path):
+        from src.onnx import export_quantized_model
+        model = self._make_two_input_model()
+        x, y = torch.randn(2, 8), torch.randn(2, 8)
+        out = str(tmp_path / "two_input.onnx")
+        export_quantized_model(model, (x, y), out)
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+    def test_export_quantized_model_with_list(self, tmp_path):
+        from src.onnx import export_quantized_model
+        model = self._make_two_input_model()
+        x, y = torch.randn(2, 8), torch.randn(2, 8)
+        out = str(tmp_path / "list_input.onnx")
+        export_quantized_model(model, [x, y], out)
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+
 def test_export_quantized_model_mixed(tmp_path):
     """Export a small mixed model: one Linear + one Conv2d, both quantized."""
     from src.onnx import export_quantized_model

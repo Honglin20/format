@@ -156,7 +156,7 @@ class _QuantSession:
             return self.fp32_model(*args, **kwargs)
 
         if args and self._last_input is None:
-            self._last_input = args[0]
+            self._last_input = args[0] if len(args) == 1 else args
         return self.qmodel(*args, **kwargs)
 
     # ------------------------------------------------------------------
