@@ -21,6 +21,28 @@ import numpy as np
 from src.viz._helpers import _compute_best_transform_per_layer
 from src.viz.theme import FALLBACK_CYCLE
 
+# ── Error message helpers ──────────────────────────────────────────────────
+_OBSERVER_HOW: dict = {
+    "QSNRObserver":          'session.analyze(calib_data, outputs=["qsnr"]) or session.run(calib_data, outputs="default")',
+    "MSEObserver":           'session.analyze(calib_data, outputs=["mse"]) or session.run(calib_data, outputs="default")',
+    "DistributionObserver":  'session.analyze(calib_data, outputs=["distribution"]) or session.run(calib_data, outputs=["distribution"])',
+    "HistogramObserver":     'session.analyze(calib_data, outputs=["histogram"]) or session.run(calib_data, outputs=["histogram"])',
+    "DistributionFitObserver": 'session.analyze(calib_data, outputs=["fit"]) or session.run(calib_data, outputs=["fit"])',
+}
+_BY_NEED = {
+    "qsnr":           "QSNRObserver",
+    "mse":            "MSEObserver",
+    "distribution":   "DistributionObserver",
+    "histogram":      "HistogramObserver",
+    "fit":            "DistributionFitObserver",
+}
+
+def _how(observer_name: str) -> str:
+    how = _OBSERVER_HOW.get(observer_name)
+    if how:
+        return f"Enable via: {how}."
+    return f"Ensure {observer_name} is active during the analysis pass."
+
 
 def save_figure(fig, output_dir: str, name: str) -> str:
     """Save matplotlib Figure as PNG and PDF.
@@ -103,7 +125,7 @@ def qsnr_line_chart(
         plt.close(fig)
         raise ValueError(
             "No QSNR data available in any config. "
-            "Ensure QSNRObserver is active during the analysis pass."
+            + _how("QSNRObserver")
         )
 
     x_positions = range(len(all_layer_names))
@@ -166,7 +188,7 @@ def mse_box_plot(
         plt.close(fig)
         raise ValueError(
             "No MSE data available in any config. "
-            "Ensure MSEObserver is active during the analysis pass."
+            + _how("MSEObserver")
         )
     bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
     for patch, c in zip(bp["boxes"], plot_colors):
@@ -294,7 +316,7 @@ def histogram_overlay(
     if not layer_hists:
         raise ValueError(
             "Histogram data not available. "
-            "Add HistogramObserver to observers in the analysis pass."
+            + _how("HistogramObserver")
         )
 
     # Rank by sensitivity: lowest QSNR first (most quantization-sensitive)
@@ -314,7 +336,7 @@ def histogram_overlay(
     if not top_layers:
         raise ValueError(
             "No histogram data found in any layer. "
-            "Ensure HistogramObserver is active during the analysis pass."
+            + _how("HistogramObserver")
         )
 
     n = len(top_layers)
@@ -639,8 +661,7 @@ def error_vs_distribution(
     if not data_points:
         raise ValueError(
             "Distribution data not available. "
-            "Ensure DistributionObserver and MSEObserver are active "
-            "during the analysis pass."
+            + _how("DistributionObserver") + " " + _how("MSEObserver")
         )
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -741,8 +762,7 @@ def layer_type_qsnr(
     if not ltype_qsnr:
         raise ValueError(
             "Layer type data not available. "
-            "Ensure QSNRObserver and MSEObserver are active "
-            "during the analysis pass."
+            + _how("QSNRObserver") + " " + _how("MSEObserver")
         )
 
     # Single layer type degrades to isolated boxplots — fall back to per-layer chart
@@ -987,7 +1007,7 @@ def outlier_analysis(
     if not data_points:
         raise ValueError(
             f"Outlier ratio data not available for role {role!r}. "
-            "Ensure DistributionObserver is active during the analysis pass."
+            + _how("DistributionObserver")
         )
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -1088,7 +1108,9 @@ def per_block_qsnr(
     if not has_std and not has_min:
         raise ValueError(
             f"Per-block QSNR statistics not available for role {role!r}. "
-            "Ensure QSNRObserver is active with per-block granularity."
+            "QSNRObserver collects per-block stats (qsnr_db_std/min/max) only "
+            "when the format uses per_block granularity. "
+            + _how("QSNRObserver")
         )
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -1190,7 +1212,7 @@ def correlation_heatmap(
     if len(available) < 2:
         raise ValueError(
             "Insufficient distribution feature data for correlation heatmap. "
-            "Ensure DistributionObserver is active during the analysis pass."
+            + _how("DistributionObserver")
         )
 
     # Build matrix
@@ -1280,7 +1302,7 @@ def role_distribution_comparison(
             )
         raise ValueError(
             "Distribution data not available. "
-            "Ensure DistributionObserver is active during the analysis pass."
+            + _how("DistributionObserver")
         )
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))

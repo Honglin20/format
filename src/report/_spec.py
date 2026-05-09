@@ -38,6 +38,7 @@ _OUTPUT_SPEC: Dict[str, dict] = {
     "pot_delta_bar":     {"observers": [],             "needs_eval": True},
     # ── New tables ──────────────────────────────────────────────────────
     "distribution_fit": {"observers": ["fit"], "needs_eval": False},
+    "per_layer_qsnr":  {"observers": ["qsnr"],            "needs_eval": False},
     "transform_benefit":{"observers": ["qsnr"],            "needs_eval": True},
     # ── New figures ──────────────────────────────────────────────────────
     "outlier":          {"observers": ["distribution", "qsnr"], "needs_eval": False},

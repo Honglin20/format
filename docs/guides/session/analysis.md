@@ -57,6 +57,22 @@ result = Session(model, cfg).run(calib_data, outputs=["qsnr", "distribution"])
 
 **注意**：`evaluate()` 阶段（accuracy 相关输出）需要 `eval_fn`，`cost()` 阶段（pareto / cost_decomposition）需要 `needs_cost=True`。详见 [结果查看](result.md) 的前提条件表。
 
+## 常见错误
+
+以下错误表示需要的 Observer 未启用，解决方案是传递对应的 `outputs` 选项：
+
+| 错误中的关键字 | 缺少的 Observer | 解决方案 |
+|--------------|---------------|---------|
+| `QSNR data not available` | QSNRObserver | `outputs=["qsnr"]` 或 `outputs="default"` |
+| `MSE data not available` | MSEObserver | `outputs=["mse"]` 或 `outputs="default"` |
+| `crest_factor` / `Distribution data not available` | DistributionObserver | `outputs=["distribution"]` |
+| `Histogram data not available` | HistogramObserver | `outputs=["histogram"]` |
+| `Distribution fit data not available` | DistributionFitObserver | `outputs=["fit"]`（需 scipy） |
+| `Outlier ratio data not available` | DistributionObserver | `outputs=["distribution"]` |
+| `Per-block QSNR statistics not available` | QSNRObserver + per_block 格式 | 使用 `per_block` granularity + `outputs=["qsnr"]` |
+
+> **提示**: 传 `outputs="all"` 可以一次性启用所有 Observer（更慢但不会漏）。
+
 ## 独立使用 Observer
 
 Observer 可以脱离 Session，直接挂载到任意模型：

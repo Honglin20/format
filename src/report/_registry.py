@@ -27,6 +27,7 @@ def _ensure_registries():
     from src.viz.tables import (
         accuracy_table,
         distribution_fit_table,
+        per_layer_qsnr_table,
         pot_delta_table,
         sensitivity_table,
         transform_benefit_table,
@@ -56,6 +57,11 @@ def _ensure_registries():
     )
     _TABLE_REGISTRY["transform_dist"] = (
         lambda d, od, **kw: transform_distribution_table(d, od)
+    )
+    _TABLE_REGISTRY["per_layer_qsnr"] = (
+        lambda d, od, **kw: per_layer_qsnr_table(
+            d, output_dir=od, filename=kw.get("filename", "per_layer_qsnr.csv"),
+        )
     )
 
     # ── Figures ─────────────────────────────────────────────────────────

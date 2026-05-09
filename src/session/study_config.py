@@ -31,7 +31,8 @@ Each part can declare ``output`` to specify the tables and figures to generate:
    }
 
 Available table keys: ``accuracy``, ``pot_delta``, ``transform_matrix``,
-``transform_distribution``, ``sensitivity``
+``transform_distribution``, ``transform_benefit``, ``sensitivity``,
+``distribution_fit``, ``per_layer_qsnr``
 Available figure keys: ``qsnr_line``, ``mse_box``, ``pot_delta_bar``, ``transform_heatmap``,
 ``transform_pie``, ``transform_delta``, ``histogram``, ``error_vs_dist``,
 ``layer_type_qsnr``, ``block_sweep``, ``hierarchical_delta``

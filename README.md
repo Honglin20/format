@@ -52,7 +52,7 @@ print(result2.summary())
 | [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block 选择 |
 | [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive |
 | [校准策略](docs/guides/calibration.md) | mse / max / percentile / kl 对比 |
-| [多配置对比 (Study)](docs/guides/study.md) | Study → StudyReport → 对比表 + 导出 |
+| [多配置对比 (Study)](docs/guides/session/study.md) | Study → StudyReport → 对比表 + 图表导出 |
 | [ONNX 导出](docs/guides/onnx-export.md) | 标准 QDQ + MX 自定义算子 |
 
 ### API 参考

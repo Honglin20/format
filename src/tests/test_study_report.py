@@ -421,7 +421,7 @@ class TestStudyReport:
 
     def test_crest_vs_qsnr_no_crest_data(self, mock_result_a):
         report = StudyReport({"p1": [mock_result_a]})
-        with pytest.raises(ValueError, match="Required metrics not available"):
+        with pytest.raises(ValueError, match="Crest factor data not available"):
             report.plot.crest_vs_qsnr(role="input")
 
     def test_crest_vs_qsnr_invalid_role(self, mock_result_with_observers):
@@ -538,7 +538,7 @@ class TestStudyReport:
 
     def test_role_distribution_comparison_no_features(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
-        with pytest.raises(ValueError, match="Required metrics not available"):
+        with pytest.raises(ValueError, match="Distribution features not available"):
             report.plot.role_distribution_comparison()
 
     # ── save() with rich data ────────────────────────────────────────

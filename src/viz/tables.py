@@ -441,3 +441,122 @@ def sensitivity_table(all_results: dict, output_dir: str) -> str:
         for i, (layer, mse, qsnr) in enumerate(ranking, 1):
             f.write(f"{i},{layer},{mse:.6e},{qsnr:.4f}\n")
     return result
+
+
+# ---------------------------------------------------------------------------
+# Table 9 — Per-Layer QSNR comparison across configs
+# ---------------------------------------------------------------------------
+
+def per_layer_qsnr_table(
+    results: dict,
+    *,
+    output_dir: str,
+    filename: str = "per_layer_qsnr.csv",
+    max_layers: int = 60,
+) -> str:
+    """Per-layer QSNR comparison table across all configs.
+
+    One row per layer, one column per config. Each cell is the QSNR (dB)
+    for that layer under that config. Rows are sorted by worst (minimum)
+    QSNR across configs so the most affected layers appear first.
+
+    Args:
+        results: Dict mapping config name to result dict with
+            ``qsnr_per_layer`` (``Dict[str, float]``).
+        output_dir: Output root directory.
+        filename: CSV filename (default ``per_layer_qsnr.csv``).
+        max_layers: Maximum number of layers to include (default 60).
+            Additional layers are summarised at the bottom.
+
+    Returns:
+        Formatted text representation of the table.
+    """
+    if not results:
+        raise ValueError(
+            "No results provided for per-layer QSNR table. "
+            "Pass a dict mapping config names to {qsnr_per_layer: ...} dicts."
+        )
+
+    configs = sorted(results.keys())
+
+    # Collect union of all layers
+    all_layers: dict = {}
+    for cfg_name in configs:
+        data = results[cfg_name]
+        qsnr_dict = data.get("qsnr_per_layer", {})
+        if not isinstance(qsnr_dict, dict):
+            continue
+        for layer, val in qsnr_dict.items():
+            all_layers.setdefault(layer, {})[cfg_name] = val
+
+    if not all_layers:
+        raise ValueError(
+            "No QSNR per-layer data found in any config. "
+            "Ensure session.analyze() is called with outputs=['qsnr'] "
+            "or session.run(calib_data, outputs=['qsnr'])."
+        )
+
+    # Rank layers by worst QSNR (minimum across configs)
+    ranked = []
+    for layer in all_layers:
+        vals = [v for v in all_layers[layer].values() if v == v]
+        min_qsnr = min(vals) if vals else float("inf")
+        ranked.append((layer, min_qsnr))
+    ranked.sort(key=lambda x: x[1])
+
+    layer_order = [l for l, _ in ranked]
+
+    name_w = max(len(l.replace("module.", "").replace("Quantized", "")) for l in layer_order)
+    name_w = min(max(name_w + 2, 10), 32)
+    val_w = 12
+
+    # Build table lines
+    header = f"{'Layer':<{name_w}}" + "".join(
+        f" {cfg:<{val_w}}" for cfg in configs
+    )
+    sep = "-" * len(header)
+    lines = [
+        f"\n{'=' * len(header)}",
+        "Table 9: Per-Layer QSNR (dB) — Lower = more quantization-sensitive",
+        "=" * len(header),
+        header,
+        sep,
+    ]
+
+    shown = layer_order[:max_layers]
+    hidden_count = len(layer_order) - max_layers
+
+    for layer in shown:
+        short = layer.replace("module.", "").replace("Quantized", "")[:name_w]
+        row = f"{short:<{name_w}}"
+        has_any = False
+        for cfg in configs:
+            val = all_layers[layer].get(cfg)
+            if val is not None and val == val:
+                row += f" {val:<{val_w}.2f}"
+                has_any = True
+            else:
+                row += f" {'-':<{val_w}}"
+        if has_any:
+            lines.append(row)
+
+    if hidden_count > 0:
+        lines.append(f"\n  ... {hidden_count} more layers (omit for brevity; "
+                     f"see CSV for full list)")
+
+    result = "\n".join(lines)
+
+    # CSV
+    csv_dir = os.path.join(output_dir, "tables")
+    os.makedirs(csv_dir, exist_ok=True)
+    csv_path = os.path.join(csv_dir, filename)
+    with open(csv_path, "w") as f:
+        f.write("Layer," + ",".join(f"{cfg}_QSNR_dB" for cfg in configs) + "\n")
+        for layer in layer_order:
+            vals = []
+            for cfg in configs:
+                v = all_layers[layer].get(cfg, "")
+                vals.append(f"{v:.4f}" if isinstance(v, (int, float)) and v == v else "")
+            f.write(f"{layer}," + ",".join(vals) + "\n")
+
+    return result

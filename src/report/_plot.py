@@ -15,6 +15,29 @@ if TYPE_CHECKING:
 
 _VALID_PLOT_ROLES = frozenset({"input", "weight", "output", "bias"})
 
+# ── Error message helpers ──────────────────────────────────────────────────
+# Concrete HOW, not just WHAT. Each observer key maps to the `outputs`
+# string the user must pass to `session.run()` or `session.analyze()`.
+
+_OBSERVER_HOW: dict = {
+    "qsnr":          'outputs=["qsnr"] (or "default" / "all")',
+    "mse":           'outputs=["mse"] (or "default" / "all")',
+    "distribution":  'outputs=["distribution"] (or "all")',
+    "histogram":     'outputs=["histogram"] (or "all")',
+    "fit":           'outputs=["fit"] (or "all") — requires scipy',
+    "per_block_qsnr":'outputs=["per_block_qsnr"] (or "all")',
+    "outlier":       'outputs=["distribution", "qsnr"] (or "all")',
+}
+
+def _how_to(*keys: str) -> str:
+    """Return the last sentence of an error message: what to pass to run()."""
+    clauses = []
+    for k in keys:
+        clauses.append(_OBSERVER_HOW.get(k, k))
+    if len(clauses) == 1:
+        return f"Enable via: session.run(calib_data, {clauses[0]})."
+    return f"Enable via: session.run(calib_data, outputs=[{', '.join(repr(k) for k in keys)}])."
+
 
 class StudyPlotAccessor:
     """Post-hoc visualization methods on :class:`StudyReport`.
@@ -47,8 +70,8 @@ class StudyPlotAccessor:
         df = self._report.to_dataframe()
         if df is None or df.empty or "qsnr_db" not in df.columns:
             raise ValueError(
-                "QSNR data not available. "
-                "Add QSNRObserver() to session observers before the analysis pass."
+                "QSNR data not available — QSNRObserver was not active. "
+                + _how_to("qsnr")
             )
 
         # Collect union of all layer names across configs
@@ -104,9 +127,8 @@ class StudyPlotAccessor:
         if df is None or df.empty or not needed.issubset(df.columns):
             missing = needed - (set(df.columns) if df is not None and not df.empty else set())
             raise ValueError(
-                f"Required metrics not available: {sorted(missing)}. "
-                "Ensure DistributionObserver and QSNRObserver are both active "
-                "in session observers during the analysis pass."
+                f"Crest factor data not available — missing: {sorted(missing)}. "
+                + _how_to("distribution", "qsnr")
             )
 
         role_df = df[df["role"] == role]
@@ -159,8 +181,8 @@ class StudyPlotAccessor:
         df = self._report.to_dataframe()
         if df is None or df.empty or "outlier_ratio" not in df.columns:
             raise ValueError(
-                "Outlier ratio data not available. "
-                "Ensure DistributionObserver is active during the analysis pass."
+                "Outlier ratio data not available — DistributionObserver was not active. "
+                + _how_to("distribution")
             )
 
         role_df = df[df["role"] == role]
@@ -241,9 +263,8 @@ class StudyPlotAccessor:
         needed = {"qsnr_db_std", "qsnr_db_min", "qsnr_db_max"}
         if df is None or df.empty:
             raise ValueError(
-                "Per-block QSNR data not available. "
-                "Ensure QSNRObserver is active with per-block granularity "
-                "to collect per-block statistics (qsnr_db_std/min/max)."
+                "Per-block QSNR data not available — QSNRObserver was not active. "
+                + _how_to("qsnr")
             )
         available_cols = set(df.columns)
         if not needed.issubset(available_cols):
@@ -462,8 +483,9 @@ class StudyPlotAccessor:
         df = self._report.to_dataframe()
         if df is None or df.empty:
             raise ValueError(
-                "No data available for correlation analysis. "
-                "Ensure DistributionObserver is active during the analysis pass."
+                "No data available for correlation analysis — "
+                "DistributionObserver was not active. "
+                + _how_to("distribution")
             )
 
         feat_cols = [
@@ -482,7 +504,7 @@ class StudyPlotAccessor:
         if len(available) < 2:
             raise ValueError(
                 "Insufficient distribution feature data for correlation heatmap. "
-                "Ensure DistributionObserver is active during the analysis pass."
+                + _how_to("distribution")
             )
 
         sub = df[available].dropna()
@@ -605,14 +627,14 @@ class StudyPlotAccessor:
         needed = {"skewness", "kurtosis", "norm_entropy", "role"}
         if df is None or df.empty:
             raise ValueError(
-                "Distribution data not available. "
-                "Ensure DistributionObserver is active during the analysis pass."
+                "Distribution data not available — DistributionObserver was not active. "
+                + _how_to("distribution")
             )
         missing = needed - set(df.columns)
         if missing:
             raise ValueError(
-                f"Required metrics not available: {sorted(missing)}. "
-                "Ensure DistributionObserver is active during the analysis pass."
+                f"Distribution features not available — missing: {sorted(missing)}. "
+                + _how_to("distribution")
             )
 
         # Filter to plot-relevant roles
