@@ -404,3 +404,75 @@ class TestActivationSTE:
         mx_out.sum().backward()
         src_out.sum().backward()
         _assert_bit_exact(mx_x.grad, src_x.grad, label=f"gelu-ste-grad ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_STE)
+    def test_tanh_ste(self, name, mx_specs):
+        x = _make_input()
+        mx_specs = apply_mx_specs(mx_specs)
+        mx_x = x.clone().requires_grad_(True)
+        src_x = x.clone().requires_grad_(True)
+
+        mx_out = mx.tanh(mx_x, mx_specs=mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input
+        qbp = bool(cfg.grad_input)
+        src_out = TanhFunction.apply(src_x, inner, qbp)
+
+        _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"tanh-ste-fwd ({name})")
+        mx_out.sum().backward()
+        src_out.sum().backward()
+        _assert_bit_exact(mx_x.grad, src_x.grad, label=f"tanh-ste-grad ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_STE)
+    def test_relu6_ste(self, name, mx_specs):
+        x = _make_input()
+        mx_specs = apply_mx_specs(mx_specs)
+        mx_x = x.clone().requires_grad_(True)
+        src_x = x.clone().requires_grad_(True)
+
+        mx_out = mx.relu6(mx_x, mx_specs=mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input
+        qbp = bool(cfg.grad_input)
+        src_out = ReLU6Function.apply(src_x, False, inner, qbp)
+
+        _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"relu6-ste-fwd ({name})")
+        mx_out.sum().backward()
+        src_out.sum().backward()
+        _assert_bit_exact(mx_x.grad, src_x.grad, label=f"relu6-ste-grad ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_STE)
+    def test_leaky_relu_ste(self, name, mx_specs):
+        x = _make_input()
+        mx_specs = apply_mx_specs(mx_specs)
+        mx_x = x.clone().requires_grad_(True)
+        src_x = x.clone().requires_grad_(True)
+
+        mx_out = mx.leaky_relu(mx_x, mx_specs=mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input
+        qbp = bool(cfg.grad_input)
+        src_out = LeakyReLUFunction.apply(src_x, 0.01, False, inner, qbp)
+
+        _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"leaky_relu-ste-fwd ({name})")
+        mx_out.sum().backward()
+        src_out.sum().backward()
+        _assert_bit_exact(mx_x.grad, src_x.grad, label=f"leaky_relu-ste-grad ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_STE)
+    def test_silu_ste(self, name, mx_specs):
+        x = _make_input()
+        mx_specs = apply_mx_specs(mx_specs)
+        mx_x = x.clone().requires_grad_(True)
+        src_x = x.clone().requires_grad_(True)
+
+        mx_out = mx.silu(mx_x, mx_specs=mx_specs)
+        cfg = activation_config_from_mx_specs(mx_specs)
+        inner = cfg.input
+        qbp = bool(cfg.grad_input)
+        src_out = SiLUFunction.apply(src_x, False, inner, qbp)
+
+        _assert_bit_exact(mx_out.detach(), src_out.detach(), label=f"silu-ste-fwd ({name})")
+        mx_out.sum().backward()
+        src_out.sum().backward()
+        _assert_bit_exact(mx_x.grad, src_x.grad, label=f"silu-ste-grad ({name})")

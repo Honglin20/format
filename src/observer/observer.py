@@ -91,70 +91,78 @@ class SliceAwareObserver(ObserverBase):
                .setdefault(event.role, {})
                .setdefault(f"{event.stage}[{event.pipeline_index}]", {}))
 
-        if mode == GranularityMode.PER_TENSOR:
-            dst[("tensor",)] = self._measure(("tensor",), fp32, quant)
+        # Guard against QuantizeContext tensor patches.  When the model
+        # forward is wrapped in QuantizeContext, torch.Tensor.__sub__,
+        # __add__, __mul__, etc. are patched to apply quantization —
+        # which would corrupt observer arithmetic (e.g. fp32 - quant
+        # would quantize both operands before subtraction, always
+        # producing 0).  _enter_quantize() / _exit_quantize() signal
+        # the patches to use the original (unquantized) operations.
+        from src.quantize.elemwise import _enter_quantize, _exit_quantize
+        _enter_quantize()
+        try:
+            if mode == GranularityMode.PER_TENSOR:
+                dst[("tensor",)] = self._measure(("tensor",), fp32, quant)
 
-        elif mode == GranularityMode.PER_CHANNEL:
-            axis = g.channel_axis
-            if axis < 0:
-                axis = fp32.ndim + axis
-            n_ch = fp32.shape[axis]
-            fp32_2d = fp32.movedim(axis, 0).reshape(n_ch, -1)
-            quant_2d = quant.movedim(axis, 0).reshape(n_ch, -1)
-            for i, m in enumerate(self._measure_per_unit(fp32_2d, quant_2d)):
-                dst[("channel", i)] = m
+            elif mode == GranularityMode.PER_CHANNEL:
+                axis = g.channel_axis
+                if axis < 0:
+                    axis = fp32.ndim + axis
+                n_ch = fp32.shape[axis]
+                fp32_2d = fp32.movedim(axis, 0).reshape(n_ch, -1)
+                quant_2d = quant.movedim(axis, 0).reshape(n_ch, -1)
+                for i, m in enumerate(self._measure_per_unit(fp32_2d, quant_2d)):
+                    dst[("channel", i)] = m
 
-        elif mode == GranularityMode.PER_BLOCK:
-            bs = g.block_size
-            axis = g.block_axis
-            if axis < 0:
-                axis = fp32.ndim + axis
-            dim_size = fp32.shape[axis]
-            n_blocks = (dim_size + bs - 1) // bs
+            elif mode == GranularityMode.PER_BLOCK:
+                bs = g.block_size
+                axis = g.block_axis
+                if axis < 0:
+                    axis = fp32.ndim + axis
+                dim_size = fp32.shape[axis]
+                n_blocks = (dim_size + bs - 1) // bs
 
-            # Move block axis to last so reshape can fold all other dims into N_units
-            fp32_moved = fp32.movedim(axis, -1)
-            quant_moved = quant.movedim(axis, -1)
+                # Move block axis to last so reshape can fold all other dims into N_units
+                fp32_moved = fp32.movedim(axis, -1)
+                quant_moved = quant.movedim(axis, -1)
 
-            if dim_size % bs != 0:
-                pad = n_blocks * bs - dim_size
-                fp32_moved = torch.nn.functional.pad(fp32_moved, (0, pad))
-                quant_moved = torch.nn.functional.pad(quant_moved, (0, pad))
+                if dim_size % bs != 0:
+                    pad = n_blocks * bs - dim_size
+                    fp32_moved = torch.nn.functional.pad(fp32_moved, (0, pad))
+                    quant_moved = torch.nn.functional.pad(quant_moved, (0, pad))
 
-            # [*other_dims, n_blocks*bs] → [N_units, bs]
-            # Each row is one true MX block (bs consecutive elements along block_axis
-            # for a single position in all other dimensions).
-            fp32_2d = fp32_moved.reshape(-1, bs)
-            quant_2d = quant_moved.reshape(-1, bs)
+                # [*other_dims, n_blocks*bs] → [N_units, bs]
+                fp32_2d = fp32_moved.reshape(-1, bs)
+                quant_2d = quant_moved.reshape(-1, bs)
 
-            # valid_counts: per-row count of real (non-padding) elements
-            # Fully vectorized — no Python loop.
-            if dim_size % bs != 0:
-                valid_counts = torch.full((fp32_2d.shape[0],), bs,
-                                          dtype=torch.float32, device=fp32.device)
-                # Every n_blocks-th row (0-indexed from n_blocks-1) is a partial last block
-                valid_counts[n_blocks - 1::n_blocks] = dim_size % bs
+                if dim_size % bs != 0:
+                    valid_counts = torch.full((fp32_2d.shape[0],), bs,
+                                              dtype=torch.float32, device=fp32.device)
+                    # Every n_blocks-th row is a partial last block
+                    valid_counts[n_blocks - 1::n_blocks] = dim_size % bs
+                else:
+                    valid_counts = None
+
+                dst[("block_agg",)] = self._measure_batch(fp32_2d, quant_2d,
+                                                           valid_counts=valid_counts)
+
+            elif mode == GranularityMode.DYNAMIC_GROUP:
+                if event.group_map is None:
+                    raise ValueError(
+                        "DYNAMIC_GROUP granularity requires group_map to be set. "
+                        "Make sure the format's quantize() returns the group_map tensor."
+                    )
+                for gid in event.group_map.unique().tolist():
+                    mask = (event.group_map == gid)
+                    gid_int = int(gid)
+                    dst[("group", gid_int)] = self._measure(
+                        ("group", gid_int), fp32[mask], quant[mask]
+                    )
+
             else:
-                valid_counts = None
-
-            dst[("block_agg",)] = self._measure_batch(fp32_2d, quant_2d,
-                                                       valid_counts=valid_counts)
-
-        elif mode == GranularityMode.DYNAMIC_GROUP:
-            if event.group_map is None:
-                raise ValueError(
-                    "DYNAMIC_GROUP granularity requires group_map to be set. "
-                    "Make sure the format's quantize() returns the group_map tensor."
-                )
-            for gid in event.group_map.unique().tolist():
-                mask = (event.group_map == gid)
-                gid_int = int(gid)
-                dst[("group", gid_int)] = self._measure(
-                    ("group", gid_int), fp32[mask], quant[mask]
-                )
-
-        else:
-            raise ValueError(f"Unknown granularity mode: {mode}")
+                raise ValueError(f"Unknown granularity mode: {mode}")
+        finally:
+            _exit_quantize()
 
     def report(self) -> dict:
         return self._buffer

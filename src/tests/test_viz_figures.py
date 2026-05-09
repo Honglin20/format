@@ -17,6 +17,10 @@ from src.viz.figures import (
     layer_type_qsnr,
     block_sweep_line_chart,
     hierarchical_delta_bar,
+    outlier_analysis,
+    per_block_qsnr,
+    correlation_heatmap,
+    role_distribution_comparison,
     _get_acc_val,
 )
 
@@ -70,9 +74,8 @@ class TestQSNRBarChart:
 
     def test_empty_results(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = qsnr_line_chart({}, title="Empty", colors={}, output_dir=tmpdir)
-            assert fig is not None
-            assert len(fig.axes) > 0
+            with pytest.raises(ValueError, match="No QSNR data available"):
+                qsnr_line_chart({}, title="Empty", colors={}, output_dir=tmpdir)
 
     def test_qsnr_aligns_by_shared_layer_names(self):
         """Different configs should use the same x position for the same layer."""
@@ -124,9 +127,8 @@ class TestMSEBoxPlot:
     def test_renders_no_data(self):
         results = {}
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = mse_box_plot(results, title="Empty MSE", colors={}, output_dir=tmpdir)
-            assert fig is not None
-            assert len(fig.axes) > 0
+            with pytest.raises(ValueError, match="No MSE data available"):
+                mse_box_plot(results, title="Empty MSE", colors={}, output_dir=tmpdir)
 
     def test_skips_baseline(self):
         results = {
@@ -151,25 +153,22 @@ class TestPoTDeltaBar:
 
     def test_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = pot_delta_bar({}, output_dir=tmpdir)
-            assert fig is not None
+            with pytest.raises(ValueError, match="No PoT scaling data"):
+                pot_delta_bar({}, output_dir=tmpdir)
 
 
 class TestHistogramOverlay:
     def test_renders_no_data_message(self):
-        """When no histogram data exists, a placeholder figure should render."""
+        """When no histogram data exists, a ValueError is raised."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = histogram_overlay({}, output_dir=tmpdir)
-            assert fig is not None
-            assert len(fig.axes) > 0
+            with pytest.raises(ValueError, match="Histogram data not available"):
+                histogram_overlay({}, output_dir=tmpdir)
 
     def test_renders_with_qsnr_ranking(self):
-        """When QSNR data is available, layers should be ranked by sensitivity."""
-        # This test verifies the function doesn't crash when report has iter_slices
-        # with both histogram and QSNR data
+        """When no data, raises ValueError."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = histogram_overlay({}, output_dir=tmpdir)
-            assert fig is not None
+            with pytest.raises(ValueError, match="Histogram data not available"):
+                histogram_overlay({}, output_dir=tmpdir)
 
 
 class TestTransformHeatmap:
@@ -191,8 +190,8 @@ class TestTransformHeatmap:
 
     def test_partial_data(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = transform_heatmap({}, colors={}, output_dir=tmpdir)
-            assert fig is not None
+            with pytest.raises(ValueError, match="No transform study data"):
+                transform_heatmap({}, colors={}, output_dir=tmpdir)
 
     def test_cell_values_match_input(self):
         """Heatmap annotations should reflect the underlying accuracy data."""
@@ -237,8 +236,8 @@ class TestTransformPie:
 
     def test_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = transform_pie({}, colors={}, output_dir=tmpdir)
-            assert fig is not None
+            with pytest.raises(ValueError, match="No format study data"):
+                transform_pie({}, colors={}, output_dir=tmpdir)
 
     def test_percentages_are_positive(self):
         """All pie wedge percentages should be non-negative."""
@@ -281,22 +280,22 @@ class TestTransformDelta:
 
     def test_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = transform_delta({}, colors={}, output_dir=tmpdir)
-            assert fig is not None
+            with pytest.raises(ValueError, match="No transform delta data"):
+                transform_delta({}, colors={}, output_dir=tmpdir)
 
 
 class TestErrorVsDistribution:
     def test_renders_no_data_message(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = error_vs_distribution({}, output_dir=tmpdir)
-            assert fig is not None
+            with pytest.raises(ValueError, match="Distribution data not available"):
+                error_vs_distribution({}, output_dir=tmpdir)
 
 
 class TestLayerTypeQSNR:
     def test_renders_no_data_message(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = layer_type_qsnr({}, output_dir=tmpdir)
-            assert fig is not None
+            with pytest.raises(ValueError, match="Layer type data not available"):
+                layer_type_qsnr({}, output_dir=tmpdir)
 
     def test_single_layer_type_falls_back_to_per_layer_chart(self):
         """When all layers are the same type, fall back to qsnr_line_chart."""
@@ -331,8 +330,8 @@ class TestBlockSweepLineChart:
 
     def test_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = block_sweep_line_chart({}, output_dir=tmpdir)
-            assert fig is not None
+            with pytest.raises(ValueError, match="No block sweep data"):
+                block_sweep_line_chart({}, output_dir=tmpdir)
 
     def test_skips_baseline(self):
         block_sweep = {
@@ -366,5 +365,157 @@ class TestHierarchicalDeltaBar:
 
     def test_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = hierarchical_delta_bar({}, output_dir=tmpdir)
+            with pytest.raises(ValueError, match="No hierarchical study data"):
+                hierarchical_delta_bar({}, output_dir=tmpdir)
+
+
+# ── Helpers for iter_slices-based figure tests ──────────────────────────
+
+class _MockReport:
+    """Minimal mock report with iter_slices for figure tests."""
+
+    def __init__(self, slices):
+        self._slices = slices
+
+    def iter_slices(self):
+        for item in self._slices:
+            yield item
+
+
+def _make_all_results(slices):
+    """Wrap a single report in the all_results dict."""
+    return {"part_a": {"cfg1": {"report": _MockReport(slices)}}}
+
+
+# ── P0.1: Outlier Analysis ──────────────────────────────────────────────
+
+class TestOutlierAnalysis:
+    def test_renders_without_error(self):
+        slices = [
+            ("layer1", "input", "pre", ("tensor",), {"outlier_ratio": 0.03, "qsnr_db": 30.0}),
+            ("layer1", "weight", "pre", ("tensor",), {"outlier_ratio": 0.01, "qsnr_db": 42.0}),
+            ("layer2", "input", "pre", ("tensor",), {"outlier_ratio": 0.05, "qsnr_db": 25.0}),
+        ]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = outlier_analysis(all_results, output_dir=tmpdir, role="input")
             assert fig is not None
+
+    def test_empty_data(self):
+        slices = [("l", "weight", "pre", ("tensor",), {"qsnr_db": 30.0})]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="Outlier ratio data not available"):
+                outlier_analysis(all_results, output_dir=tmpdir, role="input")
+
+    def test_no_slices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="Outlier ratio data not available"):
+                outlier_analysis({}, output_dir=tmpdir)
+
+
+# ── P0.2: Per-Block QSNR ────────────────────────────────────────────────
+
+class TestPerBlockQSNR:
+    def test_renders_without_error(self):
+        slices = [
+            ("layer1", "input", "pre", ("tensor",), {
+                "qsnr_db": 30.0, "qsnr_db_std": 2.0,
+                "qsnr_db_min": 25.0, "qsnr_db_max": 35.0,
+            }),
+            ("layer2", "input", "pre", ("tensor",), {
+                "qsnr_db": 28.0, "qsnr_db_std": 1.5,
+                "qsnr_db_min": 24.0, "qsnr_db_max": 32.0,
+            }),
+        ]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = per_block_qsnr(all_results, output_dir=tmpdir, role="input")
+            assert fig is not None
+
+    def test_empty_data(self):
+        slices = [("l", "input", "pre", ("tensor",), {"qsnr_db": 30.0})]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="Per-block QSNR statistics not available"):
+                per_block_qsnr(all_results, output_dir=tmpdir, role="input")
+
+
+# ── P1.5: Correlation Heatmap ───────────────────────────────────────────
+
+class TestCorrelationHeatmap:
+    def test_renders_without_error(self):
+        slices = [
+            ("l1", "input", "pre", ("tensor",), {
+                "crest_factor": 2.0, "skewness": 0.3, "kurtosis": 3.2,
+                "sparse_ratio": 0.05, "dynamic_range_bits": 6.0,
+                "outlier_ratio": 0.02, "norm_entropy": 0.75, "qsnr_db": 30.0,
+            }),
+            ("l2", "input", "pre", ("tensor",), {
+                "crest_factor": 3.0, "skewness": 0.8, "kurtosis": 4.5,
+                "sparse_ratio": 0.12, "dynamic_range_bits": 4.5,
+                "outlier_ratio": 0.06, "norm_entropy": 0.62, "qsnr_db": 25.0,
+            }),
+            ("l3", "input", "pre", ("tensor",), {
+                "crest_factor": 1.5, "skewness": -0.1, "kurtosis": 2.9,
+                "sparse_ratio": 0.01, "dynamic_range_bits": 7.0,
+                "outlier_ratio": 0.01, "norm_entropy": 0.85, "qsnr_db": 35.0,
+            }),
+        ]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = correlation_heatmap(all_results, output_dir=tmpdir)
+            assert fig is not None
+
+    def test_insufficient_features(self):
+        slices = [("l1", "input", "pre", ("tensor",), {"crest_factor": 2.0})]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="Insufficient distribution feature"):
+                correlation_heatmap(all_results, output_dir=tmpdir)
+
+    def test_empty_data(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="Insufficient distribution feature"):
+                correlation_heatmap({}, output_dir=tmpdir)
+
+
+# ── P1.7: Role Distribution Comparison ──────────────────────────────────
+
+class TestRoleDistributionComparison:
+    def test_renders_without_error(self):
+        slices = [
+            ("l1", "input", "pre", ("tensor",), {"skewness": 0.3, "kurtosis": 3.2, "norm_entropy": 0.75}),
+            ("l1", "weight", "pre", ("tensor",), {"skewness": -0.2, "kurtosis": 2.8, "norm_entropy": 0.82}),
+            ("l1", "output", "pre", ("tensor",), {"skewness": 0.1, "kurtosis": 3.1, "norm_entropy": 0.70}),
+            ("l2", "input", "pre", ("tensor",), {"skewness": 0.8, "kurtosis": 4.2, "norm_entropy": 0.65}),
+            ("l2", "weight", "pre", ("tensor",), {"skewness": 0.5, "kurtosis": 3.8, "norm_entropy": 0.72}),
+            ("l2", "output", "pre", ("tensor",), {"skewness": 0.2, "kurtosis": 3.3, "norm_entropy": 0.68}),
+        ]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = role_distribution_comparison(all_results, output_dir=tmpdir)
+            assert fig is not None
+
+    def test_custom_roles(self):
+        slices = [
+            ("l1", "input", "pre", ("tensor",), {"skewness": 0.3, "kurtosis": 3.2, "norm_entropy": 0.75}),
+            ("l1", "weight", "pre", ("tensor",), {"skewness": -0.2, "kurtosis": 2.8, "norm_entropy": 0.82}),
+        ]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig = role_distribution_comparison(all_results, output_dir=tmpdir,
+                                               roles=("input", "weight"))
+            assert fig is not None
+
+    def test_empty_data(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="Distribution data not available"):
+                role_distribution_comparison({}, output_dir=tmpdir)
+
+    def test_no_matching_roles(self):
+        slices = [("l1", "bias", "pre", ("tensor",), {"skewness": 0.0, "kurtosis": 3.0, "norm_entropy": 0.5})]
+        all_results = _make_all_results(slices)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="No data found for roles"):
+                role_distribution_comparison(all_results, output_dir=tmpdir)

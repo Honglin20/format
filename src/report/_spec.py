@@ -36,6 +36,14 @@ _OUTPUT_SPEC: Dict[str, dict] = {
     "block_sweep":       {"observers": ["qsnr"],       "needs_eval": True},
     "hierarchical":      {"observers": ["qsnr", "mse"], "needs_eval": True},
     "pot_delta_bar":     {"observers": [],             "needs_eval": True},
+    # ── New tables ──────────────────────────────────────────────────────
+    "distribution_fit": {"observers": ["fit"], "needs_eval": False},
+    "transform_benefit":{"observers": ["qsnr"],            "needs_eval": True},
+    # ── New figures ──────────────────────────────────────────────────────
+    "outlier":          {"observers": ["distribution", "qsnr"], "needs_eval": False},
+    "per_block_qsnr":   {"observers": ["qsnr"],                "needs_eval": False},
+    "correlation_heatmap":{"observers": ["distribution", "qsnr", "mse"], "needs_eval": False},
+    "role_distribution": {"observers": ["distribution"],       "needs_eval": False},
     # ── Other ───────────────────────────────────────────────────────────
     "cost":             {"observers": [],              "needs_eval": False, "needs_cost": True},
 }

@@ -313,3 +313,81 @@ def test_pipeline_hooks_removed():
     assert n_hooks_after == n_hooks_before, (
         f"Hooks not removed: {n_hooks_before} → {n_hooks_after}"
     )
+
+
+# ===================================================================
+# CalibrationSession (non-legacy context manager)
+# ===================================================================
+
+class TestCalibrationSession:
+    def test_context_manager_collects_scales(self):
+        from src.calibration.pipeline import CalibrationSession
+        model = _make_model()
+        with CalibrationSession(model, MaxScaleStrategy(), assign=False) as calib:
+            model(torch.randn(2, 4))
+            scales = calib.scales()
+            assert "linear" in scales
+            assert isinstance(scales["linear"], torch.Tensor)
+
+    def test_auto_assign_on_exit(self):
+        from src.calibration.pipeline import CalibrationSession
+        model = _make_model()
+        with CalibrationSession(model, MaxScaleStrategy(), assign=True):
+            model(torch.randn(2, 4))
+        # After exit, _output_scale buffer should be registered
+        assert hasattr(model.linear, "_output_scale")
+        assert isinstance(model.linear._output_scale, torch.Tensor)
+
+    def test_no_assign_when_false(self):
+        from src.calibration.pipeline import CalibrationSession
+        model = _make_model()
+        with CalibrationSession(model, MaxScaleStrategy(), assign=False):
+            model(torch.randn(2, 4))
+        # Should NOT have _output_scale
+        assert not hasattr(model.linear, "_output_scale")
+
+    def test_assign_scales_manual(self):
+        from src.calibration.pipeline import CalibrationSession
+        model = _make_model()
+        calib = CalibrationSession(model, MaxScaleStrategy(), assign=False)
+        with calib:
+            model(torch.randn(2, 4))
+        # Manually assign after exit
+        assigned = calib.assign_scales()
+        assert "linear" in assigned
+        assert hasattr(model.linear, "_output_scale")
+
+    def test_clear_scales(self):
+        from src.calibration.pipeline import CalibrationSession
+        model = _make_model()
+        with CalibrationSession(model, MaxScaleStrategy(), assign=True):
+            model(torch.randn(2, 4))
+        assert hasattr(model.linear, "_output_scale")
+
+        calib = CalibrationSession(model, MaxScaleStrategy(), assign=False)
+        removed = calib.clear_scales()
+        assert "linear" in removed
+        assert not hasattr(model.linear, "_output_scale")
+
+
+# ===================================================================
+# Standalone save_scales / load_scales
+# ===================================================================
+
+class TestSaveLoadScales:
+    def test_save_and_load_roundtrip(self):
+        from src.calibration.pipeline import save_scales, load_scales
+
+        scales = {"a": torch.tensor([1.0, 2.0]), "b": torch.tensor(3.0)}
+        path = "/tmp/test_scales_roundtrip.pt"
+        save_scales(scales, path)
+        loaded = load_scales(path)
+        assert set(loaded.keys()) == {"a", "b"}
+        assert torch.equal(loaded["a"], scales["a"])
+        assert torch.equal(loaded["b"], scales["b"])
+
+    def test_save_scales_returns_path(self):
+        from src.calibration.pipeline import save_scales
+
+        path = save_scales({"x": torch.tensor(1.0)}, "/tmp/test_scales_chain.pt")
+        assert path == "/tmp/test_scales_chain.pt"

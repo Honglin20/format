@@ -127,9 +127,9 @@ class TestMakeOpCfg:
         assert cfg.weight.granularity.block_size == 32
         assert cfg.input.granularity.block_size == 32
 
-    def test_scale_format_fp32_default(self):
+    def test_scale_format_pot_default(self):
         cfg = QuantConfig(w_format="int8", w_granularity="per_tensor").to_op_config()
-        assert cfg.weight.scale_storage == "fp32"
+        assert cfg.weight.scale_storage == "pot"
 
     def test_scale_format_pot(self):
         cfg = QuantConfig(
@@ -165,12 +165,12 @@ class TestMakeOpCfgWeightOnly:
         assert cfg.input is None
         assert cfg.output is None
 
-    def test_scale_format_default(self):
+    def test_scale_format_pot_default(self):
         cfg = QuantConfig(
             w_format="int4", w_granularity="per_tensor",
             weight_only=True,
         ).to_op_config()
-        assert cfg.weight.scale_storage == "fp32"
+        assert cfg.weight.scale_storage == "pot"
 
     def test_scale_format_pot(self):
         cfg = QuantConfig(

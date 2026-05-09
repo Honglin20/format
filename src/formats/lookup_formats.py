@@ -67,6 +67,12 @@ class LookupFormat(FormatBase):
 
         return result
 
+    def _quantize_per_tensor(self, x, round_mode, allow_denorm=True, scale=None,
+                              scale_storage="pot"):
+        """Direct elemwise — LUT formats have their own scaling semantics."""
+        return self.quantize_elemwise(x, round_mode=round_mode,
+                                      allow_denorm=allow_denorm)
+
     def export_onnx(self, g, x, scheme):
         """Emit com.microxscaling::NF4Quantize custom node with LUT levels."""
         levels_list = self.levels.detach().cpu().tolist()

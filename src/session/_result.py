@@ -57,8 +57,12 @@ class SessionResult:
                 parts.append(" | ".join(metric_strs))
 
         if self.qsnr_per_layer:
-            avg_qsnr = sum(self.qsnr_per_layer.values()) / len(self.qsnr_per_layer)
-            parts.append(f"avg QSNR={avg_qsnr:.1f} dB")
+            finite = [v for v in self.qsnr_per_layer.values() if v == v and v != float('inf') and v != float('-inf')]
+            if finite:
+                avg_qsnr = sum(finite) / len(finite)
+                parts.append(f"avg QSNR={avg_qsnr:.1f} dB")
+            else:
+                parts.append("avg QSNR=N/A")
 
         if self.delta:
             delta_strs = []
@@ -98,24 +102,35 @@ class SessionResult:
 
         return "\n".join(lines)
 
-    def top_k_qsnr(self, k: int = 10) -> List[Tuple[str, float]]:
-        """Layers with the **lowest** QSNR (worst quality), sorted ascending.
+    def top_k_qsnr(self, k: int = 10, reverse: bool = False) -> List[Tuple[str, float]]:
+        """Top-k layers by QSNR.
 
         Args:
             k: Number of layers to return (default 10).
+            reverse: If False (default), returns the k layers with the **lowest**
+                QSNR (worst quality), sorted ascending. If True, returns the k
+                layers with the **highest** QSNR (best quality), sorted descending.
 
         Returns:
-            List of ``(layer_name, qsnr_db)`` tuples, worst-first.
+            List of ``(layer_name, qsnr_db)`` tuples.
 
         Example::
 
+            >>> # Worst 3 layers
             >>> for name, qsnr in result.top_k_qsnr(3):
             ...     print(f"{name}: {qsnr:.1f} dB")
             layer1.linear: 12.3 dB
             layer2.conv: 18.7 dB
             layer3.norm: 25.1 dB
+
+            >>> # Best 3 layers
+            >>> for name, qsnr in result.top_k_qsnr(3, reverse=True):
+            ...     print(f"{name}: {qsnr:.1f} dB")
+            layer5.embed: 52.1 dB
+            layer4.norm: 48.3 dB
+            layer3.norm: 45.7 dB
         """
-        sorted_layers = sorted(self.qsnr_per_layer.items(), key=lambda x: x[1])
+        sorted_layers = sorted(self.qsnr_per_layer.items(), key=lambda x: x[1], reverse=reverse)
         return sorted_layers[:k]
 
     def layer_report(self) -> "Any":

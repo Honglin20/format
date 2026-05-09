@@ -216,48 +216,59 @@ class ConvFunction(torch.autograd.Function):
     def symbolic(g, input, weight, bias, stride, padding, dilation, groups,
                  cfg, name, emit_fn):
         from src.onnx.helpers import _emit_quantize_node
+        from src.session._context import _export_scales_var, _onnx_current_scale_var
 
-        if cfg.storage is not None:
-            input = _emit_quantize_node(g, input, cfg.storage)
-        if cfg.input is not None:
-            input = _emit_quantize_node(g, input, cfg.input)
+        scales = _export_scales_var.get()
+        current_scale = None
+        if scales:
+            current_scale = scales.get(name)
+            if current_scale is None:
+                current_scale = scales.get("")
+        _onnx_current_scale_var.set(current_scale)
+        try:
+            if cfg.storage is not None:
+                input = _emit_quantize_node(g, input, cfg.storage)
+            if cfg.input is not None:
+                input = _emit_quantize_node(g, input, cfg.input)
 
-        if cfg.storage is not None:
-            weight = _emit_quantize_node(g, weight, cfg.storage)
-        if cfg.weight is not None:
-            weight = _emit_quantize_node(g, weight, cfg.weight)
+            if cfg.storage is not None:
+                weight = _emit_quantize_node(g, weight, cfg.storage)
+            if cfg.weight is not None:
+                weight = _emit_quantize_node(g, weight, cfg.weight)
 
-        if bias is not None and cfg.storage is not None:
-            bias = _emit_quantize_node(g, bias, cfg.storage)
-        if bias is not None and cfg.bias is not None:
-            bias = _emit_quantize_node(g, bias, cfg.bias)
+            if bias is not None and cfg.storage is not None:
+                bias = _emit_quantize_node(g, bias, cfg.storage)
+            if bias is not None and cfg.bias is not None:
+                bias = _emit_quantize_node(g, bias, cfg.bias)
 
-        weight_sizes = weight.type().sizes()
-        kernel_shape = list(weight_sizes[2:]) if weight_sizes is not None else None
+            weight_sizes = weight.type().sizes()
+            kernel_shape = list(weight_sizes[2:]) if weight_sizes is not None else None
 
-        pad_list = list(padding) if hasattr(padding, '__iter__') else [padding]
-        onnx_pads = pad_list + pad_list
+            pad_list = list(padding) if hasattr(padding, '__iter__') else [padding]
+            onnx_pads = pad_list + pad_list
 
-        conv_kwargs = dict(
-            dilations_i=list(dilation) if hasattr(dilation, '__iter__') else [dilation],
-            group_i=groups,
-            pads_i=onnx_pads,
-            strides_i=list(stride) if hasattr(stride, '__iter__') else [stride],
-        )
-        if kernel_shape is not None:
-            conv_kwargs["kernel_shape_i"] = kernel_shape
+            conv_kwargs = dict(
+                dilations_i=list(dilation) if hasattr(dilation, '__iter__') else [dilation],
+                group_i=groups,
+                pads_i=onnx_pads,
+                strides_i=list(stride) if hasattr(stride, '__iter__') else [stride],
+            )
+            if kernel_shape is not None:
+                conv_kwargs["kernel_shape_i"] = kernel_shape
 
-        if bias is not None:
-            output = g.op("Conv", input, weight, bias, **conv_kwargs)
-        else:
-            output = g.op("Conv", input, weight, **conv_kwargs)
+            if bias is not None:
+                output = g.op("Conv", input, weight, bias, **conv_kwargs)
+            else:
+                output = g.op("Conv", input, weight, **conv_kwargs)
 
-        if cfg.storage is not None:
-            output = _emit_quantize_node(g, output, cfg.storage)
-        if cfg.output is not None:
-            output = _emit_quantize_node(g, output, cfg.output)
+            if cfg.storage is not None:
+                output = _emit_quantize_node(g, output, cfg.storage)
+            if cfg.output is not None:
+                output = _emit_quantize_node(g, output, cfg.output)
 
-        return output
+            return output
+        finally:
+            _onnx_current_scale_var.set(None)
 
 
 class QuantizedConv2d(ObservableMixin, nn.Conv2d):
@@ -515,49 +526,60 @@ class ConvTransposeFunction(torch.autograd.Function):
     def symbolic(g, input, weight, bias, stride, padding, output_padding,
                  dilation, groups, cfg, name, emit_fn):
         from src.onnx.helpers import _emit_quantize_node
+        from src.session._context import _export_scales_var, _onnx_current_scale_var
 
-        if cfg.storage is not None:
-            input = _emit_quantize_node(g, input, cfg.storage)
-        if cfg.input is not None:
-            input = _emit_quantize_node(g, input, cfg.input)
+        scales = _export_scales_var.get()
+        current_scale = None
+        if scales:
+            current_scale = scales.get(name)
+            if current_scale is None:
+                current_scale = scales.get("")
+        _onnx_current_scale_var.set(current_scale)
+        try:
+            if cfg.storage is not None:
+                input = _emit_quantize_node(g, input, cfg.storage)
+            if cfg.input is not None:
+                input = _emit_quantize_node(g, input, cfg.input)
 
-        if cfg.storage is not None:
-            weight = _emit_quantize_node(g, weight, cfg.storage)
-        if cfg.weight is not None:
-            weight = _emit_quantize_node(g, weight, cfg.weight)
+            if cfg.storage is not None:
+                weight = _emit_quantize_node(g, weight, cfg.storage)
+            if cfg.weight is not None:
+                weight = _emit_quantize_node(g, weight, cfg.weight)
 
-        if bias is not None and cfg.storage is not None:
-            bias = _emit_quantize_node(g, bias, cfg.storage)
-        if bias is not None and cfg.bias is not None:
-            bias = _emit_quantize_node(g, bias, cfg.bias)
+            if bias is not None and cfg.storage is not None:
+                bias = _emit_quantize_node(g, bias, cfg.storage)
+            if bias is not None and cfg.bias is not None:
+                bias = _emit_quantize_node(g, bias, cfg.bias)
 
-        weight_sizes = weight.type().sizes()
-        kernel_shape = list(weight_sizes[2:]) if weight_sizes is not None else None
+            weight_sizes = weight.type().sizes()
+            kernel_shape = list(weight_sizes[2:]) if weight_sizes is not None else None
 
-        pad_list = list(padding) if hasattr(padding, '__iter__') else [padding]
-        onnx_pads = pad_list + pad_list
+            pad_list = list(padding) if hasattr(padding, '__iter__') else [padding]
+            onnx_pads = pad_list + pad_list
 
-        conv_kwargs = dict(
-            dilations_i=list(dilation) if hasattr(dilation, '__iter__') else [dilation],
-            group_i=groups,
-            output_padding_i=list(output_padding) if hasattr(output_padding, '__iter__') else [output_padding],
-            pads_i=onnx_pads,
-            strides_i=list(stride) if hasattr(stride, '__iter__') else [stride],
-        )
-        if kernel_shape is not None:
-            conv_kwargs["kernel_shape_i"] = kernel_shape
+            conv_kwargs = dict(
+                dilations_i=list(dilation) if hasattr(dilation, '__iter__') else [dilation],
+                group_i=groups,
+                output_padding_i=list(output_padding) if hasattr(output_padding, '__iter__') else [output_padding],
+                pads_i=onnx_pads,
+                strides_i=list(stride) if hasattr(stride, '__iter__') else [stride],
+            )
+            if kernel_shape is not None:
+                conv_kwargs["kernel_shape_i"] = kernel_shape
 
-        if bias is not None:
-            output = g.op("ConvTranspose", input, weight, bias, **conv_kwargs)
-        else:
-            output = g.op("ConvTranspose", input, weight, **conv_kwargs)
+            if bias is not None:
+                output = g.op("ConvTranspose", input, weight, bias, **conv_kwargs)
+            else:
+                output = g.op("ConvTranspose", input, weight, **conv_kwargs)
 
-        if cfg.storage is not None:
-            output = _emit_quantize_node(g, output, cfg.storage)
-        if cfg.output is not None:
-            output = _emit_quantize_node(g, output, cfg.output)
+            if cfg.storage is not None:
+                output = _emit_quantize_node(g, output, cfg.storage)
+            if cfg.output is not None:
+                output = _emit_quantize_node(g, output, cfg.output)
 
-        return output
+            return output
+        finally:
+            _onnx_current_scale_var.set(None)
 
 
 class QuantizedConvTranspose2d(ObservableMixin, nn.ConvTranspose2d):

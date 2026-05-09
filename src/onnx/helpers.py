@@ -9,7 +9,7 @@ from src.scheme.granularity import GranularityMode
 
 # Formats that map to ONNX standard QDQ nodes (opset 13+).
 # Per-block variants of these formats are excluded (MX block style → custom op).
-_STANDARD_NAMES = {"int8", "int4", "int2", "fp8_e4m3", "fp8_e5m2"}
+_STANDARD_NAMES = {"int8", "int4", "fp8_e4m3", "fp8_e5m2"}
 
 
 def _is_standard_format(scheme) -> bool:

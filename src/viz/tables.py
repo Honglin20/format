@@ -217,6 +217,192 @@ def transform_distribution_table(part_d: dict, output_dir: str) -> str:
 # Table 6 — Top-10 sensitivity
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Table 7 — Distribution fit classification
+# ---------------------------------------------------------------------------
+
+def distribution_fit_table(all_results: dict, output_dir: str) -> str:
+    """Distribution fit classification report table.
+
+    Extracts ``best_fit`` from DistributionFitObserver across all layers
+    and roles, then tabulates counts by distribution type.
+
+    Args:
+        all_results: Nested dict ``{part: {config: {"report": ...}}}``.
+            Reports must have ``iter_slices`` yielding metrics with
+            ``best_fit`` (from DistributionFitObserver).
+        output_dir: Output root directory. CSV saved to
+            ``<output_dir>/tables/table7_distribution_fit.csv``.
+
+    Returns:
+        Formatted text representation of the table.
+    """
+    fit_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    total = 0
+
+    for part_name, part_data in all_results.items():
+        if not part_name.startswith("part_") or not isinstance(part_data, dict):
+            continue
+        for config_name, config_data in part_data.items():
+            if not isinstance(config_data, dict) or "report" not in config_data:
+                continue
+            report = config_data["report"]
+            if not hasattr(report, "iter_slices"):
+                continue
+            for layer, role, stage, slice_key, metrics in report.iter_slices():
+                if "best_fit" not in metrics:
+                    continue
+                fit = str(metrics["best_fit"])
+                fit_counts[config_name][fit] += 1
+                total += 1
+
+    if total == 0:
+        raise ValueError(
+            "Distribution fit data not available. "
+            "Ensure DistributionFitObserver is active during the analysis pass. "
+            "Requires scipy: pip install scipy."
+        )
+
+    all_dists = sorted({d for counts in fit_counts.values() for d in counts})
+    configs = sorted(fit_counts.keys())
+
+    hdr = f"{'Config':<24}" + "".join(f" {d:<12}" for d in all_dists) + " Total"
+    lines = [f"\n{'=' * len(hdr)}",
+             "Table 7: Distribution Fit Classification",
+             "=" * len(hdr), hdr, "-" * len(hdr)]
+    for cfg in configs:
+        cnts = fit_counts[cfg]
+        row = f"{cfg:<24}"
+        cfg_total = 0
+        for d in all_dists:
+            c = cnts.get(d, 0)
+            row += f" {c:<12}"
+            cfg_total += c
+        lines.append(row + f" {cfg_total}")
+    result = "\n".join(lines)
+
+    os.makedirs(f"{output_dir}/tables", exist_ok=True)
+    csv_path = os.path.join(output_dir, "tables", "table7_distribution_fit.csv")
+    with open(csv_path, "w") as f:
+        f.write("Config," + ",".join(all_dists) + ",Total\n")
+        for cfg in configs:
+            vals = [str(fit_counts[cfg].get(d, 0)) for d in all_dists]
+            vals.append(str(sum(fit_counts[cfg].values())))
+            f.write(f"{cfg}," + ",".join(vals) + "\n")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Table 8 — Transform per-layer benefit
+# ---------------------------------------------------------------------------
+
+def transform_benefit_table(part_d: dict, output_dir: str) -> str:
+    """Per-layer QSNR benefit of each transform vs baseline.
+
+    For each format, shows per-layer baseline QSNR (``"None"``) and
+    each transform's QSNR with delta.
+
+    Args:
+        part_d: Nested dict ``{format: {transform: {"qsnr_per_layer": ...}}}``.
+            ``"None"`` is the baseline transform.
+        output_dir: Output root directory. CSV saved to
+            ``<output_dir>/tables/table8_transform_benefit.csv``.
+
+    Returns:
+        Formatted text representation of the table.
+    """
+    if not part_d:
+        raise ValueError(
+            "No transform study data available. "
+            "Ensure the analysis pass includes format and transform variants."
+        )
+
+    lines = []
+    for fmt_name in sorted(part_d.keys()):
+        fmt_data = part_d[fmt_name]
+        if "None" not in fmt_data or "qsnr_per_layer" not in fmt_data["None"]:
+            lines.append(f"\n  {fmt_name}: no baseline data — skipping")
+            continue
+
+        baseline = fmt_data["None"]["qsnr_per_layer"]
+        tx_names = sorted(k for k in fmt_data if k != "None" and k != "PerLayerOpt"
+                         and "qsnr_per_layer" in fmt_data[k])
+
+        if not tx_names:
+            lines.append(f"\n  {fmt_name}: no transform variants — skipping")
+            continue
+
+        all_layers = sorted(set(baseline.keys()))
+        for tx in tx_names:
+            all_layers = sorted(set(all_layers) | set(fmt_data[tx]["qsnr_per_layer"].keys()))
+
+        hdr = (f"{'Layer':<28} {'Baseline':<12} "
+               + "".join(f" {tx:<12} {tx+'Δ':<10}" for tx in tx_names))
+        sep = "-" * len(hdr)
+        lines.append(f"\n{'=' * len(hdr)}")
+        lines.append(f"Table 8: Transform Per-Layer Benefit — {fmt_name}")
+        lines.append("=" * len(hdr))
+        lines.append(hdr)
+        lines.append(sep)
+
+        for layer in all_layers:
+            bl = baseline.get(layer, float("nan"))
+            short = layer.replace("module.", "").replace("Quantized", "")[:28]
+            row = f"{short:<28} {bl:<12.2f}"
+            for tx in tx_names:
+                tx_qsnr = fmt_data[tx]["qsnr_per_layer"].get(layer, float("nan"))
+                delta = tx_qsnr - bl if not math.isnan(bl) else float("nan")
+                row += f" {tx_qsnr:<12.2f} {delta:<+10.2f}"
+            lines.append(row)
+
+    if not lines:
+        raise ValueError(
+            "No transform benefit data found. "
+            "Ensure part_d contains format entries with 'None' baseline "
+            "and transform variants with qsnr_per_layer data."
+        )
+
+    result = "\n".join(lines)
+
+    os.makedirs(f"{output_dir}/tables", exist_ok=True)
+    with open(f"{output_dir}/tables/table8_transform_benefit.csv", "w") as f:
+        for fmt_name in sorted(part_d.keys()):
+            fmt_data = part_d[fmt_name]
+            if "None" not in fmt_data or "qsnr_per_layer" not in fmt_data["None"]:
+                continue
+            baseline = fmt_data["None"]["qsnr_per_layer"]
+            tx_names = sorted(k for k in fmt_data if k != "None" and k != "PerLayerOpt"
+                             and "qsnr_per_layer" in fmt_data[k])
+            if not tx_names:
+                continue
+            all_layers = sorted(set(baseline.keys()))
+            for tx in tx_names:
+                all_layers = sorted(set(all_layers) | set(fmt_data[tx]["qsnr_per_layer"].keys()))
+
+            hdr_cols = ["Format", "Layer", "Baseline_QSNR"]
+            for tx in tx_names:
+                hdr_cols.append(f"{tx}_QSNR")
+                hdr_cols.append(f"{tx}_Delta")
+            f.write(",".join(hdr_cols) + "\n")
+
+            for layer in all_layers:
+                bl = baseline.get(layer, "")
+                vals = [fmt_name, layer, str(bl)]
+                for tx in tx_names:
+                    tx_qsnr = fmt_data[tx]["qsnr_per_layer"].get(layer, "")
+                    delta = tx_qsnr - bl if isinstance(bl, (int, float)) and isinstance(tx_qsnr, (int, float)) else ""
+                    vals.append(str(tx_qsnr))
+                    vals.append(str(delta))
+                f.write(",".join(vals) + "\n")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Table 6 — Top-10 sensitivity
+# ---------------------------------------------------------------------------
+
 def sensitivity_table(all_results: dict, output_dir: str) -> str:
     """Top-10 most sensitive layers table (formerly generate_table_6)."""
     layer_metrics: Dict[str, Dict[str, list]] = defaultdict(lambda: {"mse": [], "qsnr": []})

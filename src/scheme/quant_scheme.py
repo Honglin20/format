@@ -39,7 +39,7 @@ class QuantScheme:
     """Default: PER_TENSOR (single shared scale for the whole tensor)."""
     transform: TransformBase = field(default_factory=IdentityTransform)
     round_mode: str = "nearest"
-    scale_storage: str = "fp32"
+    scale_storage: str = "pot"
 
     def __post_init__(self):
         # Coerce string format to FormatBase (supports factory methods accepting str)

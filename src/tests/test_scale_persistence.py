@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src.quantize.elemwise import quantize
 from src.scheme.quant_scheme import QuantScheme
+from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.calibration.strategies import MaxScaleStrategy, PercentileScaleStrategy
 from src.calibration.pipeline import CalibrationPipeline, CalibrationSession
@@ -55,18 +56,25 @@ def test_quantize_scale_kwarg_per_channel_different_scale():
 
 
 def test_quantize_scale_kwarg_per_channel_per_tensor():
-    """scale kwarg is accepted by per_tensor quantization (no-op, scale ignored)."""
+    """scale kwarg is used for per_tensor normalization when provided."""
     torch.manual_seed(42)
     x = torch.randn(4, 8)
-    scheme = QuantScheme.per_tensor("int8")
+    scheme = QuantScheme(format="int8", granularity=GranularitySpec.per_tensor(),
+                         scale_storage="fp32")
 
     result_no_scale = quantize(x, scheme)
+    # Providing a scale manually changes the normalization denominator
     result_with_scale = quantize(x, scheme, scale=torch.tensor(2.0))
-    result_with_none = quantize(x, scheme, scale=None)
 
-    # per-tensor uses no scaling, so scale is silently ignored
-    assert torch.equal(result_with_scale, result_no_scale)
-    assert torch.equal(result_with_none, result_no_scale)
+    # With scale=2.0, normalization is x/2.0 instead of x/amax, so results differ
+    assert not torch.equal(result_with_scale, result_no_scale), \
+        "explicit scale should produce different normalization from auto-computed amax"
+
+    # Supplying the correct amax as scale should match
+    amax = x.abs().max().clamp(min=1e-12)
+    result_with_amax = quantize(x, scheme, scale=amax)
+    assert torch.equal(result_with_amax, result_no_scale), \
+        "scale=amax should match auto-computed amax"
 
 
 # ---------------------------------------------------------------------------

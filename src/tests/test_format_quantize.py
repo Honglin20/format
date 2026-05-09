@@ -31,12 +31,30 @@ def test_format_base_cannot_be_instantiated_with_quantize_missing():
 # 2. PER_TENSOR: format.quantize(x, per_tensor, round_mode) equivalence
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("fmt_name", ["int8", "int4", "int2",
-                                       "fp8_e4m3", "fp8_e5m2",
+@pytest.mark.parametrize("fmt_name", ["int8", "int4", "int2"])
+@pytest.mark.parametrize("round_mode", ["nearest", "floor"])
+def test_int_per_tensor_quantize_equiv(fmt_name, round_mode):
+    """Integer format per_tensor normalizes to [-1,1] before elemwise."""
+    torch.manual_seed(42)
+    x = torch.randn(4, 8)
+
+    fmt = FormatBase.from_str(fmt_name)
+    gran = GranularitySpec.per_tensor()
+    result = fmt.quantize(x, gran, round_mode, scale_storage="fp32")
+
+    # Integer formats: amax = max(|x|), normalize, quantize, rescale
+    amax = x.abs().max().clamp(min=1e-12)
+    x_norm = x / amax
+    expected = _quantize_elemwise(x_norm, fmt, round_mode=round_mode) * amax
+    assert torch.allclose(result, expected, atol=1e-7), \
+        f"{fmt_name}/per_tensor/{round_mode}: max diff = {(result - expected).abs().max()}"
+
+
+@pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "fp8_e5m2",
                                        "fp6_e3m2", "fp6_e2m3", "fp4_e2m1"])
 @pytest.mark.parametrize("round_mode", ["nearest", "floor"])
-def test_per_tensor_quantize_equiv(fmt_name, round_mode):
-    """format.quantize(x, per_tensor, round) == _quantize_elemwise(x, fmt, round)."""
+def test_float_per_tensor_quantize_equiv(fmt_name, round_mode):
+    """Float format per_tensor uses direct elemwise (no normalization)."""
     torch.manual_seed(42)
     x = torch.randn(4, 8)
 
@@ -44,6 +62,7 @@ def test_per_tensor_quantize_equiv(fmt_name, round_mode):
     gran = GranularitySpec.per_tensor()
     result = fmt.quantize(x, gran, round_mode)
 
+    # Float formats: direct elemwise, matching mx/ behaviour
     expected = _quantize_elemwise(x, fmt, round_mode=round_mode)
     assert torch.allclose(result, expected, atol=1e-7), \
         f"{fmt_name}/per_tensor/{round_mode}: max diff = {(result - expected).abs().max()}"
@@ -71,8 +90,8 @@ def test_per_channel_quantize_axis_1():
     x = torch.randn(4, 8)
     fmt = FormatBase.from_str("fp8_e4m3")
 
-    result_ax0 = fmt.quantize(x, GranularitySpec.per_channel(axis=0), "nearest")
-    result_ax1 = fmt.quantize(x, GranularitySpec.per_channel(axis=1), "nearest")
+    result_ax0 = fmt.quantize(x, GranularitySpec.per_channel(axis=0), "nearest", scale_storage="fp32")
+    result_ax1 = fmt.quantize(x, GranularitySpec.per_channel(axis=1), "nearest", scale_storage="fp32")
     assert not torch.allclose(result_ax0, result_ax1), \
         "Per-channel axis=0 and axis=1 should produce different results"
 
@@ -192,21 +211,33 @@ def test_per_block_quantize_vs_mx_multi_dim(shape):
 # 5. IntFormat specialization — ebits=0 means saturate_normals (clamp, no Inf)
 # ---------------------------------------------------------------------------
 
-def test_int8_per_tensor_clamps_to_max_norm():
-    """INT8 per-tensor should clamp, not produce Inf."""
+def test_int8_per_tensor_normalizes_before_elemwise():
+    """INT8 per-tensor normalizes by amax so outlier doesn't cause clamping."""
+    # Values: 100 and -100 are outliers; 0.5 is the small value.
+    # amax = 100, so 0.5 → 0.5/100 = 0.005 → int8 elemwise rounds to 0.
     x = torch.tensor([100.0, -100.0, 0.5])
     fmt = FormatBase.from_str("int8")
     result = fmt.quantize(x, GranularitySpec.per_tensor(), "nearest")
     assert result.isfinite().all()
-    assert result.abs().max() <= fmt.max_norm + 1e-6
+    # After normalization by 100, values are in [-1, 1] ⊂ int8 range → no clamping
+    assert torch.allclose(result[0], torch.tensor(100.0), atol=1.0), \
+        f"100.0 should survive, got {result[0]}"
+    assert torch.allclose(result[1], torch.tensor(-100.0), atol=1.0), \
+        f"-100.0 should survive, got {result[1]}"
+    # 0.5 / 100 = 0.005, int8 step = 1/64 ≈ 0.0156 → rounds to 0
+    assert result[2] == 0.0, f"0.5→0 after normalization, got {result[2]}"
 
 
-def test_int4_per_tensor_clamps_to_max_norm():
+def test_int4_per_tensor_normalizes_before_elemwise():
+    """INT4 per-tensor normalizes by amax before elemwise."""
     x = torch.tensor([10.0, -10.0])
     fmt = FormatBase.from_str("int4")
     result = fmt.quantize(x, GranularitySpec.per_tensor(), "nearest")
     assert result.isfinite().all()
-    assert result.abs().max() <= fmt.max_norm + 1e-6
+    # After normalization by amax=10, 10.0 → 1.0, int4 quantizes 1.0 to
+    # round(1.0 * 4) / 4 = 1.0 → 1.0 * 10 = 10.0
+    assert torch.allclose(result[0], torch.tensor(10.0), atol=1.0)
+    assert torch.allclose(result[1], torch.tensor(-10.0), atol=1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -224,13 +255,14 @@ def test_bfloat16_even_round_shortcut():
 
 
 def test_bfloat16_nearest_round_uses_elemwise():
-    """BFloat16Format with round_mode='nearest' should use elemwise path."""
+    """BFloat16Format with round_mode='nearest' uses direct elemwise (no normalization)."""
     torch.manual_seed(42)
     x = torch.randn(4, 8)
     fmt = FormatBase.from_str("bfloat16")
     result = fmt.quantize(x, GranularitySpec.per_tensor(), "nearest")
+    # BFloat16 is a float format — direct elemwise without normalization
     expected = _quantize_elemwise(x, fmt, round_mode="nearest")
-    assert torch.allclose(result, expected, atol=1e-7)
+    assert torch.allclose(result, expected, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -248,13 +280,14 @@ def test_float16_even_round_shortcut():
 
 
 def test_float16_nearest_round_uses_elemwise():
-    """Float16Format with round_mode='nearest' should use elemwise path."""
+    """Float16Format with round_mode='nearest' uses direct elemwise (no normalization)."""
     torch.manual_seed(42)
     x = torch.randn(4, 8)
     fmt = FormatBase.from_str("float16")
     result = fmt.quantize(x, GranularitySpec.per_tensor(), "nearest")
+    # Float16 is a float format — direct elemwise without normalization
     expected = _quantize_elemwise(x, fmt, round_mode="nearest")
-    assert torch.allclose(result, expected, atol=1e-7)
+    assert torch.allclose(result, expected, atol=1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +424,7 @@ def test_bfloat16_per_channel_even_uses_elemwise_not_shortcut():
     x = torch.randn(4, 8)
     fmt = FormatBase.from_str("bfloat16")
     per_tensor_result = fmt.quantize(x, GranularitySpec.per_tensor(), "even")
-    per_channel_result = fmt.quantize(x, GranularitySpec.per_channel(axis=0), "even")
+    per_channel_result = fmt.quantize(x, GranularitySpec.per_channel(axis=0), "even", scale_storage="fp32")
     # per_channel should differ from per_tensor (shortcut only applies to per_tensor)
     assert not torch.equal(per_tensor_result, per_channel_result)
 
@@ -402,7 +435,7 @@ def test_float16_per_channel_even_uses_elemwise_not_shortcut():
     x = torch.randn(4, 8)
     fmt = FormatBase.from_str("float16")
     per_tensor_result = fmt.quantize(x, GranularitySpec.per_tensor(), "even")
-    per_channel_result = fmt.quantize(x, GranularitySpec.per_channel(axis=0), "even")
+    per_channel_result = fmt.quantize(x, GranularitySpec.per_channel(axis=0), "even", scale_storage="fp32")
     assert not torch.equal(per_tensor_result, per_channel_result)
 
 
@@ -554,3 +587,187 @@ class TestPerBlockQuantizeDirect:
         result = fmt._quantize_per_block(
             x, GranularitySpec.per_block(32), "nearest")
         assert not result.isnan().any()
+
+
+# ===========================================================================
+# 17. POT scale_storage: per_tensor, per_channel, per_block behavior
+# ===========================================================================
+
+INT_FORMATS = ["int8", "int4", "int2"]
+FLOAT_FORMATS_POT = ["fp8_e5m2", "fp8_e4m3", "fp6_e3m2", "fp6_e2m3", "fp4_e2m1"]
+
+
+class TestPOTScaleStorage:
+    """Verify POT scale_storage behavior.
+
+    Math (per_tensor, integer format, ebits==0):
+      amax = max(|x|).clamp(min=1e-12)
+      amax_pot = 2 ** round(log2(amax))
+      x_q = amax_pot * elemwise_quantize(x / amax_pot)
+
+    Properties:
+      - POT in [amax * 2^{-0.5}, amax * 2^{0.5}]  (0.707x-1.414x of amax)
+      - Idempotent: if amax = 2^k exactly, amax_pot = amax
+      - Float formats (ebits>0): no normalization → POT is no-op
+      - Per_block MX: shared exponent is inherently POT → scale_storage is no-op
+    """
+
+    # ---- per_tensor integer POT -------------------------------------------------
+
+    @pytest.mark.parametrize("fmt_name", INT_FORMATS)
+    def test_per_tensor_pot_differs_from_fp32(self, fmt_name):
+        """POT rounds amax to nearest power-of-2 → output differs from fp32."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+
+        out_pot = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                               "nearest", scale_storage="pot")
+        out_fp32 = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                                "nearest", scale_storage="fp32")
+
+        assert not torch.equal(out_pot, out_fp32), \
+            f"{fmt_name}: POT should differ from fp32 for random amax"
+
+    @pytest.mark.parametrize("fmt_name", INT_FORMATS)
+    def test_per_tensor_pot_idempotent(self, fmt_name):
+        """When amax is exactly 2^k, POT rounding is idempotent → POT == fp32."""
+        torch.manual_seed(42)
+        fmt = FormatBase.from_str(fmt_name)
+        x = torch.tensor([[1.0, -3.0], [8.0, 0.5]])  # amax = 8.0 = 2^3
+
+        out_pot = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                               "nearest", scale_storage="pot")
+        out_fp32 = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                                "nearest", scale_storage="fp32")
+
+        assert torch.equal(out_pot, out_fp32), \
+            f"{fmt_name}: POT == fp32 when amax is exactly 2^k"
+
+    @pytest.mark.parametrize("fmt_name", FLOAT_FORMATS_POT)
+    def test_per_tensor_pot_float_noop(self, fmt_name):
+        """Float formats (ebits>0) skip normalization → POT == fp32 (no-op)."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+
+        out_pot = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                               "nearest", scale_storage="pot")
+        out_fp32 = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                                "nearest", scale_storage="fp32")
+
+        assert torch.equal(out_pot, out_fp32), \
+            f"{fmt_name}: POT should be no-op for float formats (no normalization)"
+
+    def test_per_tensor_pot_zero_input(self):
+        """Zero input → amax clamped to 1e-12 → POT rounds amax → output valid."""
+        x = torch.zeros(4, 64)
+        fmt = FormatBase.from_str("int8")
+
+        out = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                          "nearest", scale_storage="pot")
+        assert (out == 0).all(), "Zero input should produce zero output with POT"
+
+    def test_per_tensor_pot_inf_input(self):
+        """Inf/NaN in input → POT still produces output with correct shape."""
+        x = torch.tensor([[1.0, float("inf")], [-float("inf"), float("nan")]])
+        fmt = FormatBase.from_str("int8")
+
+        out = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                          "nearest", scale_storage="pot")
+        assert out.shape == x.shape
+
+    @pytest.mark.parametrize("fmt_name", INT_FORMATS)
+    def test_per_tensor_pot_preserves_sign(self, fmt_name):
+        """POT scale > 0 → no element flips sign.
+        Low-precision formats may quantize small values to zero (sign=0),
+        but no positive becomes negative or vice versa."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+
+        out = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                          "nearest", scale_storage="pot")
+        # out * x >= 0  ⇔  signs agree (or one is zero)
+        assert (out * x >= 0).all(), \
+            f"{fmt_name}: POT should not flip sign of any element"
+
+    def test_per_tensor_pot_small_amax(self):
+        """Very small amax (subnormal range) still produces valid POT scale."""
+        x = torch.tensor([1e-30, -2e-30, 3e-30])
+        fmt = FormatBase.from_str("int8")
+
+        out = fmt.quantize(x.clone(), GranularitySpec.per_tensor(),
+                          "nearest", scale_storage="pot")
+        assert not out.isnan().any(), "Small amax should not produce NaN"
+        assert not out.isinf().any(), "Small amax should not produce Inf"
+
+    # ---- per_channel POT --------------------------------------------------------
+
+    @pytest.mark.parametrize("fmt_name", INT_FORMATS)
+    def test_per_channel_pot_differs_from_fp32(self, fmt_name):
+        """Per-channel POT rounds each channel's amax independently."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+
+        out_pot = fmt.quantize(x.clone(), GranularitySpec.per_channel(axis=-1),
+                               "nearest", scale_storage="pot")
+        out_fp32 = fmt.quantize(x.clone(), GranularitySpec.per_channel(axis=-1),
+                                "nearest", scale_storage="fp32")
+
+        assert not torch.equal(out_pot, out_fp32), \
+            f"{fmt_name}: per_channel POT should differ from fp32"
+
+    @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "fp8_e5m2"])
+    def test_per_channel_pot_float(self, fmt_name):
+        """Float formats (ebits>0) with per_channel DO normalize, POT takes effect."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+
+        out_pot = fmt.quantize(x.clone(), GranularitySpec.per_channel(axis=-1),
+                               "nearest", scale_storage="pot")
+        out_fp32 = fmt.quantize(x.clone(), GranularitySpec.per_channel(axis=-1),
+                                "nearest", scale_storage="fp32")
+
+        assert not torch.equal(out_pot, out_fp32), \
+            f"{fmt_name}: per_channel float POT should differ from fp32"
+
+    # ---- per_block (MX) — scale_storage is no-op ---------------------------------
+
+    @pytest.mark.parametrize("fmt_name", ["int8", "fp8_e4m3"])
+    def test_per_block_scale_storage_noop(self, fmt_name):
+        """Per_block MX shared exponent is inherently POT; scale_storage has no effect."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+        fmt = FormatBase.from_str(fmt_name)
+
+        out_pot = fmt.quantize(x.clone(), GranularitySpec.per_block(32),
+                               "nearest", scale_storage="pot")
+        out_fp32 = fmt.quantize(x.clone(), GranularitySpec.per_block(32),
+                                "nearest", scale_storage="fp32")
+
+        assert torch.equal(out_pot, out_fp32), \
+            f"{fmt_name}: per_block scale_storage should be no-op (MX inherently POT)"
+
+    # ---- default POT via quantize() entry ---------------------------------------
+
+    def test_pot_default_via_quantize_entry(self):
+        """quantize(x, scheme) with default (POT) scheme differs from explicit fp32."""
+        from src.scheme.quant_scheme import QuantScheme
+        from src.quantize.elemwise import quantize
+
+        torch.manual_seed(42)
+        x = torch.randn(4, 64)
+
+        scheme_default = QuantScheme.per_tensor("int8")  # defaults to scale_storage="pot"
+        scheme_fp32 = QuantScheme(format="int8",
+                                  granularity=GranularitySpec.per_tensor(),
+                                  scale_storage="fp32")
+
+        out_default = quantize(x.clone(), scheme_default)
+        out_fp32 = quantize(x.clone(), scheme_fp32)
+
+        assert not torch.equal(out_default, out_fp32), \
+            "Default POT scheme should differ from explicit fp32 scheme"

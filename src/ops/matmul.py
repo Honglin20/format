@@ -176,33 +176,44 @@ class MatMulFunction(torch.autograd.Function):
     @staticmethod
     def symbolic(g, in1, in2, bias, cfg, name, mode_config, emit_fn=None):
         from src.onnx.helpers import _emit_quantize_node
+        from src.session._context import _export_scales_var, _onnx_current_scale_var
 
-        if cfg.storage is not None:
-            in1 = _emit_quantize_node(g, in1, cfg.storage)
-        if cfg.input is not None:
-            in1 = _emit_quantize_node(g, in1, cfg.input)
-
-        if cfg.storage is not None:
-            in2 = _emit_quantize_node(g, in2, cfg.storage)
-        if cfg.weight is not None:
-            in2 = _emit_quantize_node(g, in2, cfg.weight)
-
-        out = g.op("MatMul", in1, in2)
-
-        if cfg.storage is not None:
-            out = _emit_quantize_node(g, out, cfg.storage)
-
-        if bias is not None:
+        scales = _export_scales_var.get()
+        current_scale = None
+        if scales:
+            current_scale = scales.get(name)
+            if current_scale is None:
+                current_scale = scales.get("")
+        _onnx_current_scale_var.set(current_scale)
+        try:
             if cfg.storage is not None:
-                bias = _emit_quantize_node(g, bias, cfg.storage)
-            out = g.op("Add", out, bias)
+                in1 = _emit_quantize_node(g, in1, cfg.storage)
+            if cfg.input is not None:
+                in1 = _emit_quantize_node(g, in1, cfg.input)
+
+            if cfg.storage is not None:
+                in2 = _emit_quantize_node(g, in2, cfg.storage)
+            if cfg.weight is not None:
+                in2 = _emit_quantize_node(g, in2, cfg.weight)
+
+            out = g.op("MatMul", in1, in2)
+
             if cfg.storage is not None:
                 out = _emit_quantize_node(g, out, cfg.storage)
 
-        if cfg.output is not None:
-            out = _emit_quantize_node(g, out, cfg.output)
+            if bias is not None:
+                if cfg.storage is not None:
+                    bias = _emit_quantize_node(g, bias, cfg.storage)
+                out = g.op("Add", out, bias)
+                if cfg.storage is not None:
+                    out = _emit_quantize_node(g, out, cfg.storage)
 
-        return out
+            if cfg.output is not None:
+                out = _emit_quantize_node(g, out, cfg.output)
+
+            return out
+        finally:
+            _onnx_current_scale_var.set(None)
 
 
 def quantized_matmul(in1, in2, bias=None, cfg=None, name=None, mode_config='aa'):

@@ -190,6 +190,10 @@ class QuantizeContext:
         output_path: str,
         opset_version: int = 17,
     ) -> None:
+        if self._ctx_token is None:
+            raise RuntimeError(
+                "QuantizeContext.export_onnx() must be called inside a 'with' block"
+            )
         from src.onnx.export import export_quantized_model
 
         export_scales = _collect_export_scales(self.model)

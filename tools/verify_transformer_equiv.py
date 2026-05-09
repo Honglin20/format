@@ -224,9 +224,8 @@ def _build_op_config(storage_key: str, compute_key: str) -> "OpQuantConfig":
             granularity=GranularitySpec.per_tensor(),
         )
     elif storage_cfg.get("fp", 0) > 0:
-        from src.formats.fp_formats import FPFormat
         storage = QuantScheme(
-            format=FPFormat(name="fp8_e5m2", ebits=5, mbits=2),
+            format=FormatBase.from_str("fp8_e5m2"),
             granularity=GranularitySpec.per_tensor(),
         )
 

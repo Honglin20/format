@@ -481,14 +481,19 @@ class TestSmoothQuantQuantScheme:
         assert not torch.isinf(result).any(), "Inf in quantized output"
 
     def test_smooth_quant_quantize_meaningful(self):
-        """SmoothQuant quantize produces different output from identity quantize."""
+        """SmoothQuant quantize produces different output from identity quantize.
+
+        Uses non-uniform per-channel scales so per-tensor normalization
+        does not cancel out the SmoothQuant effect.
+        """
         _, SmoothQuantTransform = _try_import()
         torch.manual_seed(42)
         x = torch.randn(4, 8)
         scheme_sq = QuantScheme(
             format="int8",
             granularity=GranularitySpec.per_tensor(),
-            transform=SmoothQuantTransform(torch.tensor([2.0] * 8))
+            transform=SmoothQuantTransform(torch.tensor([0.5, 2.0, 1.0, 3.0,
+                                                          0.8, 1.5, 0.3, 4.0]))
         )
         scheme_id = QuantScheme(
             format="int8",
@@ -498,7 +503,8 @@ class TestSmoothQuantQuantScheme:
         result_sq = quantize(x, scheme_sq)
         result_id = quantize(x, scheme_id)
         assert result_sq.shape == result_id.shape
-        # SmoothQuant changes values, so results should differ
+        # Non-uniform SmoothQuant changes per-channel relative magnitudes,
+        # so per-tensor normalization produces different quantization
         assert not torch.equal(result_sq, result_id), \
             "SmoothQuant should produce different results from identity"
 

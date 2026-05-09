@@ -15,7 +15,7 @@ from src.transform.hadamard import HadamardTransform
 from src.transform.smooth_quant import SmoothQuantTransform
 
 _VALID_GRANULARITIES = frozenset({"per_tensor", "per_channel", "per_block"})
-_VALID_TRANSFORMS = frozenset({"none", "hadamard", "smoothquant", "prescale"})
+_VALID_TRANSFORMS = frozenset({"none", "hadamard", "smoothquant", "prescale", "adaptive"})
 _VALID_CALIBRATORS = frozenset({"mse", "max", "percentile", "kl"})
 _VALID_SCALE_STORAGES = frozenset({"fp32", "pot"})
 
@@ -45,7 +45,7 @@ def _resolve_granularity(
 
 def _make_weight_transform(transform: str) -> TransformBase:
     """Resolve the weight-side transform from a string name."""
-    if transform == "none":
+    if transform in ("none", "adaptive"):
         return IdentityTransform()
     elif transform == "hadamard":
         return HadamardTransform()
@@ -62,7 +62,7 @@ def _make_activation_transform(transform: str, sq_alpha: float) -> TransformBase
     real per-channel scale comes from calibration later.  This placeholder
     is sufficient for OpQuantConfig construction and scheme resolution.
     """
-    if transform == "none":
+    if transform in ("none", "adaptive"):
         return IdentityTransform()
     elif transform == "hadamard":
         return HadamardTransform()
@@ -157,7 +157,7 @@ class QuantConfig:
     lsq_lr: float = 1e-3
 
     # ---- Scale storage format (QuantScheme.scale_storage) ----
-    scale_storage: str = "fp32"           # fp32 | pot
+    scale_storage: str = "pot"           # pot | fp32
 
     # ---- Calibrator ----
     calibrator: str = "mse"              # mse | max | percentile | kl
@@ -165,6 +165,8 @@ class QuantConfig:
     # ---- Element-wise storage quantization ----
     storage_bits: int = 0                   # 16 = bfloat16, 8 = fp8, etc. 0 = disabled
     storage_kind: str = "bfloat"            # "bfloat" | "fp"
+    storage_format: Optional[str] = None    # Explicit format name: "fp8_e4m3", "fp4_e2m1", etc.
+                                            # Takes precedence over storage_bits/storage_kind.
 
     # ---- Mode ----
     weight_only: bool = False
@@ -229,6 +231,23 @@ class QuantConfig:
             raise ValueError(
                 f"storage_kind must be 'bfloat' or 'fp', got {self.storage_kind!r}"
             )
+        if self.storage_format is not None:
+            if not isinstance(self.storage_format, str):
+                raise TypeError(
+                    f"storage_format must be a string, got {type(self.storage_format).__name__}"
+                )
+            # Validate that the format name is resolvable
+            try:
+                FormatBase.from_str(self.storage_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown storage_format {self.storage_format!r}: {e}"
+                ) from None
+            if self.storage_bits > 0:
+                raise ValueError(
+                    "storage_bits cannot be set together with storage_format. "
+                    "Use storage_format alone for explicit format names."
+                )
 
     def to_op_config(self) -> OpQuantConfig:
         """Convert this user-facing config to internal :class:`OpQuantConfig`.
@@ -269,7 +288,13 @@ class QuantConfig:
 
         # ---- Storage scheme (element-wise) ----
         storage = None
-        if self.storage_bits > 0:
+        if self.storage_format is not None:
+            storage = QuantScheme(
+                format=FormatBase.from_str(self.storage_format),
+                granularity=GranularitySpec.per_tensor(),
+                scale_storage=self.scale_storage,
+            )
+        elif self.storage_bits > 0:
             storage = _make_storage_scheme(self.storage_bits, self.storage_kind, self.scale_storage)
 
         # ---- Assemble OpQuantConfig ----
@@ -298,6 +323,8 @@ class QuantConfig:
         * ``lsq_lr`` (float) → ``lsq_lr``
         * ``pre_scale_init`` (str) → ``prescale_init``
         * ``pre_scale_pot`` (bool) → ``prescale_pot``
+        * ``storage_format`` (str, optional) → ``storage_format`` — explicit
+          format name, e.g. ``"fp8_e4m3"`` or ``"fp4_e2m1"``.
 
         Raises:
             ValueError: When required keys are missing or values are invalid.
@@ -357,6 +384,11 @@ class QuantConfig:
         # Storage: support legacy keys "bfloat"/"fp" for backward compat
         _sbits = desc.get("storage_bits", 0)
         _skind = desc.get("storage_kind", "bfloat")
+        _sfmt = desc.get("storage_format")
+        if _sfmt is not None and not isinstance(_sfmt, str):
+            raise TypeError(
+                f"'storage_format' must be a string, got {type(_sfmt).__name__}"
+            )
         if "bfloat" in desc:
             _sbits = desc["bfloat"]
             _skind = "bfloat"
@@ -392,6 +424,7 @@ class QuantConfig:
             scale_storage=scale_storage,
             storage_bits=_sbits,
             storage_kind=_skind,
+            storage_format=_sfmt,
             weight_only=weight_only,
             lsq_steps=lsq_steps,
             lsq_lr=lsq_lr,

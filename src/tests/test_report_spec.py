@@ -133,7 +133,7 @@ class TestPresets:
 class TestOutputSpec:
     """Test _OUTPUT_SPEC structural invariants."""
 
-    VALID_OBSERVER_KEYS = {"qsnr", "mse", "histogram", "distribution"}
+    VALID_OBSERVER_KEYS = {"qsnr", "mse", "histogram", "distribution", "fit"}
 
     def test_every_key_has_required_fields(self):
         """Each output spec has observers (list) and needs_eval (bool)."""

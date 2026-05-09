@@ -26,8 +26,10 @@ def _ensure_registries():
     # ── Tables ──────────────────────────────────────────────────────────
     from src.viz.tables import (
         accuracy_table,
+        distribution_fit_table,
         pot_delta_table,
         sensitivity_table,
+        transform_benefit_table,
         transform_distribution_table,
         transform_matrix_table,
     )
@@ -37,11 +39,17 @@ def _ensure_registries():
             filename=kw.get("filename", "accuracy.csv"),
         )
     )
+    _TABLE_REGISTRY["distribution_fit"] = (
+        lambda d, od, **kw: distribution_fit_table(d, od)
+    )
     _TABLE_REGISTRY["pot_delta"] = (
         lambda d, od, **kw: pot_delta_table(d, od)
     )
     _TABLE_REGISTRY["sensitivity"] = (
         lambda d, od, **kw: sensitivity_table(d, od)
+    )
+    _TABLE_REGISTRY["transform_benefit"] = (
+        lambda d, od, **kw: transform_benefit_table(d, od)
     )
     _TABLE_REGISTRY["transform_matrix"] = (
         lambda d, od, **kw: transform_matrix_table(d, od)
@@ -53,13 +61,17 @@ def _ensure_registries():
     # ── Figures ─────────────────────────────────────────────────────────
     from src.viz.figures import (
         block_sweep_line_chart,
+        correlation_heatmap,
         error_vs_distribution,
         hierarchical_delta_bar,
         histogram_overlay,
         layer_type_qsnr,
         mse_box_plot,
+        outlier_analysis,
+        per_block_qsnr,
         pot_delta_bar,
         qsnr_line_chart,
+        role_distribution_comparison,
         transform_delta,
         transform_heatmap,
         transform_pie,
@@ -112,6 +124,22 @@ def _ensure_registries():
         lambda d, od, **kw: hierarchical_delta_bar(
             d, colors=kw.get("colors", FORMAT_COLORS), output_dir=od,
         )
+    )
+    _FIGURE_REGISTRY["outlier"] = (
+        lambda d, od, **kw: outlier_analysis(
+            d, output_dir=od, role=kw.get("role", "input"),
+        )
+    )
+    _FIGURE_REGISTRY["per_block_qsnr"] = (
+        lambda d, od, **kw: per_block_qsnr(
+            d, output_dir=od, role=kw.get("role", "input"),
+        )
+    )
+    _FIGURE_REGISTRY["correlation_heatmap"] = (
+        lambda d, od, **kw: correlation_heatmap(d, output_dir=od)
+    )
+    _FIGURE_REGISTRY["role_distribution"] = (
+        lambda d, od, **kw: role_distribution_comparison(d, output_dir=od)
     )
 
 

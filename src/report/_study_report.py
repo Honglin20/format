@@ -188,11 +188,16 @@ class StudyReport:
     def save(self, output_dir: str):
         """Generate CSV tables, figures, and results.json.
 
-        Produces:
+        Produces (conditionally, based on available data):
         - ``tables/accuracy.csv`` — per-config accuracy comparison
         - ``figures/qsnr_comparison.png`` — per-layer QSNR overlay
-        - ``figures/crest_vs_qsnr.png`` — crest factor vs QSNR scatter
-          (if DistributionObserver data is present)
+        - ``figures/crest_vs_qsnr_<role>.png`` — crest factor vs QSNR
+        - ``figures/outlier_<role>.png`` — outlier analysis (distribution)
+        - ``figures/per_block_qsnr_<role>.png`` — per-block QSNR stats
+        - ``figures/correlation_heatmap.png`` — feature correlation matrix
+        - ``figures/role_distribution.png`` — per-role distribution comparison
+        - ``figures/pareto_qsnr.png`` / ``pareto_accuracy.png`` — Pareto frontier
+        - ``figures/cost_decomposition.png`` — cost FLOPs breakdown
         - ``results.json`` — full serialized results
         """
         import matplotlib.pyplot as plt
@@ -222,7 +227,7 @@ class StudyReport:
 
         # ── Crest factor vs QSNR figure ──────────────────────────────
         if df is not None and not df.empty and "crest_factor" in df.columns:
-            for role in ("input", "weight"):
+            for role in ("input", "weight", "output"):
                 try:
                     fig = self.plot.crest_vs_qsnr(role=role)
                     fig.savefig(f"{output_dir}/figures/crest_vs_qsnr_{role}.png",
@@ -230,6 +235,74 @@ class StudyReport:
                     plt.close(fig)
                 except Exception as e:
                     print(f"  Warning: crest_vs_qsnr({role}) failed: {e}")
+
+        # ── Outlier analysis figure ──────────────────────────────────
+        if df is not None and not df.empty and "outlier_ratio" in df.columns:
+            for role in ("input", "weight", "output"):
+                try:
+                    fig = self.plot.outlier_analysis(role=role)
+                    fig.savefig(f"{output_dir}/figures/outlier_{role}.png",
+                                dpi=300, bbox_inches="tight")
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"  Warning: outlier_analysis({role}) failed: {e}")
+
+        # ── Per-block QSNR figure ────────────────────────────────────
+        if df is not None and not df.empty and "qsnr_db_std" in df.columns:
+            for role in ("input", "weight", "output"):
+                try:
+                    fig = self.plot.per_block_qsnr(role=role)
+                    fig.savefig(f"{output_dir}/figures/per_block_qsnr_{role}.png",
+                                dpi=300, bbox_inches="tight")
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"  Warning: per_block_qsnr({role}) failed: {e}")
+
+        # ── Correlation heatmap ──────────────────────────────────────
+        if df is not None and not df.empty and "skewness" in df.columns:
+            try:
+                fig = self.plot.correlation_heatmap()
+                fig.savefig(f"{output_dir}/figures/correlation_heatmap.png",
+                            dpi=300, bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"  Warning: correlation_heatmap failed: {e}")
+
+        # ── Role distribution comparison ─────────────────────────────
+        if df is not None and not df.empty and "skewness" in df.columns:
+            try:
+                fig = self.plot.role_distribution_comparison()
+                fig.savefig(f"{output_dir}/figures/role_distribution.png",
+                            dpi=300, bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"  Warning: role_distribution_comparison failed: {e}")
+
+        # ── Pareto frontier ──────────────────────────────────────────
+        any_cost = any(
+            r.cost is not None
+            for part_results in self._results.values()
+            for r in part_results
+        )
+        if any_cost:
+            for metric in ("qsnr", "accuracy"):
+                try:
+                    fig = self.plot.pareto_frontier(metric=metric)
+                    fig.savefig(f"{output_dir}/figures/pareto_{metric}.png",
+                                dpi=300, bbox_inches="tight")
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"  Warning: pareto_frontier({metric}) failed: {e}")
+
+        # ── Cost decomposition ───────────────────────────────────────
+        if any_cost:
+            try:
+                fig = self.plot.cost_decomposition()
+                fig.savefig(f"{output_dir}/figures/cost_decomposition.png",
+                            dpi=300, bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"  Warning: cost_decomposition failed: {e}")
 
         # ── results.json ─────────────────────────────────────────────
         with open(f"{output_dir}/results.json", "w") as f:

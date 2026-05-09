@@ -3,10 +3,12 @@
 ## 启动流程（每次必执行）
 
 1. 读本文件
-2. 读 `docs/status/CURRENT.md`
+2. 读 `docs/status/CURRENT.md`（当前进行中的任务）
 3. 读 CURRENT.md 中"断点续传必读文件"清单的文件（≤5 个）
 
 **不要**在没有读 CURRENT.md 的情况下直接开始工作。
+
+> 已完成任务的历史记录在 `docs/status/CHANGELOG.md`，只在需要排查历史缺陷时查阅。
 
 ---
 
@@ -23,7 +25,8 @@
 2. `mx/` 只读，仅通过公共 API 调用做等价性测试
 3. 新增格式/granularity/transform 通过注册/实现抽象基类，不改量化核心函数
 4. 测试先于实现：写失败测试 → 实现 → 通过 → commit → review agent
-5. 子任务完成后立即更新 `docs/status/CURRENT.md`，不积累；CURRENT.md 是唯一持久化状态
+5. CURRENT.md 只记录当前进行中的任务（≤30 行）。子任务完成后立即将已完成条目移到 `docs/status/CHANGELOG.md`，不在 CURRENT.md 中积累历史
+6. README 只放项目简介 + 一个 example + 文档链接。不放架构设计、API 参考表、多步骤教程。详细内容写到 `docs/` 对应模块文档
 
 ---
 
@@ -86,6 +89,7 @@ x_q = quantize(x, scheme)
 | 我要做什么 | 读哪个文件 |
 |------------|-----------|
 | 新终端续接上次工作 | `docs/status/CURRENT.md` |
+| 查看已完成任务 / 历史 bug 修复 | `docs/status/CHANGELOG.md` |
 | 开始一个全新功能 | `docs/workflow/feature-lifecycle.md` |
 | 新增量化格式 | `docs/standards/adding-format.md` → `docs/architecture/001-*.md` |
 | 新增 Observer | `docs/standards/adding-observer.md` → `docs/architecture/002-*.md` |

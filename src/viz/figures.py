@@ -100,11 +100,11 @@ def qsnr_line_chart(
                 all_layer_names.append(lname)
 
     if not all_layer_names:
-        ax.text(0.5, 0.5, "No QSNR data available", ha="center", va="center",
-                fontsize=12, transform=ax.transAxes)
-        ax.set_title(title)
-        save_figure(fig, output_dir, title.lower().replace(" ", "_"))
-        return fig
+        plt.close(fig)
+        raise ValueError(
+            "No QSNR data available in any config. "
+            "Ensure QSNRObserver is active during the analysis pass."
+        )
 
     x_positions = range(len(all_layer_names))
     for name, data in results.items():
@@ -162,11 +162,16 @@ def mse_box_plot(
             data_to_plot.append(mse_vals)
             labels.append(name)
             plot_colors.append(colors.get(name, FALLBACK_CYCLE[0]))
-    if data_to_plot:
-        bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
-        for patch, c in zip(bp["boxes"], plot_colors):
-            patch.set_facecolor(c)
-            patch.set_alpha(0.6)
+    if not data_to_plot:
+        plt.close(fig)
+        raise ValueError(
+            "No MSE data available in any config. "
+            "Ensure MSEObserver is active during the analysis pass."
+        )
+    bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
+    for patch, c in zip(bp["boxes"], plot_colors):
+        patch.set_facecolor(c)
+        patch.set_alpha(0.6)
     ax.set_ylabel("MSE")
     ax.set_title(title)
     ax.set_yscale("log")
@@ -207,7 +212,11 @@ def pot_delta_bar(
         formats.setdefault(base, {})[is_pot] = data
 
     n_groups = len(formats)
-    fig, axes = plt.subplots(1, max(n_groups, 1), figsize=(7 * max(n_groups, 1), 5),
+    if n_groups == 0:
+        raise ValueError(
+            "No PoT scaling data available."
+        )
+    fig, axes = plt.subplots(1, n_groups, figsize=(7 * n_groups, 5),
                              squeeze=False)
     for idx, (fmt_name, fmt_data) in enumerate(sorted(formats.items())):
         ax = axes[0, idx]
@@ -283,13 +292,10 @@ def histogram_overlay(
                     layer_error[layer] = metrics["qsnr_db"]
 
     if not layer_hists:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5, "Histogram data not available\n"
-                "(Add HistogramObserver to observers in run_experiment)",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Activation Histograms (No Data)")
-        save_figure(fig, output_dir, "histogram_overlay")
-        return fig
+        raise ValueError(
+            "Histogram data not available. "
+            "Add HistogramObserver to observers in the analysis pass."
+        )
 
     # Rank by sensitivity: lowest QSNR first (most quantization-sensitive)
     if layer_error:
@@ -306,11 +312,10 @@ def histogram_overlay(
             reverse=True,
         )[:5]
     if not top_layers:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5, "No histogram data found",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        save_figure(fig, output_dir, "histogram_overlay")
-        return fig
+        raise ValueError(
+            "No histogram data found in any layer. "
+            "Ensure HistogramObserver is active during the analysis pass."
+        )
 
     n = len(top_layers)
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
@@ -369,12 +374,10 @@ def transform_heatmap(
                           for tx in fmt_data})
 
     if not fmt_names or not tx_variants:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.text(0.5, 0.5, "No data available",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Format x Transform Accuracy Matrix")
-        save_figure(fig, output_dir, "transform_heatmap")
-        return fig
+        raise ValueError(
+            "No transform study data available. "
+            "Ensure the analysis pass includes formats and transforms."
+        )
 
     matrix = []
     for fmt_name in fmt_names:
@@ -439,12 +442,9 @@ def transform_pie(
     """
     n_fmts = len(part_d)
     if n_fmts == 0:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.text(0.5, 0.5, "No data available",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Per-Layer Optimal Transform Distribution")
-        save_figure(fig, output_dir, "transform_pie")
-        return fig
+        raise ValueError(
+            "No format study data available for transform pie chart."
+        )
 
     fig, axes = plt.subplots(
         1, n_fmts,
@@ -516,12 +516,10 @@ def transform_delta(
     fmt_names = sorted(part_d.keys())
     n_fmts = len(fmt_names)
     if n_fmts == 0:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.text(0.5, 0.5, "No data available",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Transform Impact on Per-Layer QSNR")
-        save_figure(fig, output_dir, "transform_delta")
-        return fig
+        raise ValueError(
+            "No transform delta data available. "
+            "Ensure the analysis pass includes format and transform variants."
+        )
 
     fig, axes = plt.subplots(n_fmts, 1, figsize=(14, 4 * n_fmts), sharex=False,
                              squeeze=False)
@@ -639,14 +637,11 @@ def error_vs_distribution(
                 })
 
     if not data_points:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5,
-                "Distribution data not available\n"
-                "(No DistributionObserver in reports)",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Quantization Error vs Distribution Features")
-        save_figure(fig, output_dir, "error_vs_distribution")
-        return fig
+        raise ValueError(
+            "Distribution data not available. "
+            "Ensure DistributionObserver and MSEObserver are active "
+            "during the analysis pass."
+        )
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
@@ -744,12 +739,11 @@ def layer_type_qsnr(
                 ltype_mse[lt].append(stats["avg_mse"])
 
     if not ltype_qsnr:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5, "Layer type data not available",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Layer-Type Grouped Quantization Error")
-        save_figure(fig, output_dir, "layer_type_qsnr")
-        return fig
+        raise ValueError(
+            "Layer type data not available. "
+            "Ensure QSNRObserver and MSEObserver are active "
+            "during the analysis pass."
+        )
 
     # Single layer type degrades to isolated boxplots — fall back to per-layer chart
     if len(ltype_qsnr) == 1:
@@ -847,11 +841,10 @@ def block_sweep_line_chart(
         entries.append((name, data["qsnr_per_layer"]))
 
     if not entries:
-        ax.text(0.5, 0.5, "No block sweep data available",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Block Size vs QSNR")
-        save_figure(fig, output_dir, "block_sweep_line")
-        return fig
+        plt.close(fig)
+        raise ValueError(
+            "No block sweep data available."
+        )
 
     # Compute per-layer avg QSNR for each block size
     sizes, avg_qsnr = [], []
@@ -913,12 +906,9 @@ def hierarchical_delta_bar(
     ]
 
     if not entries:
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.text(0.5, 0.5, "No hierarchical study data available",
-                ha="center", va="center", fontsize=12, transform=ax.transAxes)
-        ax.set_title("Hierarchical Pre-Scale — Per-Layer QSNR")
-        save_figure(fig, output_dir, "hierarchical_delta")
-        return fig
+        raise ValueError(
+            "No hierarchical study data available."
+        )
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -948,6 +938,381 @@ def hierarchical_delta_bar(
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout()
     save_figure(fig, output_dir, "hierarchical_delta")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 14 — Outlier analysis (per-layer bar + outlier vs QSNR scatter)
+# ---------------------------------------------------------------------------
+
+def outlier_analysis(
+    all_results: dict,
+    *,
+    output_dir: str,
+    role: str = "input",
+) -> plt.Figure:
+    """Outlier ratio per-layer bar chart + outlier vs QSNR scatter.
+
+    Args:
+        all_results: Nested dict ``{part: {config: {"report": ...}}}``.
+            Reports must have ``iter_slices`` yielding metrics with
+            ``outlier_ratio`` (from DistributionObserver) and optionally
+            ``qsnr_db`` (from QSNRObserver).
+        output_dir: Output root directory.
+        role: Tensor role to plot (default ``"input"``).
+
+    Returns:
+        matplotlib Figure.
+    """
+    data_points = []
+    for part_name, part_data in all_results.items():
+        if not part_name.startswith("part_") or not isinstance(part_data, dict):
+            continue
+        for config_name, config_data in part_data.items():
+            if not isinstance(config_data, dict) or "report" not in config_data:
+                continue
+            report = config_data["report"]
+            if not hasattr(report, "iter_slices"):
+                continue
+            for layer, r, stage, slice_key, metrics in report.iter_slices():
+                if r != role or "outlier_ratio" not in metrics:
+                    continue
+                data_points.append({
+                    "config": config_name,
+                    "layer": layer,
+                    "outlier_ratio": metrics["outlier_ratio"],
+                    "qsnr_db": metrics.get("qsnr_db", float("nan")),
+                })
+
+    if not data_points:
+        raise ValueError(
+            f"Outlier ratio data not available for role {role!r}. "
+            "Ensure DistributionObserver is active during the analysis pass."
+        )
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    layers = sorted(set(d["layer"] for d in data_points))
+    configs = sorted(set(d["config"] for d in data_points))
+    x = np.arange(len(layers))
+    width = 0.8 / max(len(configs), 1)
+
+    # Panel 1: per-layer outlier ratio bar chart
+    for i, cfg in enumerate(configs):
+        per_layer = {}
+        for d in data_points:
+            if d["config"] == cfg:
+                per_layer.setdefault(d["layer"], []).append(d["outlier_ratio"])
+        values = [sum(per_layer.get(l, [0])) / max(len(per_layer.get(l, [0])), 1)
+                  for l in layers]
+        color = FALLBACK_CYCLE[i % len(FALLBACK_CYCLE)]
+        ax1.bar(x + i * width, values, width, label=cfg, color=color, alpha=0.7)
+
+    ax1.set_xticks(x + width * (len(configs) - 1) / 2)
+    short_names = [l.replace("module.", "").replace("Quantized", "")[:20]
+                   for l in layers]
+    ax1.set_xticklabels(short_names, rotation=45, ha="right", fontsize=7)
+    ax1.set_ylabel("Outlier Ratio")
+    ax1.set_title(f"Outlier Ratio per Layer — {role}")
+    ax1.legend(fontsize=7)
+    ax1.grid(True, alpha=0.3, axis="y")
+
+    # Panel 2: outlier_ratio vs QSNR scatter
+    has_qsnr = any(not math.isnan(d["qsnr_db"]) for d in data_points)
+    for i, cfg in enumerate(configs):
+        cfg_pts = [d for d in data_points if d["config"] == cfg]
+        xs = [d["outlier_ratio"] for d in cfg_pts]
+        ys = [d["qsnr_db"] for d in cfg_pts] if has_qsnr else [0] * len(cfg_pts)
+        color = FALLBACK_CYCLE[i % len(FALLBACK_CYCLE)]
+        ax2.scatter(xs, ys, label=cfg, color=color, alpha=0.7, s=40)
+
+    ax2.set_xlabel("Outlier Ratio")
+    ax2.set_ylabel("QSNR (dB)" if has_qsnr else "(no QSNR)")
+    ax2.set_title(f"Outlier Ratio vs QSNR — {role}")
+    ax2.legend(fontsize=7)
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle("Outlier Analysis", fontsize=13)
+    fig.tight_layout()
+    save_figure(fig, output_dir, f"outlier_{role}")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 15 — Per-block QSNR distribution
+# ---------------------------------------------------------------------------
+
+def per_block_qsnr(
+    all_results: dict,
+    *,
+    output_dir: str,
+    role: str = "input",
+) -> plt.Figure:
+    """Per-block QSNR statistics: std dev boxplot + min-vs-mean scatter.
+
+    Uses ``qsnr_db_std``, ``qsnr_db_min``, ``qsnr_db_max`` from
+    QSNRObserver per-block mode.
+
+    Args:
+        all_results: Nested dict ``{part: {config: {"report": ...}}}``.
+        output_dir: Output root directory.
+        role: Tensor role to plot (default ``"input"``).
+
+    Returns:
+        matplotlib Figure.
+    """
+    layer_data = defaultdict(lambda: defaultdict(list))
+    has_min = False
+    has_std = False
+
+    for part_name, part_data in all_results.items():
+        if not part_name.startswith("part_") or not isinstance(part_data, dict):
+            continue
+        for config_name, config_data in part_data.items():
+            if not isinstance(config_data, dict) or "report" not in config_data:
+                continue
+            report = config_data["report"]
+            if not hasattr(report, "iter_slices"):
+                continue
+            for layer, r, stage, slice_key, metrics in report.iter_slices():
+                if r != role:
+                    continue
+                if "qsnr_db_std" in metrics:
+                    layer_data[layer]["qsnr_db_std"].append(metrics["qsnr_db_std"])
+                    has_std = True
+                if "qsnr_db_min" in metrics:
+                    layer_data[layer]["qsnr_db_min"].append(metrics["qsnr_db_min"])
+                    layer_data[layer]["qsnr_db"].append(metrics.get("qsnr_db", float("nan")))
+                    has_min = True
+
+    if not has_std and not has_min:
+        raise ValueError(
+            f"Per-block QSNR statistics not available for role {role!r}. "
+            "Ensure QSNRObserver is active with per-block granularity."
+        )
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Panel 1: qsnr_db_std per layer boxplot
+    if has_std:
+        layers = sorted(layer_data.keys())
+        std_data = []
+        std_labels = []
+        for l in layers:
+            vals = layer_data[l].get("qsnr_db_std", [])
+            if vals:
+                std_data.append(vals)
+                short = l.replace("module.", "").replace("Quantized", "")[:20]
+                std_labels.append(short)
+
+        if std_data:
+            ax1.boxplot(std_data, tick_labels=std_labels, patch_artist=True)
+            ax1.set_xticklabels(std_labels, rotation=45, ha="right", fontsize=7)
+
+    ax1.set_ylabel("QSNR Std Dev (dB)")
+    ax1.set_title(f"Per-Block QSNR Std Dev — {role}")
+    ax1.grid(True, alpha=0.3, axis="y")
+
+    # Panel 2: qsnr_db_min vs qsnr_db scatter
+    if has_min:
+        for l in sorted(layer_data.keys()):
+            means = layer_data[l].get("qsnr_db", [])
+            mins = layer_data[l].get("qsnr_db_min", [])
+            if means and mins:
+                avg_mean = sum(means) / max(len(means), 1)
+                avg_min = sum(mins) / max(len(mins), 1)
+                ax2.scatter(avg_mean, avg_min, s=40, alpha=0.7,
+                           label=l[:30] if len(layer_data) <= 10 else "")
+
+        if means and mins:
+            all_vals = means + mins
+            lo, hi = min(all_vals), max(all_vals)
+            ax2.plot([lo, hi], [lo, hi], "k--", linewidth=0.5, alpha=0.5)
+
+    ax2.set_xlabel("Mean QSNR (dB)")
+    ax2.set_ylabel("Min QSNR (dB)")
+    ax2.set_title(f"Min vs Mean QSNR — {role}")
+    if len(layer_data) <= 10:
+        ax2.legend(fontsize=6)
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle("Per-Block QSNR Distribution", fontsize=13)
+    fig.tight_layout()
+    save_figure(fig, output_dir, f"per_block_qsnr_{role}")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 16 — Distribution features correlation heatmap
+# ---------------------------------------------------------------------------
+
+def correlation_heatmap(
+    all_results: dict,
+    *,
+    output_dir: str,
+) -> plt.Figure:
+    """Pearson correlation heatmap of distribution features vs QSNR/MSE.
+
+    Args:
+        all_results: Nested dict ``{part: {config: {"report": ...}}}``.
+        output_dir: Output root directory.
+
+    Returns:
+        matplotlib Figure.
+    """
+    feat_cols = [
+        "crest_factor", "skewness", "kurtosis", "excess_kurtosis",
+        "bimodality_coefficient", "sparse_ratio", "dynamic_range_bits",
+        "outlier_ratio", "norm_entropy",
+    ]
+    all_keys = set()
+    rows = []
+
+    for part_name, part_data in all_results.items():
+        if not part_name.startswith("part_") or not isinstance(part_data, dict):
+            continue
+        for config_name, config_data in part_data.items():
+            if not isinstance(config_data, dict) or "report" not in config_data:
+                continue
+            report = config_data["report"]
+            if not hasattr(report, "iter_slices"):
+                continue
+            for layer, role, stage, slice_key, metrics in report.iter_slices():
+                row = {}
+                for c in feat_cols + ["qsnr_db", "mse"]:
+                    if c in metrics:
+                        row[c] = metrics[c]
+                        all_keys.add(c)
+                if row:
+                    rows.append(row)
+
+    available = [c for c in feat_cols + ["qsnr_db", "mse"] if c in all_keys]
+    if len(available) < 2:
+        raise ValueError(
+            "Insufficient distribution feature data for correlation heatmap. "
+            "Ensure DistributionObserver is active during the analysis pass."
+        )
+
+    # Build matrix
+    data = {c: [] for c in available}
+    for row in rows:
+        for c in available:
+            data[c].append(row.get(c, float("nan")))
+
+    arr = np.array([data[c] for c in available])  # [features, samples]
+    # Compute pairwise Pearson correlation (skip NaN rows)
+    n_feat = len(available)
+    corr = np.zeros((n_feat, n_feat))
+    for i in range(n_feat):
+        for j in range(n_feat):
+            mask = ~(np.isnan(arr[i]) | np.isnan(arr[j]))
+            if mask.sum() >= 3:
+                corr[i, j] = np.corrcoef(arr[i][mask], arr[j][mask])[0, 1]
+            else:
+                corr[i, j] = float("nan")
+
+    fig, ax = plt.subplots(figsize=(max(10, n_feat * 1.1), max(8, n_feat * 0.9)))
+    im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+
+    ax.set_xticks(range(n_feat))
+    ax.set_xticklabels(available, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(range(n_feat))
+    ax.set_yticklabels(available, fontsize=8)
+
+    for i in range(n_feat):
+        for j in range(n_feat):
+            v = corr[i, j]
+            if not math.isnan(v):
+                ax.text(j, i, f"{v:.2f}", ha="center", va="center",
+                       fontsize=7, color="white" if abs(v) > 0.5 else "black")
+
+    cbar = fig.colorbar(im, ax=ax, label="Pearson r", shrink=0.8)
+    ax.set_title("Distribution Features x QSNR/MSE Correlation", fontsize=12)
+    fig.tight_layout()
+    save_figure(fig, output_dir, "correlation_heatmap")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 17 — Per-role distribution comparison
+# ---------------------------------------------------------------------------
+
+def role_distribution_comparison(
+    all_results: dict,
+    *,
+    output_dir: str,
+    roles: tuple = ("input", "weight", "output"),
+) -> plt.Figure:
+    """Per-role distribution feature comparison boxplots.
+
+    Compares skewness, kurtosis, and normalized entropy across roles.
+
+    Args:
+        all_results: Nested dict ``{part: {config: {"report": ...}}}``.
+        output_dir: Output root directory.
+        roles: Roles to compare (default ``("input", "weight", "output")``).
+
+    Returns:
+        matplotlib Figure.
+    """
+    role_data: Dict[str, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
+
+    for part_name, part_data in all_results.items():
+        if not part_name.startswith("part_") or not isinstance(part_data, dict):
+            continue
+        for config_name, config_data in part_data.items():
+            if not isinstance(config_data, dict) or "report" not in config_data:
+                continue
+            report = config_data["report"]
+            if not hasattr(report, "iter_slices"):
+                continue
+            for layer, r, stage, slice_key, metrics in report.iter_slices():
+                for feat in ("skewness", "kurtosis", "norm_entropy"):
+                    if feat in metrics:
+                        role_data[r][feat].append(metrics[feat])
+
+    plot_roles = [r for r in roles if r in role_data and role_data[r]]
+    if not plot_roles:
+        if role_data:
+            raise ValueError(
+                f"No data found for roles {list(roles)}. "
+                f"Roles present: {sorted(role_data.keys())}."
+            )
+        raise ValueError(
+            "Distribution data not available. "
+            "Ensure DistributionObserver is active during the analysis pass."
+        )
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    colors_cycle = FALLBACK_CYCLE
+
+    for ax, feature, ylabel in [
+        (axes[0], "skewness", "Skewness"),
+        (axes[1], "kurtosis", "Kurtosis"),
+        (axes[2], "norm_entropy", "Normalized Entropy"),
+    ]:
+        data_groups = []
+        labels = []
+        for i, r in enumerate(plot_roles):
+            vals = role_data[r].get(feature, [])
+            if vals:
+                data_groups.append(vals)
+                labels.append(r)
+
+        if data_groups:
+            bp = ax.boxplot(data_groups, tick_labels=labels, patch_artist=True)
+            for patch, label in zip(bp["boxes"], labels):
+                idx = plot_roles.index(label) if label in plot_roles else 0
+                patch.set_facecolor(colors_cycle[idx % len(colors_cycle)])
+                patch.set_alpha(0.6)
+
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{ylabel} by Role")
+        ax.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle("Distribution Feature Comparison Across Roles", fontsize=13)
+    fig.tight_layout()
+    save_figure(fig, output_dir, "role_distribution")
     return fig
 
 

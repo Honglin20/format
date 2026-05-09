@@ -36,7 +36,7 @@ class TestQuantConfigDefaults:
         assert cfg.prescale_granularity is None
         assert cfg.lsq_steps == 0
         assert cfg.lsq_lr == 1e-3
-        assert cfg.scale_storage == "fp32"
+        assert cfg.scale_storage == "pot"
         assert cfg.calibrator == "mse"
         assert cfg.weight_only is False
 

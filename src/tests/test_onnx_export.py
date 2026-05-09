@@ -47,7 +47,7 @@ def _has_op(onnx_model, op_type, domain="onnx"):
 def _standard_cfg(fmt_name, granularity=None):
     fmt = FormatBase.from_str(fmt_name)
     gran = granularity or GranularitySpec.per_tensor()
-    s = QuantScheme(format=fmt, granularity=gran)
+    s = QuantScheme(format=fmt, granularity=gran, scale_storage="fp32")
     return OpQuantConfig(input=s, weight=s, output=s)
 
 
@@ -422,8 +422,8 @@ class TestScaleWiring:
         model = QuantizedLinear(8, 16, cfg=cfg)
         session = _QuantSession(model, cfg, calibrator=MaxScaleStrategy())
 
-        # Run calibration so _output_scale buffers are registered
-        x = torch.randn(2, 8)
+        # Deterministic input (not torch.randn) so scale values are reproducible.
+        x = torch.ones(2, 8) * 5.0
         with session.calibrate():
             session(x)
 
@@ -434,9 +434,6 @@ class TestScaleWiring:
         onnx.checker.check_model(loaded)
 
         from onnx import numpy_helper
-        # QDQ scale values are embedded in Constant op nodes as float tensor attrs,
-        # not as graph initializers.  Find at least one non-1.0 scalar constant.
-        # Zero-points (int8 dtype=3, value 0) are excluded by dtype and value.
         found_real_scale = False
         for node in loaded.graph.node:
             if node.op_type == "Constant":
@@ -472,7 +469,7 @@ class TestScaleWiring:
         model = WrapperModel()
         session = _QuantSession(model, cfg, calibrator=MaxScaleStrategy())
 
-        x = torch.randn(2, 8)
+        x = torch.ones(2, 8) * 5.0
         with session.calibrate():
             session(x)
 

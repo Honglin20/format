@@ -104,7 +104,7 @@ class FormatBase(ABC):
         )
 
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None, scale_storage="fp32"):
+                 scale=None, scale_storage="pot"):
         """Quantize tensor x to this format.
 
         Dispatches by granularity mode.  Subclasses may override to provide
@@ -117,8 +117,10 @@ class FormatBase(ABC):
             allow_denorm: If False, flush subnormal values to zero (float formats only).
             scale: Optional pre-computed scale tensor.  If provided, skips
                 on-the-fly scale computation and uses this directly.
-            scale_storage: "fp32" (default) or "pot".  When "pot", per-channel
-                amax values are rounded to the nearest power of 2.
+            scale_storage: "pot" (default) or "fp32".  When "pot", the amax
+                is rounded to the nearest power of 2 before normalization.
+                Per_block is inherently POT (MX shared exponents); scale_storage
+                has no effect there.
 
         Returns:
             Quantized tensor with same shape as x.
@@ -141,23 +143,55 @@ class FormatBase(ABC):
         raise ValueError(f"Unknown granularity mode: {mode}")
 
     def _quantize_per_tensor(self, x, round_mode, allow_denorm=True, scale=None,
-                              scale_storage="fp32"):
+                              scale_storage="pot"):
         """Default per-tensor quantization.
 
         When ``_hardware_dtype`` is set and the preconditions are met
         (round_mode='even', allow_denorm=True), uses the hardware dtype
         conversion shortcut for formats like bfloat16/float16.
+
+        Float formats (ebits > 0) are quantized directly — their dynamic
+        range already covers real-world tensor values, matching mx/ behaviour.
+
+        Integer formats (ebits == 0, e.g. int8/int4/int2) are normalised to
+        [-1, 1] before elemwise quantisation because their max_norm (~1–2)
+        is too small to represent raw tensor values without clamping.
+
+        When ``scale_storage="pot"`` (default), the scalar amax is rounded
+        to the nearest power of 2 before normalization.
         """
         hw_dtype = getattr(self, "_hardware_dtype", None)
         if (hw_dtype is not None
                 and round_mode == "even"
                 and allow_denorm):
             return x.to(hw_dtype).float()
-        return self.quantize_elemwise(x, round_mode=round_mode,
+
+        # Float formats: direct elemwise (matching mx/ behaviour).
+        # Their exponent range covers practical tensor values without scaling.
+        if self.ebits > 0:
+            return self.quantize_elemwise(x, round_mode=round_mode,
+                                          allow_denorm=allow_denorm)
+
+        # Integer formats: normalise → elemwise → rescale.
+        if scale is not None:
+            amax = scale
+        else:
+            amax = torch.amax(torch.abs(x))
+
+        if not torch.isfinite(amax) or amax <= 0:
+            return self.quantize_elemwise(x, round_mode=round_mode,
+                                          allow_denorm=allow_denorm)
+
+        amax = amax.clamp(min=1e-12)
+        if scale_storage == "pot":
+            amax = 2 ** torch.round(torch.log2(amax))
+        x_norm = x / amax
+        x_q = self.quantize_elemwise(x_norm, round_mode=round_mode,
                                       allow_denorm=allow_denorm)
+        return x_q * amax
 
     def _quantize_per_channel(self, x, granularity, round_mode, allow_denorm=True,
-                              scale=None, scale_storage="fp32"):
+                              scale=None, scale_storage="pot"):
         """Default per-channel quantization: compute per-channel scale, then elemwise.
 
         If ``scale`` is provided, it is used directly as ``amax``, skipping
@@ -192,7 +226,7 @@ class FormatBase(ABC):
         return x_q * amax
 
     def _quantize_per_block(self, x, granularity, round_mode, scale=None,
-                              scale_storage="fp32",
+                              scale_storage="pot",
                               _shared_exp_method="max",
                               _flush_fp32_subnorms=False):
         """Per-block quantization with MX-style shared exponents.
@@ -201,11 +235,20 @@ class FormatBase(ABC):
         tile into blocks → compute shared exponent → normalize →
         elemwise quantize → rescale → until back to original shape.
 
+        MX shared exponents are inherently power-of-two; ``scale_storage``
+        has no effect in this path.
+
         During JIT tracing (ONNX export), return x unchanged — the
         Function's symbolic() method handles quantization in the ONNX graph.
         """
         if torch.jit.is_tracing():
             return x
+
+        if granularity.outlier_ratio > 0.0:
+            from src.formats._outlier_utils import _quantize_outlier_bank
+            return _quantize_outlier_bank(
+                self, x, granularity, round_mode, scale_storage=scale_storage)
+
         from src.formats._block_utils import (
             _reshape_to_blocks,
             _undo_reshape_to_blocks,

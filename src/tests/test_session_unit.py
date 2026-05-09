@@ -921,6 +921,15 @@ class TestSessionResultAccessors:
         assert top[1][0] == "layer.4"  # 20.0 dB
         assert top[2][0] == "layer.2"  # 25.0 dB
 
+    def test_top_k_qsnr_reverse_returns_best(self):
+        result = self._make_result()
+        top = result.top_k_qsnr(k=3, reverse=True)
+        assert len(top) == 3
+        # Should be sorted descending (best first)
+        assert top[0][0] == "layer.3"  # 40.0 dB (best)
+        assert top[1][0] == "layer.1"  # 30.0 dB
+        assert top[2][0] == "layer.2"  # 25.0 dB
+
     def test_top_k_qsnr_default_k(self):
         result = self._make_result()
         top = result.top_k_qsnr()
