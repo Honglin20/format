@@ -597,6 +597,9 @@ LSQ 使用逐层（layer-wise）BRECQ 式优化：先跑前面层的量化输入
 | `MSEObserver` | `"mse"` | 均方误差 |
 | `HistogramObserver` | `"histogram"` | fp32 / quant / error 三通道直方图 |
 | `DistributionObserver` | `"distribution"` | 统计指纹：mean/std/skewness/kurtosis + peak/rms/crest_factor + 稀疏度/outlier/动态范围 |
+| `DistributionFitObserver` | `"fit"` | 参数化分布拟合（scipy MLE + KS）：best_fit / best_fit_params / best_fit_ks |
+
+> `DistributionFitObserver` 需要 `pip install scipy`。
 
 通过 `outputs` 控制打开哪些分析：
 
@@ -662,6 +665,36 @@ for name, info in groups.items():
 sens = LayerSensitivity(report)
 for layer, role, mse in sens.topk(k=5, metric="mse"):
     print(f"{layer}/{role}: MSE={mse:.6f}")
+```
+
+### 分布类型识别
+
+`report.taxonomy` 访问器将每层的 fp32 分布自动归类。有 `DistributionFitObserver` 数据时用 scipy 参数拟合，否则 fallback 到基于统计指纹的启发式规则：
+
+```python
+# 分类结果（dict）
+result = report.taxonomy.classify()
+# {"norm": {"count": 12, "fit_count": 8, "rules_count": 4, ...}, ...}
+
+# 打印分类报告（标注每类的 fit/rules 来源）
+report.taxonomy.print()
+# === Distribution Taxonomy ===
+# norm (12 layers, 60%):
+#   8 fit + 4 rules
+#   avg KS=0.0312
+#   Examples: [('layer1.linear', 'weight'), ...]
+
+# 获取某类分布的代表层
+report.taxonomy.exemplars("heavy-tailed", n=3)
+# [{"layer": "layer5.attn", "role": "output"}, ...]
+```
+
+> 同时开启 `"distribution"` 和 `"fit"` 两个 observer 可获得最完整的分类：`fit` 覆盖数值精度高的分布族，`distribution` 兜底边缘情况。
+
+```python
+result = Session(model, cfg).run(calib_data, outputs=["distribution", "fit"])
+report = result.report()
+report.taxonomy.print()
 ```
 
 ## 自定义格式

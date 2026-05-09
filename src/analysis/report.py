@@ -111,6 +111,12 @@ class AnalysisReport:
                 print(f"  {row['layer']:<24} {row['role']:<12} "
                       f"{row.get('mse', 0):>12.2e} {row.get('qsnr_db', 0):>8.1f}")
 
+    @property
+    def taxonomy(self):
+        """Distribution taxonomy accessor (fit-first, rules fallback)."""
+        from src.analysis.correlation import TaxonomyAccessor
+        return TaxonomyAccessor(self)
+
     def to_json(self, path: str):
         import json
         def _convert(obj):

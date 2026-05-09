@@ -145,3 +145,68 @@ class HistogramObserver(SliceAwareObserver):
             "quant_hist": torch.histc(quant, bins=self.n_bins).cpu(),
             "err_hist": torch.histc(fp32 - quant, bins=self.n_bins).cpu(),
         }
+
+
+# ---------------------------------------------------------------------------
+# DistributionFitObserver — scipy-based parametric distribution fitting
+# ---------------------------------------------------------------------------
+
+try:
+    import scipy.stats as _scipy_stats
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
+
+class DistributionFitObserver(SliceAwareObserver):
+    """Fit fp32 tensor distribution to parametric distributions via MLE + KS.
+
+    For each slice, fits all applicable candidate distributions (norm,
+    laplace, cauchy, uniform on any data; lognorm, expon, gamma on
+    non-negative data), ranks by Kolmogorov-Smirnov statistic, and reports
+    the best fit with its parameters.
+
+    Requires ``scipy``. Install with ``pip install scipy``.
+    """
+
+    _ALL_DISTS = ["norm", "laplace", "cauchy", "uniform"]
+    _POSITIVE_DISTS = ["lognorm", "expon", "gamma"]
+
+    def __init__(self, candidates=None):
+        super().__init__()
+        if not _HAS_SCIPY:
+            raise ImportError(
+                "DistributionFitObserver requires scipy. "
+                "Install with: pip install scipy"
+            )
+        self.candidates = candidates or self._ALL_DISTS + self._POSITIVE_DISTS
+
+    def _measure(self, key, fp32, quant):
+        x = fp32.detach().cpu().numpy().ravel()
+
+        dists = list(self._ALL_DISTS)
+        if x.min() >= 0:
+            dists.extend(self._POSITIVE_DISTS)
+        dists = [d for d in dists if d in self.candidates]
+
+        results = []
+        for name in dists:
+            dist = getattr(_scipy_stats, name)
+            try:
+                params = dist.fit(x)
+                ks_stat, _ = _scipy_stats.kstest(x, dist.cdf, args=params)
+                results.append((name, params, ks_stat))
+            except Exception:
+                continue
+
+        if not results:
+            return {"best_fit": "unknown", "best_fit_ks": float("inf")}
+
+        results.sort(key=lambda r: r[2])
+        best = results[0]
+        return {
+            "best_fit": best[0],
+            "best_fit_params": tuple(float(p) for p in best[1]),
+            "best_fit_ks": float(best[2]),
+            "fit_ranking": [(r[0], float(r[2])) for r in results],
+        }

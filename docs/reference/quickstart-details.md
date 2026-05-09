@@ -378,8 +378,26 @@ report = ctx.report()
 | `MSEObserver` | 均方误差 | 标量误差量级 |
 | `HistogramObserver` | fp32 vs quant 值分布直方图 | 可视化量化偏差模式 |
 | `DistributionObserver` | 均值、方差、偏度、峰度、稀疏度 | 分布指纹变化 |
+| `DistributionFitObserver` | best_fit / best_fit_params / best_fit_ks | 参数化分布拟合（需 scipy） |
 
 所有 observer 自动按 scheme 的 granularity 切片聚合。
+
+### 分布类型识别
+
+`AnalysisReport.taxonomy` 访问器自动识别每层分布类型。有 `DistributionFitObserver` 数据时用 scipy 参数拟合，否则 fallback 到启发式规则：
+
+```python
+report.taxonomy.classify()            # dict
+report.taxonomy.print()               # 终端表格
+report.taxonomy.exemplars("norm", 3)  # 代表层列表
+```
+
+通过 `outputs` 同时开启两个 observer 获得最完整分类：
+
+```python
+result = Session(model, cfg).run(calib_data, outputs=["distribution", "fit"])
+result.report().taxonomy.print()
+```
 
 ---
 

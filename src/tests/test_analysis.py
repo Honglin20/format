@@ -571,3 +571,291 @@ class TestLayerSensitivity:
 
         above = sens.above_threshold(metric="mse", threshold=1e-3)
         assert len(above) >= 1
+
+
+# ---------------------------------------------------------------------------
+# DistributionFitObserver + DistributionFitTaxonomy
+# ---------------------------------------------------------------------------
+
+try:
+    import scipy.stats  # noqa: F401
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
+_fit_skip = pytest.mark.skipif(not _HAS_SCIPY, reason="scipy not installed")
+
+
+@_fit_skip
+class TestDistributionFitObserver:
+    """Unit tests for DistributionFitObserver._measure()."""
+
+    @staticmethod
+    def _measure(f):
+        from src.analysis.observers import DistributionFitObserver
+        obs = DistributionFitObserver()
+        q = f.clone()
+        return obs._measure(("tensor",), f, q)
+
+    def test_gaussian_identified(self):
+        torch.manual_seed(42)
+        f = torch.randn(1000)
+        m = self._measure(f)
+        assert m["best_fit"] == "norm"
+        assert m["best_fit_ks"] < 0.1
+
+    def test_laplace_identified(self):
+        torch.manual_seed(42)
+        d = torch.distributions.Laplace(0, 1)
+        f = d.sample((1000,))
+        m = self._measure(f)
+        assert m["best_fit"] == "laplace"
+        assert m["best_fit_ks"] < 0.1
+
+    def test_lognormal_positive_data(self):
+        torch.manual_seed(42)
+        f = torch.distributions.LogNormal(0, 0.5).sample((1000,))
+        m = self._measure(f)
+        assert m["best_fit"] in ("lognorm", "gamma")
+
+    def test_cauchy_heavy_tailed(self):
+        torch.manual_seed(42)
+        f = torch.distributions.Cauchy(0, 1).sample((2000,))
+        m = self._measure(f)
+        assert m["best_fit"] == "cauchy"
+
+    def test_uniform_identified(self):
+        torch.manual_seed(42)
+        f = torch.rand(1000) * 10 - 5  # Uniform [-5, 5]
+        m = self._measure(f)
+        assert m["best_fit"] in ("uniform", "norm")  # uniform hard to distinguish
+
+    def test_all_zeros_still_produces_result(self):
+        """All-zeros (constant) data still gets fit; verify result structure."""
+        f = torch.zeros(100)
+        m = self._measure(f)
+        assert isinstance(m["best_fit"], str)
+        assert isinstance(m["best_fit_ks"], float)
+        assert isinstance(m["fit_ranking"], list)
+
+    def test_params_are_floats(self):
+        torch.manual_seed(42)
+        f = torch.randn(1000)
+        m = self._measure(f)
+        assert isinstance(m["best_fit_params"], tuple)
+        for p in m["best_fit_params"]:
+            assert isinstance(p, float)
+
+    def test_fit_ranking_included(self):
+        torch.manual_seed(42)
+        f = torch.randn(1000)
+        m = self._measure(f)
+        assert isinstance(m["fit_ranking"], list)
+        assert len(m["fit_ranking"]) >= 4  # at least the 4 all-data dists
+        for name, ks in m["fit_ranking"]:
+            assert isinstance(name, str)
+            assert isinstance(ks, float)
+
+    def test_negative_data_excludes_positive_dists(self):
+        """Data with negative values should skip lognorm/expon/gamma."""
+        torch.manual_seed(42)
+        f = torch.randn(1000) - 2.0  # mean ≈ -2, plenty negative
+        m = self._measure(f)
+        dist_names = [r[0] for r in m["fit_ranking"]]
+        assert "lognorm" not in dist_names
+        assert "expon" not in dist_names
+        assert "gamma" not in dist_names
+
+
+@_fit_skip
+class TestDistributionFitTaxonomy:
+    """Tests for DistributionFitTaxonomy."""
+
+    @staticmethod
+    def _make_report(samples):
+        """Build a synthetic report from (layer, role, best_fit, best_fit_ks) tuples."""
+        raw = {}
+        for layer, role, best_fit, ks in samples:
+            raw[layer] = {
+                role: {
+                    "input_pre_quant[0]": {
+                        ("tensor",): {
+                            "best_fit": best_fit,
+                            "best_fit_ks": ks,
+                            "best_fit_params": (),
+                        }
+                    }
+                }
+            }
+        from src.analysis.report import Report
+        return Report(raw)
+
+    def test_classify_distribution_types(self):
+        from src.analysis.correlation import DistributionFitTaxonomy
+
+        report = self._make_report([
+            ("l1", "input", "norm", 0.02),
+            ("l2", "input", "norm", 0.03),
+            ("l3", "weight", "norm", 0.01),
+            ("l4", "input", "laplace", 0.04),
+            ("l5", "input", "laplace", 0.05),
+            ("l6", "output", "cauchy", 0.06),
+        ])
+        taxonomy = DistributionFitTaxonomy.from_report(report)
+        result = taxonomy.classify()
+
+        assert result["norm"]["count"] == 3
+        assert result["laplace"]["count"] == 2
+        assert result["cauchy"]["count"] == 1
+
+    def test_percentage_sum_to_100(self):
+        from src.analysis.correlation import DistributionFitTaxonomy
+
+        report = self._make_report([
+            ("l1", "input", "norm", 0.01),
+            ("l2", "input", "norm", 0.02),
+            ("l3", "weight", "laplace", 0.03),
+        ])
+        taxonomy = DistributionFitTaxonomy.from_report(report)
+        result = taxonomy.classify()
+
+        assert result["norm"]["percentage"] == "67%"
+        assert result["laplace"]["percentage"] == "33%"
+
+    def test_get_exemplars(self):
+        from src.analysis.correlation import DistributionFitTaxonomy
+
+        report = self._make_report([
+            ("l1", "input", "norm", 0.01),
+            ("l2", "weight", "norm", 0.02),
+        ])
+        taxonomy = DistributionFitTaxonomy.from_report(report)
+        exemplars = taxonomy.get_exemplars("norm", n=1)
+        assert len(exemplars) == 1
+        assert exemplars[0]["layer"] == "l1"
+        assert exemplars[0]["role"] == "input"
+
+    def test_get_exemplars_missing_cluster(self):
+        from src.analysis.correlation import DistributionFitTaxonomy
+
+        report = self._make_report([("l1", "input", "norm", 0.01)])
+        taxonomy = DistributionFitTaxonomy.from_report(report)
+        assert taxonomy.get_exemplars("nonexistent") == []
+
+    def test_no_fit_data_returns_empty(self):
+        from src.analysis.report import Report
+        from src.analysis.correlation import DistributionFitTaxonomy
+
+        raw = {
+            "l1": {
+                "input": {
+                    "input_pre_quant[0]": {
+                        ("tensor",): {"mse": 0.001},  # no best_fit key
+                    }
+                }
+            }
+        }
+        report = Report(raw)
+        taxonomy = DistributionFitTaxonomy.from_report(report)
+        assert taxonomy.classify() == {}
+
+    def test_print_taxonomy_no_crash(self):
+        from src.analysis.correlation import DistributionFitTaxonomy
+
+        report = self._make_report([
+            ("l1", "input", "norm", 0.02),
+            ("l2", "weight", "laplace", 0.04),
+        ])
+        taxonomy = DistributionFitTaxonomy.from_report(report)
+        taxonomy.print_taxonomy()
+
+
+class TestTaxonomyAccessor:
+    """Tests for the merged TaxonomyAccessor (fit-first, rules fallback)."""
+
+    @staticmethod
+    def _report(samples):
+        """Build a synthetic AnalysisReport.
+
+        Each sample: (layer, role, metrics_dict)
+        """
+        raw = {}
+        for layer, role, metrics in samples:
+            raw[layer] = {
+                role: {
+                    "pre[0]": {("tensor",): metrics},
+                }
+            }
+        from src.analysis.report import Report
+        return Report(raw)
+
+    def test_fit_first_when_best_fit_present(self):
+        report = self._report([
+            ("l1", "input", {"best_fit": "norm", "best_fit_ks": 0.02,
+             "best_fit_params": (0.0, 1.0), "skewness": 1.5, "kurtosis": 5.0}),
+        ])
+        result = report.taxonomy.classify()
+        assert "norm" in result
+        assert result["norm"]["fit_count"] == 1
+        assert result["norm"]["rules_count"] == 0
+
+    def test_rules_fallback_when_no_best_fit(self):
+        report = self._report([
+            ("l1", "weight", {"skewness": 0.1, "kurtosis": 3.1,
+             "bimodality_coefficient": 0.4, "sparse_ratio": 0.02,
+             "norm_entropy": 0.6}),
+        ])
+        result = report.taxonomy.classify()
+        assert "zero-centered-gaussian" in result
+        assert result["zero-centered-gaussian"]["rules_count"] == 1
+        assert result["zero-centered-gaussian"]["fit_count"] == 0
+
+    def test_mixed_fit_and_rules(self):
+        report = self._report([
+            ("l1", "weight", {"best_fit": "norm", "best_fit_ks": 0.02}),
+            ("l2", "input", {"best_fit": "norm", "best_fit_ks": 0.03}),
+            ("l3", "output", {"skewness": 0.8, "kurtosis": 4.0,
+             "bimodality_coefficient": 0.3, "sparse_ratio": 0.05,
+             "norm_entropy": 0.5}),
+        ])
+        result = report.taxonomy.classify()
+        assert result["norm"]["count"] == 2
+        assert result["norm"]["fit_count"] == 2
+        assert result["positive-skewed"]["count"] == 1
+        assert result["positive-skewed"]["rules_count"] == 1
+
+    def test_empty_report(self):
+        report = self._report([])
+        result = report.taxonomy.classify()
+        assert result == {}
+
+    def test_no_distribution_data(self):
+        report = self._report([
+            ("l1", "input", {"mse": 0.001, "qsnr_db": 40.0}),
+        ])
+        result = report.taxonomy.classify()
+        assert result == {}
+
+    def test_exemplars(self):
+        report = self._report([
+            ("l1", "weight", {"best_fit": "norm", "best_fit_ks": 0.01}),
+            ("l2", "input", {"best_fit": "norm", "best_fit_ks": 0.02}),
+        ])
+        ex = report.taxonomy.exemplars("norm", n=1)
+        assert len(ex) == 1
+        assert ex[0]["layer"] == "l1"
+
+    def test_exemplars_missing_cluster(self):
+        report = self._report([
+            ("l1", "weight", {"best_fit": "norm", "best_fit_ks": 0.01}),
+        ])
+        assert report.taxonomy.exemplars("nonexistent") == []
+
+    def test_print_no_crash(self):
+        report = self._report([
+            ("l1", "weight", {"best_fit": "norm", "best_fit_ks": 0.02}),
+            ("l2", "input", {"skewness": 1.2, "kurtosis": 5.0,
+             "bimodality_coefficient": 0.3, "sparse_ratio": 0.1,
+             "norm_entropy": 0.5}),
+        ])
+        report.taxonomy.print()
