@@ -242,7 +242,7 @@ class _QuantSession:
     def export_onnx(
         self,
         output_path: str,
-        dummy_input: Optional[torch.Tensor] = None,
+        dummy_input: Optional[Any] = None,  # Tensor | tuple | list | dict
         opset_version: int = 17,
     ) -> None:
         """Export quantized model to ONNX.

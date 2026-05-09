@@ -25,11 +25,13 @@ def export_quantized_model(
         opset_version: ONNX opset version. Default: 17.
 
     The exported graph uses:
-    - QuantizeLinear/DequantizeLinear for int8/int4/int2/fp8 formats.
-    - com.microxscaling::MxQuantize for MX block-format quantization.
+    - QuantizeLinear/DequantizeLinear for int8/int4/fp8 per_tensor/per_channel formats.
+    - com.microxscaling::MxQuantize for MX per_block and truncation formats.
+    - com.microxscaling::NF4Quantize for NF4 lookup-table format.
+    - int2 uses MxQuantize (ONNX QDQ does not support 2-bit integer types).
 
-    Note: Scale values in QDQ nodes are placeholder constants (1.0);
-    the graph is valid for visualization but not for runtime inference.
+    Scale values in QDQ nodes reflect calibration results when available;
+    otherwise they default to 1.0 (valid for visualization only).
     """
     # Handle multi-input types: torch.onnx.export expects a tuple of positional
     # arguments; single Tensor gets wrapped, tuple/list are used as-is (list

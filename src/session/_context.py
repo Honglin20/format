@@ -54,17 +54,16 @@ _export_scales_var: contextvars.ContextVar[Optional[Dict[str, torch.Tensor]]] = 
 )
 
 
-def get_export_scale(name: str) -> Optional[torch.Tensor]:
-    """Look up the export scale for a module from the active QuantizeContext.
+def _collect_export_scales(model) -> Dict[str, "torch.Tensor"]:
+    """Walk model and collect ``_output_scale`` buffers keyed by module name.
 
-    Returns the per-module scale tensor if calibration has been run and the
-    scale was collected before ONNX export. Returns None for uncalibrated
-    or unrecognised module names.
+    Returns an empty dict if no scales are found (model not calibrated).
     """
-    scales = _export_scales_var.get()
-    if scales is None:
-        return None
-    return scales.get(name)
+    scales: Dict[str, "torch.Tensor"] = {}
+    for name, module in model.named_modules():
+        if hasattr(module, "_output_scale"):
+            scales[name] = module._output_scale
+    return scales
 
 
 # ContextVar for the current module's output_scale during ONNX symbolic tracing.
@@ -193,11 +192,7 @@ class QuantizeContext:
     ) -> None:
         from src.onnx.export import export_quantized_model
 
-        # Collect real scales from calibrated modules before export
-        export_scales: Dict[str, torch.Tensor] = {}
-        for name, module in self.model.named_modules():
-            if hasattr(module, "_output_scale"):
-                export_scales[name] = module._output_scale
+        export_scales = _collect_export_scales(self.model)
         _export_scales_var.set(export_scales if export_scales else None)
         try:
             export_quantized_model(self.model, dummy_input, output_path, opset_version)
