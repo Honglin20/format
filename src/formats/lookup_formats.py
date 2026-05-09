@@ -67,6 +67,14 @@ class LookupFormat(FormatBase):
 
         return result
 
+    def export_onnx(self, g, x, scheme):
+        """Emit com.microxscaling::NF4Quantize custom node with LUT levels."""
+        levels_list = self.levels.detach().cpu().tolist()
+        return g.op(
+            "com.microxscaling::NF4Quantize", x,
+            levels_f=levels_list,
+        )
+
     def __eq__(self, other):
         if type(self) is not type(other):
             return False

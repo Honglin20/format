@@ -349,3 +349,57 @@ def test_export_quantized_model_mixed(tmp_path):
     onnx.checker.check_model(loaded)
     assert _has_op(loaded, "QuantizeLinear")
     assert _has_op(loaded, "Conv")
+
+
+# ---------------------------------------------------------------------------
+# Task: NF4 (lookup-table format) ONNX export
+# ---------------------------------------------------------------------------
+
+
+class TestNF4Export:
+    """NF4 lookup-table format ONNX export."""
+
+    def test_nf4_per_tensor_emits_nf4_quantize(self):
+        cfg = _standard_cfg("nf4")
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        x = torch.randn(2, 8)
+        onnx_model = _export(model, x)
+        assert _has_op(onnx_model, "NF4Quantize", "com.microxscaling"), \
+            "NF4 should emit NF4Quantize custom op"
+        assert not _has_op(onnx_model, "MxQuantize", "com.microxscaling"), \
+            "NF4 should NOT use MxQuantize"
+        assert not _has_op(onnx_model, "QuantizeLinear"), \
+            "NF4 should NOT use QDQ"
+
+    def test_nf4_per_block_emits_nf4_quantize(self):
+        """NF4 + per_block → still NF4Quantize (NF4 is block-agnostic in ONNX)."""
+        fmt = FormatBase.from_str("nf4")
+        gran = GranularitySpec.per_block(32)
+        s = QuantScheme(format=fmt, granularity=gran)
+        cfg = OpQuantConfig(input=s, weight=s)
+        model = QuantizedLinear(32, 64, cfg=cfg)
+        x = torch.randn(2, 32)
+        onnx_model = _export(model, x)
+        assert _has_op(onnx_model, "NF4Quantize", "com.microxscaling")
+
+    def test_nf4_export_checker_passes(self):
+        cfg = _standard_cfg("nf4")
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        x = torch.randn(2, 8)
+        onnx_model = _export(model, x)
+        onnx.checker.check_model(onnx_model)
+
+    def test_nf4_levels_attribute(self):
+        """NF4Quantize node must carry the levels_f attribute with 16 values."""
+        from src.formats.lookup_formats import NF4Format
+        cfg = _standard_cfg("nf4")
+        model = QuantizedLinear(8, 16, cfg=cfg)
+        x = torch.randn(2, 8)
+        onnx_model = _export(model, x)
+        for n in onnx_model.graph.node:
+            if n.op_type == "NF4Quantize":
+                levels = [a for a in n.attribute if a.name == "levels"]
+                assert len(levels) == 1
+                assert len(levels[0].floats) == len(NF4Format.NF4_LEVELS)
+                return
+        pytest.fail("No NF4Quantize node found")
