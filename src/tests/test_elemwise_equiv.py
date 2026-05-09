@@ -183,7 +183,7 @@ def test_quantize_elemwise_op_none():
 
 @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "fp4_e2m1", "int8", "fp6_e3m2"])
 def test_quantize_elemwise(fmt_name):
-    from src.quantize.elemwise import _quantize_elemwise
+    from src.tests._compat import _quantize_elemwise
     torch.manual_seed(42)
     A = torch.randn(4, 32)
     old_out = old_quantize_elemwise(A.clone(), elem_format=ElemFormat.from_str(fmt_name),
@@ -193,7 +193,7 @@ def test_quantize_elemwise(fmt_name):
 
 
 def test_quantize_elemwise_none():
-    from src.quantize.elemwise import _quantize_elemwise
+    from src.tests._compat import _quantize_elemwise
     A = torch.randn(4, 32)
     old_out = old_quantize_elemwise(A.clone(), elem_format=None)
     new_out = _quantize_elemwise(A.clone(), elem_format=None)
@@ -206,7 +206,7 @@ def test_quantize_elemwise_none():
 
 @pytest.mark.parametrize("bfloat_bits", [16, 12])
 def test_quantize_bfloat_direct(bfloat_bits):
-    from src.quantize.elemwise import _quantize_bfloat
+    from src.tests._compat import _quantize_bfloat
     torch.manual_seed(42)
     A = torch.randn(4, 32)
     old_out = old_qbf(A.clone(), bfloat=bfloat_bits, round="nearest")
@@ -220,7 +220,7 @@ def test_quantize_bfloat_direct(bfloat_bits):
 
 @pytest.mark.parametrize("exp_bits,mantissa_bits", [(5, 1), (5, 3), (5, 5)])
 def test_quantize_fp_direct(exp_bits, mantissa_bits):
-    from src.quantize.elemwise import _quantize_fp
+    from src.tests._compat import _quantize_fp
     torch.manual_seed(42)
     A = torch.randn(4, 32)
     old_out = old_qfp(A.clone(), exp_bits=exp_bits, mantissa_bits=mantissa_bits,
@@ -232,7 +232,7 @@ def test_quantize_fp_direct(exp_bits, mantissa_bits):
 
 
 def test_quantize_fp_none():
-    from src.quantize.elemwise import _quantize_fp
+    from src.tests._compat import _quantize_fp
     A = torch.randn(4, 32)
     old_out = old_qfp(A.clone(), exp_bits=None, mantissa_bits=None)
     new_out = _quantize_fp(A.clone(), exp_bits=None, mantissa_bits=None)

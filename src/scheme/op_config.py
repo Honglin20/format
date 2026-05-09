@@ -8,7 +8,7 @@ Quantization has exactly two types:
 Each field is QuantScheme | None. No tuples, no pipelines, no iteration.
 """
 from dataclasses import dataclass, fields
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from .quant_scheme import QuantScheme
 

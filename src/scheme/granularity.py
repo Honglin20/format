@@ -35,6 +35,7 @@ class GranularitySpec:
     block_size: int = 0
     channel_axis: int = 0
     block_axis: int = -1  # Default: last dimension (MX forward convention)
+    outlier_ratio: float = 0.0  # ∈ [0,1]. >0: split block into outliers + normals
 
     def __post_init__(self):
         if self.mode == GranularityMode.PER_BLOCK and self.block_size <= 0:
@@ -61,6 +62,19 @@ class GranularitySpec:
             raise ValueError(
                 f"{self.mode.name} requires block_axis=-1, got {self.block_axis}"
             )
+        if not (0.0 <= self.outlier_ratio <= 1.0):
+            raise ValueError(
+                f"outlier_ratio must be in [0, 1], got {self.outlier_ratio}"
+            )
+        if self.outlier_ratio > 0.0:
+            if self.mode != GranularityMode.PER_BLOCK:
+                raise ValueError(
+                    f"outlier_ratio > 0 requires PER_BLOCK mode, got {self.mode.name}"
+                )
+            if self.block_size <= 0:
+                raise ValueError(
+                    f"outlier_ratio > 0 requires block_size > 0, got {self.block_size}"
+                )
 
     @staticmethod
     def per_tensor() -> "GranularitySpec":

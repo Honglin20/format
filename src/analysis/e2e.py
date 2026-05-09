@@ -15,7 +15,7 @@ Two modes:
               cmp.record(fp32_out, q_out, labels)
       result = cmp.evaluate(eval_fn)
 """
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -176,7 +176,7 @@ def compare_sessions(
     ``fp32_model`` — no need to pass a separate fp32 session.
 
     Args:
-        sessions: Dict ``{name: QuantSession}``.  All sessions must share
+        sessions: Dict ``{name: _QuantSession}``.  All sessions must share
             the same original model (their ``fp32_model`` is the same object).
         eval_dataloader: DataLoader yielding ``(inputs, labels)``.
         eval_fn: ``(logits, labels) -> dict[str, float]``.

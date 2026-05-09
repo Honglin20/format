@@ -263,6 +263,8 @@ def compare_formats(
     calibration_data,
     configs: dict,
     observers=None,
+    *,
+    eval_fn=None,
 ) -> ComparisonReport:
     """Run calibration data through multiple quantization configs and compare.
 
@@ -272,6 +274,8 @@ def compare_formats(
         configs: dict of {name: OpQuantConfig} mapping config names to configs.
         observers: list of Observer instances to use. Defaults to
             [QSNRObserver(), DistributionObserver()].
+        eval_fn: ``(model, data) -> Any``. When None, falls back to
+            ``model(data)`` direct inference.
 
     Returns:
         ComparisonReport with per-format Report objects.
@@ -293,9 +297,14 @@ def compare_formats(
         model.eval()
 
         with AnalysisContext(model, observers) as ctx:
-            for batch in batches:
-                with torch.no_grad():
-                    model(batch)
+            if eval_fn is not None:
+                for batch in batches:
+                    with torch.no_grad():
+                        eval_fn(model, batch)
+            else:
+                for batch in batches:
+                    with torch.no_grad():
+                        model(batch)
 
         reports[cfg_name] = ctx.report()
 

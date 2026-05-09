@@ -1,4 +1,4 @@
-class Report:
+class AnalysisReport:
     """Analysis report wrapper with Python API and print formatting."""
 
     def __init__(self, raw: dict):
@@ -15,6 +15,19 @@ class Report:
 
     def stages(self, layer: str, role: str) -> list:
         return list(self._raw.get(layer, {}).get(role, {}).keys())
+
+    def iter_slices(self):
+        """Iterate over all analysis slices.
+
+        Yields:
+            Tuple of ``(layer, role, stage, slice_key, metrics)`` for every
+            slice in the report.
+        """
+        for layer, roles in self._raw.items():
+            for role, stages in roles.items():
+                for stage, slices in stages.items():
+                    for slice_key, metrics in slices.items():
+                        yield layer, role, stage, slice_key, metrics
 
     def to_dataframe(self):
         """Flatten to rows — one per slice."""
@@ -98,6 +111,12 @@ class Report:
                 print(f"  {row['layer']:<24} {row['role']:<12} "
                       f"{row.get('mse', 0):>12.2e} {row.get('qsnr_db', 0):>8.1f}")
 
+    @property
+    def taxonomy(self):
+        """Distribution taxonomy accessor (fit-first, rules fallback)."""
+        from src.analysis.correlation import TaxonomyAccessor
+        return TaxonomyAccessor(self)
+
     def to_json(self, path: str):
         import json
         def _convert(obj):
@@ -119,3 +138,8 @@ class Report:
                 writer = csv.DictWriter(f, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(rows)
+
+
+# Deprecated backward-compatible alias. Use SessionReport or StudyReport from
+# src.report instead, or AnalysisReport for raw observer data access.
+Report = AnalysisReport

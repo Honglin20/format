@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from _model import ToyMLP
+from pipeline._model import ToyMLP
 from src.formats.base import FormatBase
 from src.formats.registry import register_format
 from src.formats.lookup_formats import LookupFormat
@@ -29,7 +29,7 @@ from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.session import QuantSession
-from src.mapping.quantize_model import quantize_model
+from src.session import quantize_model
 from src.analysis.e2e import Comparator, compare_models, compare_sessions
 from src.analysis.compare import compare_formats, ComparisonReport
 from src.analysis.eval_performance import evaluate_performance

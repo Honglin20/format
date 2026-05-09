@@ -418,3 +418,15 @@ class TestNormSTE:
             x, w, b, cfg, inner, quantize_backprop=qbp)
         _assert_bit_exact(mx_out, src_out, label=f"rms-ste-fwd ({name})")
         _assert_bit_exact(mx_gi, src_gi, label=f"rms-ste-grad_input ({name})")
+
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_NORM_STE)
+    def test_groupnorm_ste(self, name, mx_specs):
+        x, w, b, ng = _make_gn_tensors()
+        mx_out, mx_gi, mx_gw, mx_gb = _run_mx_groupnorm(x, w, b, ng, mx_specs)
+        cfg, inner, qbp = norm_config_from_mx_specs(mx_specs, op_type="group_norm")
+        src_out, src_gi, src_gw, src_gb = _run_src_groupnorm(
+            x, w, b, ng, cfg, inner, quantize_backprop=qbp)
+        _assert_bit_exact(mx_out, src_out, label=f"gn-ste-fwd ({name})")
+        _assert_bit_exact(mx_gi, src_gi, label=f"gn-ste-grad_input ({name})")
+        _assert_bit_exact(mx_gw, src_gw, label=f"gn-ste-grad_weight ({name})")
+        _assert_bit_exact(mx_gb, src_gb, label=f"gn-ste-grad_bias ({name})")

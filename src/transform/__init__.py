@@ -11,7 +11,11 @@ Provides:
 """
 from .hadamard import HadamardTransform, hadamard
 from .pre_scale import PreScaleTransform
-from .smooth_quant import SmoothQuantTransform, compute_smoothquant_scale
+from .smooth_quant import (
+    SmoothQuantTransform,
+    compute_smoothquant_scale,
+    fuse_smoothquant_weights,
+)
 from src.scheme.transform import TransformBase, IdentityTransform
 
 __all__ = [
@@ -20,6 +24,7 @@ __all__ = [
     "PreScaleTransform",
     "SmoothQuantTransform",
     "compute_smoothquant_scale",
+    "fuse_smoothquant_weights",
     "TransformBase",
     "IdentityTransform",
 ]

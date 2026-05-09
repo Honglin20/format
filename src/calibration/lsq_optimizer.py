@@ -5,23 +5,15 @@ For each layer, runs the partially-quantized model to get true inputs,
 then optimizes pre-scale via gradient descent to minimize MSE against
 fp32 layer output.
 """
-from typing import Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
 
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
-from src.transform.pre_scale import PreScaleTransform
-
-
-def _get_quantized_modules(model: nn.Module) -> List[tuple]:
-    """Return [(name, module), ...] for all Quantized* modules with cfg."""
-    result = []
-    for name, module in model.named_modules():
-        if hasattr(module, "cfg") and not getattr(module, "_is_passthrough", False):
-            result.append((name, module))
-    return result
+from src.session._model import _get_quantized_modules
+from src.transform.pre_scale import PreScaleTransform, _pot_scale
 
 
 def _replace_transform(cfg: OpQuantConfig, transform) -> OpQuantConfig:
@@ -35,6 +27,43 @@ def _replace_transform(cfg: OpQuantConfig, transform) -> OpQuantConfig:
                 granularity=old.granularity,
                 transform=transform,
                 round_mode=old.round_mode,
+                scale_storage=old.scale_storage,
+            )
+        else:
+            fields[f_name] = old
+    return OpQuantConfig(**fields)
+
+
+_ACTIVATION_ROLES = frozenset({
+    "input", "output", "grad_input", "grad_output",
+    "input_gw", "grad_output_gw", "weight_gi", "grad_output_gi",
+})
+
+_INPUT_ACTIVATION_ROLES = frozenset({"input", "grad_input"})
+
+
+def _replace_transform_activation_only(
+    cfg: OpQuantConfig, transform, *, roles=_ACTIVATION_ROLES,
+) -> OpQuantConfig:
+    """Return a new OpQuantConfig with *transform* replacing selected activation roles.
+
+    Weight/bias/grad_weight/grad_bias schemes keep their existing transforms.
+    The *roles* parameter controls which activation roles are replaced
+    (default: all activation roles).
+
+    Use ``roles=_INPUT_ACTIVATION_ROLES`` for per-channel PreScaleTransform
+    where the channel count differs between input and output (Linear/Conv).
+    """
+    fields = {}
+    for f_name in cfg.__dataclass_fields__:
+        old = getattr(cfg, f_name)
+        if f_name in roles and old is not None and isinstance(old, QuantScheme):
+            fields[f_name] = QuantScheme(
+                format=old.format,
+                granularity=old.granularity,
+                transform=transform,
+                round_mode=old.round_mode,
+                scale_storage=old.scale_storage,
             )
         else:
             fields[f_name] = old
@@ -52,7 +81,10 @@ class LayerwiseScaleOptimizer:
 
     Args:
         num_steps: Optimization steps per layer (default: 100).
-        num_batches: Number of calibration batches to use (default: 8).
+        num_batches: Number of calibration batches to use. Only used when
+            ``eval_fn`` is None (direct fallback path). When ``eval_fn`` is
+            provided, the user controls batching entirely via their function
+            (default: 8).
         optimizer: Optimizer name — "adam" or "sgd" (default: "adam").
         lr: Learning rate (default: 1e-3).
         loss: Loss function — "mse" (default: "mse").
@@ -98,25 +130,32 @@ class LayerwiseScaleOptimizer:
         self,
         qmodel: nn.Module,
         fp32_model: nn.Module,
-        calib_batches: List[torch.Tensor],
+        calib_data: Any,
+        *,
+        eval_fn: Optional[Callable] = None,
     ) -> Dict[str, torch.Tensor]:
         """Run layer-wise LSQ optimization.
 
         Args:
             qmodel: Quantized model (from quantize_model).
             fp32_model: Original fp32 model.
-            calib_batches: List of input tensors from calibration.
+            calib_data: Calibration data passed through to ``eval_fn``.
+                When ``eval_fn`` is None, must be ``List[Tensor]`` for
+                direct model iteration. When ``eval_fn`` is provided,
+                can be any type the user's function accepts.
+            eval_fn: ``(model, data) -> Any``. Controls model interaction
+                during LSQ. When None, falls back to iterating
+                ``model(batch) for batch in calib_data``.
 
         Returns:
             Dict mapping module name -> optimized pre_scale tensor.
         """
         modules = _get_quantized_modules(qmodel)
-        batches = calib_batches[:self.num_batches]
         optimized_scales: Dict[str, torch.Tensor] = {}
 
         # Collect fp32 targets for all layers in one pass
         fp32_targets = self._collect_fp32_targets(
-            qmodel, fp32_model, modules, batches
+            qmodel, fp32_model, modules, calib_data, eval_fn=eval_fn,
         )
 
         for layer_idx, (name, module) in enumerate(modules):
@@ -134,7 +173,7 @@ class LayerwiseScaleOptimizer:
             pre_scale = nn.Parameter(init_scale)
 
             # Get real inputs from partially-quantized model
-            real_inputs = self._get_layer_inputs(qmodel, module, batches)
+            real_inputs = self._get_layer_inputs(qmodel, module, calib_data, eval_fn=eval_fn)
 
             # Build optimizer
             if self.optimizer == "adam":
@@ -162,9 +201,7 @@ class LayerwiseScaleOptimizer:
                     opt.step()
                     if self.pot:
                         with torch.no_grad():
-                            pre_scale.data = 2 ** torch.round(
-                                torch.log2(pre_scale.data)
-                            )
+                            pre_scale.data = _pot_scale(pre_scale.data)
             module.eval()
 
             # Freeze: store optimized scale
@@ -193,7 +230,8 @@ class LayerwiseScaleOptimizer:
         Returns a single-element tensor that broadcasts to any shape.
         Per-channel initialization can be added later.
         """
-        return torch.ones(1)
+        device = targets[0].device if targets else module._pre_scale.device
+        return torch.ones(1, device=device)
 
     @staticmethod
     def _fix_internal_scales(module, targets) -> None:
@@ -228,7 +266,9 @@ class LayerwiseScaleOptimizer:
             module.register_buffer(f"_internal_amax_{f_name}", amax)
 
     def _collect_fp32_targets(
-        self, qmodel, fp32_model, modules, batches
+        self, qmodel, fp32_model, modules, calib_data,
+        *,
+        eval_fn: Optional[Callable] = None,
     ) -> Dict[str, List[torch.Tensor]]:
         """Collect fp32 layer outputs for all quantized layers using hooks."""
         targets: Dict[str, List[torch.Tensor]] = {}
@@ -251,8 +291,11 @@ class LayerwiseScaleOptimizer:
 
         try:
             with torch.no_grad():
-                for batch in batches:
-                    fp32_model(batch)
+                if eval_fn is not None:
+                    eval_fn(fp32_model, calib_data)
+                else:
+                    for batch in calib_data[:self.num_batches]:
+                        fp32_model(batch)
         finally:
             for h in hooks:
                 h.remove()
@@ -260,7 +303,9 @@ class LayerwiseScaleOptimizer:
         return targets
 
     def _get_layer_inputs(
-        self, qmodel, module, batches
+        self, qmodel, module, calib_data,
+        *,
+        eval_fn: Optional[Callable] = None,
     ) -> List[torch.Tensor]:
         """Get real inputs to a module by running qmodel with a forward hook."""
         inputs: List[torch.Tensor] = []
@@ -271,8 +316,11 @@ class LayerwiseScaleOptimizer:
         handle = module.register_forward_hook(hook)
         try:
             with torch.no_grad():
-                for batch in batches:
-                    qmodel(batch)
+                if eval_fn is not None:
+                    eval_fn(qmodel, calib_data)
+                else:
+                    for batch in calib_data[:self.num_batches]:
+                        qmodel(batch)
         finally:
             handle.remove()
 

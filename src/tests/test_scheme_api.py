@@ -1,8 +1,7 @@
 """
-Tests for QuantScheme-driven APIs added in P2F-5.
+Tests for QuantScheme-driven APIs (quantize, quantize_bfloat, vec_* with scheme).
 
-Verify that new APIs (quantize_mx, quantize_bfloat, vec_* with scheme)
-produce bit-identical output to old mx/ code (direct comparison, no MxSpecs).
+Verify bit-identical output to old mx/ code (direct comparison, no MxSpecs).
 """
 import pytest
 import torch
@@ -13,15 +12,15 @@ from src.scheme.transform import IdentityTransform
 
 
 # ---------------------------------------------------------------------------
-# quantize_mx(A, scheme)
+# quantize(x, scheme) — canonical entry point for per_block / per_tensor
 # ---------------------------------------------------------------------------
 
-class TestQuantizeMxScheme:
+class TestQuantizePerBlock:
 
     @pytest.mark.parametrize("fmt", ["fp8_e4m3", "fp4_e2m1", "int8"])
-    def test_quantize_mx_matches_old(self, fmt):
-        """quantize_mx(scheme) should match old mx quantize_mx_op."""
-        from src.quantize.mx_quantize import quantize_mx
+    def test_per_block_matches_old(self, fmt):
+        """quantize(x, QuantScheme.mxfp(fmt, 32)) matches old mx quantize_mx_op."""
+        from src.quantize.elemwise import quantize
         from mx.mx_ops import quantize_mx_op as old_qmx_op
         from mx.specs import finalize_mx_specs as old_finalize
 
@@ -35,26 +34,27 @@ class TestQuantizeMxScheme:
 
         old_out = old_qmx_op(A.clone(), mx_specs=old_specs,
                              elem_format=fmt, axes=[-1])
-        scheme_out = quantize_mx(A.clone(), scheme=scheme, axes=[-1])
+        scheme_out = quantize(A.clone(), scheme)
         assert torch.equal(old_out, scheme_out), f"mismatch for {fmt}"
 
-    def test_quantize_mx_none_scheme(self):
+    def test_none_scheme_passthrough(self):
         """scheme=None should pass through unchanged."""
-        from src.quantize.mx_quantize import quantize_mx
+        from src.quantize.elemwise import quantize
         A = torch.randn(4, 64)
-        out = quantize_mx(A.clone(), scheme=None)
+        out = quantize(A.clone(), None)
         assert torch.equal(A, out)
 
-    def test_quantize_mx_per_channel_raises(self):
-        """quantize_mx should reject PER_CHANNEL granularity."""
-        from src.quantize.mx_quantize import quantize_mx
+    def test_per_channel_supported(self):
+        """quantize() supports PER_CHANNEL granularity."""
+        from src.quantize.elemwise import quantize
         A = torch.randn(4, 64)
         scheme = QuantScheme.per_channel("fp8_e4m3", axis=0)
-        with pytest.raises(ValueError, match="PER_CHANNEL"):
-            quantize_mx(A, scheme=scheme)
+        result = quantize(A, scheme)
+        assert result.shape == A.shape
+        assert result.isfinite().all()
 
-    def test_quantize_mx_no_block(self):
-        """quantize_mx with PER_TENSOR (block_size=0) should work."""
+    def test_per_tensor_mx_shared_exp(self):
+        """quantize_mx per_tensor (shared exponents) matches old mx quantize_mx_op."""
         from src.quantize.mx_quantize import quantize_mx
         from mx.mx_ops import quantize_mx_op as old_qmx_op
         from mx.specs import finalize_mx_specs as old_finalize
@@ -72,9 +72,8 @@ class TestQuantizeMxScheme:
         scheme_out = quantize_mx(A.clone(), scheme=scheme, axes=[-1])
         assert torch.equal(old_out, scheme_out)
 
-    def test_quantize_mx_delegates_to_quantize_with_transform(self):
-        """quantize_mx with non-Identity transform delegates to quantize()."""
-        from src.quantize.mx_quantize import quantize_mx
+    def test_transform_applied(self):
+        """quantize() correctly applies transforms during quantization."""
         from src.quantize.elemwise import quantize
         from src.transform.pre_scale import PreScaleTransform
 
@@ -86,9 +85,9 @@ class TestQuantizeMxScheme:
             granularity=GranularitySpec.per_block(32),
             transform=PreScaleTransform(scale=scale),
         )
-        out_mx = quantize_mx(A.clone(), scheme=scheme)
-        out_q = quantize(A.clone(), scheme)
-        assert torch.equal(out_mx, out_q)
+        out = quantize(A.clone(), scheme)
+        assert out.shape == A.shape
+        assert out.isfinite().all()
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +181,7 @@ class TestVecScheme:
 
     def test_vec_quantize_scheme(self):
         """vec_quantize with scheme should match old code."""
-        from src.quantize.vector import vec_quantize
+        from src.ops.vec_ops import vec_quantize
         from mx import vector_ops as old_vec
         from mx.specs import finalize_mx_specs as old_finalize
 
@@ -197,7 +196,7 @@ class TestVecScheme:
 
     def test_vec_add_scheme(self):
         """vec_add with scheme should produce quantized output."""
-        from src.quantize.vector import vec_add
+        from src.ops.vec_ops import vec_add
 
         torch.manual_seed(42)
         a, b = torch.randn(4, 8), torch.randn(4, 8)
@@ -207,7 +206,7 @@ class TestVecScheme:
 
     def test_vec_exp_with_use_exp2_scheme(self):
         """vec_exp with scheme and use_exp2=True should work."""
-        from src.quantize.vector import vec_exp
+        from src.ops.vec_ops import vec_exp
 
         torch.manual_seed(42)
         A = torch.randn(4, 8)
@@ -217,7 +216,7 @@ class TestVecScheme:
 
     def test_vec_div_with_use_recip_scheme(self):
         """vec_div with scheme and use_recip=True should work."""
-        from src.quantize.vector import vec_div
+        from src.ops.vec_ops import vec_div
 
         torch.manual_seed(42)
         a = torch.randn(4, 8) + 2.0

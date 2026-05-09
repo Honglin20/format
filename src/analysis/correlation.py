@@ -352,3 +352,159 @@ class LayerSensitivity:
     def above_threshold(self, metric="mse", threshold=0.01) -> list:
         return [(s["layer"], s["role"], s.get(metric, 0))
                 for s in self._samples if s.get(metric, 0) > threshold]
+
+
+class DistributionFitTaxonomy:
+    """Classify per-tensor distributions using scipy parametric fit results.
+
+    Reads ``best_fit`` from each slice in an AnalysisReport (populated by
+    :class:`DistributionFitObserver`) and groups layers by best-fit
+    distribution family.
+
+    Public API mirrors :class:`DistributionTaxonomy`.
+    """
+
+    def __init__(self, classifications: dict):
+        self._clusters = classifications
+
+    @classmethod
+    def from_report(cls, report: Report):
+        clusters = {}
+        for layer, role, stage, slice_key, metrics in report.iter_slices():
+            if "best_fit" not in metrics:
+                continue
+            dist_name = metrics["best_fit"]
+            entry = clusters.setdefault(dist_name, {
+                "count": 0, "layers": [], "_ks_sum": 0.0,
+            })
+            entry["count"] += 1
+            entry["layers"].append((layer, role))
+            entry["_ks_sum"] += metrics.get("best_fit_ks", 0)
+
+        result = {}
+        total = sum(c["count"] for c in clusters.values())
+        for name, data in clusters.items():
+            result[name] = {
+                "count": data["count"],
+                "percentage": f"{100 * data['count'] / total:.0f}%" if total else "0%",
+                "avg_ks": data["_ks_sum"] / data["count"] if data["count"] else 0,
+                "representative_layers": data["layers"][:3],
+            }
+        return cls(result)
+
+    def classify(self) -> dict:
+        return dict(self._clusters)
+
+    def classify_by_role(self, role: str) -> dict:
+        return dict(self._clusters)
+
+    def get_exemplars(self, cluster: str, n: int = 3) -> list:
+        data = self._clusters.get(cluster)
+        if not data:
+            return []
+        return [{"layer": l, "role": r}
+                for l, r in data["representative_layers"][:n]]
+
+    def print_taxonomy(self):
+        print("=== Distribution Fit Taxonomy ===")
+        for name, data in sorted(self._clusters.items(),
+                                  key=lambda x: x[1]["count"], reverse=True):
+            print(f"\n{name} ({data['count']} layers, {data['percentage']}):")
+            print(f"  avg KS stat={data['avg_ks']:.4f}")
+            if data["representative_layers"]:
+                print(f"  Examples: {data['representative_layers'][:3]}")
+
+
+class TaxonomyAccessor:
+    """Distribution classification on :class:`AnalysisReport`.
+
+    Merges scipy parametric fits (``DistributionFitObserver``) and
+    rule-based heuristics (``DistributionObserver``). Fit takes priority
+    when available; rules fill in when fit data is absent.
+
+    Usage::
+
+        report.taxonomy.classify()
+        report.taxonomy.print()
+        report.taxonomy.exemplars("norm")
+    """
+
+    def __init__(self, report):
+        self._report = report
+
+    def classify(self) -> dict:
+        """Return classification dict with per-distribution summaries.
+
+        Each slice is classified by ``best_fit`` when
+        :class:`DistributionFitObserver` data is present, otherwise by
+        :class:`DistributionTaxonomy` rules.
+        """
+        clusters = {}
+        for _layer, _role, _stage, _slice_key, metrics in self._report.iter_slices():
+            if "best_fit" in metrics:
+                source = "fit"
+                label = metrics["best_fit"]
+            elif "skewness" in metrics:
+                source = "rules"
+                label = DistributionTaxonomy._classify_one(metrics)
+            else:
+                continue
+
+            entry = clusters.setdefault(label, {
+                "count": 0, "fit_count": 0, "rules_count": 0,
+                "layers": [], "_ks_sum": 0.0, "_ks_n": 0,
+            })
+            entry["count"] += 1
+            entry["fit_count" if source == "fit" else "rules_count"] += 1
+            entry["layers"].append((_layer, _role))
+            if source == "fit":
+                entry["_ks_sum"] += metrics.get("best_fit_ks", 0)
+                entry["_ks_n"] += 1
+
+        result = {}
+        total = sum(c["count"] for c in clusters.values())
+        for name, data in clusters.items():
+            entry = {
+                "count": data["count"],
+                "percentage": f"{100 * data['count'] / total:.0f}%" if total else "0%",
+                "fit_count": data["fit_count"],
+                "rules_count": data["rules_count"],
+                "representative_layers": data["layers"][:3],
+            }
+            if data["_ks_n"] > 0:
+                entry["avg_ks"] = data["_ks_sum"] / data["_ks_n"]
+            result[name] = entry
+        return result
+
+    def print(self):
+        """Print the distribution taxonomy to stdout."""
+        result = self.classify()
+        if not result:
+            print("=== Distribution Taxonomy ===\n(no distribution data)")
+            return
+
+        print("=== Distribution Taxonomy ===")
+        for name, data in sorted(result.items(),
+                                  key=lambda x: x[1]["count"], reverse=True):
+            sources = []
+            if data["fit_count"]:
+                sources.append(f"{data['fit_count']} fit")
+            if data["rules_count"]:
+                sources.append(f"{data['rules_count']} rules")
+            source_str = " + ".join(sources)
+
+            print(f"\n{name} ({data['count']} layers, {data['percentage']}):")
+            print(f"  {source_str}")
+            if "avg_ks" in data:
+                print(f"  avg KS={data['avg_ks']:.4f}")
+            if data["representative_layers"]:
+                print(f"  Examples: {data['representative_layers'][:3]}")
+
+    def exemplars(self, cluster: str, n: int = 3) -> list:
+        """Return representative layers for a distribution cluster."""
+        result = self.classify()
+        data = result.get(cluster)
+        if not data:
+            return []
+        return [{"layer": l, "role": r}
+                for l, r in data["representative_layers"][:n]]

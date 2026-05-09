@@ -136,14 +136,28 @@ def test_float_format_defaults_to_no_saturate(fmt_name):
 @pytest.mark.parametrize("fmt_name", ALL_FORMATS)
 @pytest.mark.parametrize("round_mode", ROUND_MODES)
 def test_per_tensor_via_quantize_vs_old_core(fmt_name, round_mode):
-    """format.quantize(x, per_tensor, round) == old _quantize_elemwise_core()."""
+    """format.quantize(x, per_tensor, round) matches old _quantize_elemwise_core().
+
+    Integer formats (ebits==0) normalize to [-1,1] before elemwise;
+    float formats (ebits>0) use direct elemwise without normalization.
+    """
     torch.manual_seed(42)
     A = torch.randn(4, 64)
     fmt = FormatBase.from_str(fmt_name)
 
-    new_out = fmt.quantize(A.clone(), GranularitySpec.per_tensor(), round_mode)
-    old_out = old_core(A.clone(), fmt.mbits, fmt.ebits, fmt.max_norm,
-                       round=round_mode)
+    new_out = fmt.quantize(A.clone(), GranularitySpec.per_tensor(), round_mode,
+                           scale_storage="fp32")
+
+    if fmt.ebits == 0:
+        # Integer format: normalize → elemwise → rescale
+        amax = A.abs().max().clamp(min=1e-12)
+        A_norm = A / amax
+        old_out = old_core(A_norm, fmt.mbits, fmt.ebits, fmt.max_norm,
+                           round=round_mode) * amax
+    else:
+        # Float format: direct elemwise
+        old_out = old_core(A.clone(), fmt.mbits, fmt.ebits, fmt.max_norm,
+                           round=round_mode)
 
     assert torch.equal(old_out, new_out), \
         f"per_tensor quantize mismatch: {fmt_name}/{round_mode}"
@@ -276,16 +290,30 @@ def test_per_block_flush_fp32_subnorms():
 
 @pytest.mark.parametrize("fmt_name", ALL_FORMATS)
 def test_full_pipeline_per_tensor_vs_old(fmt_name):
-    """quantize(x, QuantScheme.per_tensor(fmt)) == old _quantize_elemwise_core."""
+    """quantize(x, QuantScheme.per_tensor(fmt)) matches old _quantize_elemwise_core.
+
+    Integer formats (ebits==0) normalize to [-1,1] before elemwise;
+    float formats (ebits>0) use direct elemwise.
+    """
     from src.quantize.elemwise import quantize
     torch.manual_seed(42)
     A = torch.randn(4, 64)
-    scheme = QuantScheme.per_tensor(fmt_name)
     fmt = FormatBase.from_str(fmt_name)
+    # Integer formats need fp32 scale_storage to match old_core (no POT)
+    ss = "fp32" if fmt.ebits == 0 else "pot"
+    scheme = QuantScheme(format=fmt_name, granularity=GranularitySpec.per_tensor(),
+                         scale_storage=ss)
 
     new_out = quantize(A.clone(), scheme)
-    old_out = old_core(A.clone(), fmt.mbits, fmt.ebits, fmt.max_norm,
-                       round="nearest")
+
+    if fmt.ebits == 0:
+        amax = A.abs().max().clamp(min=1e-12)
+        A_norm = A / amax
+        old_out = old_core(A_norm, fmt.mbits, fmt.ebits, fmt.max_norm,
+                           round="nearest") * amax
+    else:
+        old_out = old_core(A.clone(), fmt.mbits, fmt.ebits, fmt.max_norm,
+                           round="nearest")
 
     assert torch.equal(old_out, new_out), \
         f"full pipeline per_tensor mismatch: {fmt_name}"

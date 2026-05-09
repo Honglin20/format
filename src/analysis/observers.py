@@ -1,5 +1,8 @@
+from typing import List
+
 import torch
-from src.analysis.observer import SliceAwareObserver
+
+from src.observer import SliceAwareObserver
 
 
 class DistributionObserver(SliceAwareObserver):
@@ -42,11 +45,17 @@ class DistributionObserver(SliceAwareObserver):
         max_entropy = torch.log2(torch.tensor(self.hist_bins, dtype=torch.float32)).item()
         norm_entropy = entropy_raw / (max_entropy + 1e-30)
 
+        rms = f.pow(2).mean().sqrt()
+        peak = f_abs.max()
+
         return {
             "min": f.min().item(),
             "max": f.max().item(),
             "mean": mean.item(),
             "std": std.item(),
+            "peak": peak.item(),
+            "rms": rms.item(),
+            "crest_factor": (peak / (rms + 1e-30)).item(),
             "skewness": skew,
             "kurtosis": kurt,
             "excess_kurtosis": excess_kurt,
@@ -67,12 +76,60 @@ class QSNRObserver(SliceAwareObserver):
         den = err.pow(2).mean().clamp_min(1e-30)
         return {"qsnr_db": (10 * torch.log10(num / den)).item()}
 
+    def _measure_per_unit(self, fp32_2d, quant_2d):
+        """Vectorized: one kernel per metric over [N, D]."""
+        err = fp32_2d - quant_2d
+        num = fp32_2d.pow(2).mean(dim=1)
+        den = err.pow(2).mean(dim=1).clamp_min(1e-30)
+        qsnr = 10 * torch.log10(num / den)
+        return [{"qsnr_db": v} for v in qsnr.tolist()]
+
+    def _measure_batch(self, fp32_2d, quant_2d, valid_counts=None):
+        """Vectorized per-block aggregate: mean/std/min/max of per-block QSNR.
+
+        QSNR ratio is invariant to the divisor (sum(f²)/k / sum(err²)/k =
+        sum(f²)/sum(err²)), so .mean(dim=1) is correct even for partial blocks.
+        """
+        err = fp32_2d - quant_2d
+        num = fp32_2d.pow(2).mean(dim=1)
+        den = err.pow(2).mean(dim=1).clamp_min(1e-30)
+        qsnr = 10 * torch.log10(num / den)
+        return {
+            "qsnr_db": qsnr.mean().item(),
+            "qsnr_db_std": qsnr.std(unbiased=False).item() if qsnr.numel() > 1 else 0.0,
+            "qsnr_db_min": qsnr.min().item(),
+            "qsnr_db_max": qsnr.max().item(),
+        }
+
 
 class MSEObserver(SliceAwareObserver):
     """Mean squared error per slice."""
 
     def _measure(self, key, fp32, quant):
         return {"mse": (fp32 - quant).pow(2).mean().item()}
+
+    def _measure_per_unit(self, fp32_2d, quant_2d):
+        """Vectorized: one kernel over [N, D]."""
+        mse = (fp32_2d - quant_2d).pow(2).mean(dim=1)
+        return [{"mse": v} for v in mse.tolist()]
+
+    def _measure_batch(self, fp32_2d, quant_2d, valid_counts=None):
+        """Vectorized per-block aggregate: mean/std/min/max of per-block MSE.
+
+        Uses valid_counts for correct partial-block measurement when
+        dim_size % block_size != 0.
+        """
+        err_sq = (fp32_2d - quant_2d).pow(2)
+        if valid_counts is not None:
+            mse = err_sq.sum(dim=1) / valid_counts.clamp_min(1)
+        else:
+            mse = err_sq.mean(dim=1)
+        return {
+            "mse": mse.mean().item(),
+            "mse_std": mse.std(unbiased=False).item() if mse.numel() > 1 else 0.0,
+            "mse_min": mse.min().item(),
+            "mse_max": mse.max().item(),
+        }
 
 
 class HistogramObserver(SliceAwareObserver):
@@ -87,4 +144,69 @@ class HistogramObserver(SliceAwareObserver):
             "fp32_hist": torch.histc(fp32, bins=self.n_bins).cpu(),
             "quant_hist": torch.histc(quant, bins=self.n_bins).cpu(),
             "err_hist": torch.histc(fp32 - quant, bins=self.n_bins).cpu(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# DistributionFitObserver — scipy-based parametric distribution fitting
+# ---------------------------------------------------------------------------
+
+try:
+    import scipy.stats as _scipy_stats
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
+
+class DistributionFitObserver(SliceAwareObserver):
+    """Fit fp32 tensor distribution to parametric distributions via MLE + KS.
+
+    For each slice, fits all applicable candidate distributions (norm,
+    laplace, cauchy, uniform on any data; lognorm, expon, gamma on
+    non-negative data), ranks by Kolmogorov-Smirnov statistic, and reports
+    the best fit with its parameters.
+
+    Requires ``scipy``. Install with ``pip install scipy``.
+    """
+
+    _ALL_DISTS = ["norm", "laplace", "cauchy", "uniform"]
+    _POSITIVE_DISTS = ["lognorm", "expon", "gamma"]
+
+    def __init__(self, candidates=None):
+        super().__init__()
+        if not _HAS_SCIPY:
+            raise ImportError(
+                "DistributionFitObserver requires scipy. "
+                "Install with: pip install scipy"
+            )
+        self.candidates = candidates or self._ALL_DISTS + self._POSITIVE_DISTS
+
+    def _measure(self, key, fp32, quant):
+        x = fp32.detach().cpu().numpy().ravel()
+
+        dists = list(self._ALL_DISTS)
+        if x.min() >= 0:
+            dists.extend(self._POSITIVE_DISTS)
+        dists = [d for d in dists if d in self.candidates]
+
+        results = []
+        for name in dists:
+            dist = getattr(_scipy_stats, name)
+            try:
+                params = dist.fit(x)
+                ks_stat, _ = _scipy_stats.kstest(x, dist.cdf, args=params)
+                results.append((name, params, ks_stat))
+            except Exception:
+                continue
+
+        if not results:
+            return {"best_fit": "unknown", "best_fit_ks": float("inf")}
+
+        results.sort(key=lambda r: r[2])
+        best = results[0]
+        return {
+            "best_fit": best[0],
+            "best_fit_params": tuple(float(p) for p in best[1]),
+            "best_fit_ks": float(best[2]),
+            "fit_ranking": [(r[0], float(r[2])) for r in results],
         }

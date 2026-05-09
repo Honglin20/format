@@ -7,14 +7,14 @@ Run:  PYTHONPATH=. python examples/04_e2e_comparison.py
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from _model import ToyMLP
+from pipeline._model import ToyMLP
 from src.formats.base import FormatBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.session import QuantSession
 from src.analysis.e2e import Comparator, compare_models, compare_sessions
-from src.mapping.quantize_model import quantize_model
+from src.session import quantize_model
 
 
 def make_cfg():

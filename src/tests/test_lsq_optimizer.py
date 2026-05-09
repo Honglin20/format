@@ -5,6 +5,8 @@ import torch.nn as nn
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
+from src.scheme.transform import IdentityTransform
+from src.transform.pre_scale import PreScaleTransform
 
 
 class _TinyModel(nn.Module):
@@ -66,7 +68,7 @@ class TestLayerwiseScaleOptimizerIntegration:
 
     def test_optimizer_runs_and_produces_scales(self):
         from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
 
         torch.manual_seed(42)
         model = _TinyModel()
@@ -102,7 +104,7 @@ class TestLayerwiseScaleOptimizerIntegration:
     def test_pot_optimization_produces_power_of_two_scales(self):
         """With pot=True, optimized scales should be exact powers of two."""
         from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
 
         torch.manual_seed(42)
         model = _TinyModel()
@@ -125,3 +127,129 @@ class TestLayerwiseScaleOptimizerIntegration:
             log2 = torch.log2(scale)
             assert torch.equal(log2, torch.round(log2)), \
                 f"scale {scale} is not power-of-two"
+
+
+# ===================================================================
+# _replace_transform / _replace_transform_activation_only
+# ===================================================================
+
+class TestReplaceTransform:
+    def test_replaces_all_schemes(self):
+        from src.calibration.lsq_optimizer import _replace_transform
+        from src.formats.base import FormatBase
+
+        fmt = FormatBase.from_str("int8")
+        scheme = QuantScheme(
+            format=fmt,
+            granularity=GranularitySpec.per_tensor(),
+            transform=IdentityTransform(),
+        )
+        cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
+
+        new_transform = PreScaleTransform(scale=torch.tensor(2.0), pot=True)
+        new_cfg = _replace_transform(cfg, new_transform)
+
+        assert new_cfg.input.transform == new_transform
+        assert new_cfg.weight.transform == new_transform
+        assert new_cfg.output.transform == new_transform
+        # format/granularity preserved
+        assert new_cfg.input.format is fmt
+        assert new_cfg.input.granularity.mode == scheme.granularity.mode
+
+    def test_preserves_none_fields(self):
+        from src.calibration.lsq_optimizer import _replace_transform
+
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_tensor(),
+        )
+        cfg = OpQuantConfig(input=scheme, weight=None, output=scheme)
+
+        new_transform = PreScaleTransform(scale=torch.tensor(2.0))
+        new_cfg = _replace_transform(cfg, new_transform)
+
+        assert new_cfg.input.transform == new_transform
+        assert new_cfg.weight is None
+        assert new_cfg.output.transform == new_transform
+
+    def test_preserves_round_mode_and_scale_storage(self):
+        from src.calibration.lsq_optimizer import _replace_transform
+
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_tensor(),
+            round_mode="dither",
+            scale_storage="pot",
+        )
+        cfg = OpQuantConfig(input=scheme)
+
+        new_cfg = _replace_transform(cfg, PreScaleTransform(scale=torch.tensor(1.0)))
+        assert new_cfg.input.round_mode == "dither"
+        assert new_cfg.input.scale_storage == "pot"
+
+
+class TestReplaceTransformActivationOnly:
+    def test_replaces_only_activation_roles(self):
+        from src.calibration.lsq_optimizer import _replace_transform_activation_only
+
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_tensor(),
+            transform=IdentityTransform(),
+        )
+        cfg = OpQuantConfig(
+            input=scheme,
+            weight=scheme,
+            output=scheme,
+            grad_input=scheme,
+            grad_weight=scheme,
+        )
+
+        new_transform = PreScaleTransform(scale=torch.tensor(3.0))
+        new_cfg = _replace_transform_activation_only(cfg, new_transform)
+
+        # Activation roles replaced
+        assert new_cfg.input.transform == new_transform
+        assert new_cfg.output.transform == new_transform
+        assert new_cfg.grad_input.transform == new_transform
+        # Weight role preserved
+        assert new_cfg.weight.transform == IdentityTransform()
+        assert new_cfg.grad_weight.transform == IdentityTransform()
+
+    def test_restricted_roles_parameter(self):
+        from src.calibration.lsq_optimizer import (
+            _replace_transform_activation_only,
+            _INPUT_ACTIVATION_ROLES,
+        )
+
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_tensor(),
+            transform=IdentityTransform(),
+        )
+        cfg = OpQuantConfig(input=scheme, output=scheme, weight=scheme)
+
+        new_transform = PreScaleTransform(scale=torch.tensor(2.0))
+        new_cfg = _replace_transform_activation_only(
+            cfg, new_transform, roles=_INPUT_ACTIVATION_ROLES,
+        )
+
+        assert new_cfg.input.transform == new_transform
+        # output is NOT in _INPUT_ACTIVATION_ROLES → preserved
+        assert new_cfg.output.transform == IdentityTransform()
+        assert new_cfg.weight.transform == IdentityTransform()
+
+    def test_none_schemes_unchanged(self):
+        from src.calibration.lsq_optimizer import _replace_transform_activation_only
+
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_tensor(),
+        )
+        cfg = OpQuantConfig(input=scheme, output=None, weight=scheme)
+
+        new_cfg = _replace_transform_activation_only(
+            cfg, PreScaleTransform(scale=torch.tensor(1.0)),
+        )
+        assert new_cfg.output is None
+        assert new_cfg.input.transform is not None

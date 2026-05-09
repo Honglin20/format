@@ -9,7 +9,7 @@ from src.scheme.granularity import GranularityMode
 
 # Formats that map to ONNX standard QDQ nodes (opset 13+).
 # Per-block variants of these formats are excluded (MX block style → custom op).
-_STANDARD_NAMES = {"int8", "int4", "int2", "fp8_e4m3", "fp8_e5m2"}
+_STANDARD_NAMES = {"int8", "int4", "fp8_e4m3", "fp8_e5m2"}
 
 
 def _is_standard_format(scheme) -> bool:
@@ -35,3 +35,25 @@ def _emit_quantize_node(g, x, scheme):
     Non-standard / MX formats → com.microxscaling::MxQuantize custom node.
     """
     return scheme.format.export_onnx(g, x, scheme)
+
+
+def _emit_binary_onnx(g, in1, in2, inner_scheme, op_name):
+    """Emit a binary op with optional quantize wrappers on inputs and output."""
+    if inner_scheme is not None:
+        in1 = _emit_quantize_node(g, in1, inner_scheme)
+        if isinstance(in2, torch._C.Value):
+            in2 = _emit_quantize_node(g, in2, inner_scheme)
+    out = g.op(op_name, in1, in2)
+    if inner_scheme is not None:
+        out = _emit_quantize_node(g, out, inner_scheme)
+    return out
+
+
+def _emit_unary_onnx(g, in1, inner_scheme, op_name):
+    """Emit a unary op with optional quantize wrappers on input and output."""
+    if inner_scheme is not None:
+        in1 = _emit_quantize_node(g, in1, inner_scheme)
+    out = g.op(op_name, in1)
+    if inner_scheme is not None:
+        out = _emit_quantize_node(g, out, inner_scheme)
+    return out

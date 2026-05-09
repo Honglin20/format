@@ -36,11 +36,6 @@ class LookupFormat(FormatBase):
         self.min_norm = 0.0
         self._freeze()
 
-    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None):
-        return super().quantize(x, granularity, round_mode, allow_denorm,
-                                scale=scale)
-
     def quantize_elemwise(self, x, round_mode="nearest", allow_denorm=True,
                           saturate_normals=None):
         """Nearest-neighbor quantization against self.levels.
@@ -71,6 +66,20 @@ class LookupFormat(FormatBase):
             result[nan_mask] = float('nan')
 
         return result
+
+    def _quantize_per_tensor(self, x, round_mode, allow_denorm=True, scale=None,
+                              scale_storage="pot"):
+        """Direct elemwise — LUT formats have their own scaling semantics."""
+        return self.quantize_elemwise(x, round_mode=round_mode,
+                                      allow_denorm=allow_denorm)
+
+    def export_onnx(self, g, x, scheme):
+        """Emit com.microxscaling::NF4Quantize custom node with LUT levels."""
+        levels_list = self.levels.detach().cpu().tolist()
+        return g.op(
+            "com.microxscaling::NF4Quantize", x,
+            levels_f=levels_list,
+        )
 
     def __eq__(self, other):
         if type(self) is not type(other):

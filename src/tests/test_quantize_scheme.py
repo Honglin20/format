@@ -154,14 +154,26 @@ def test_quantize_bfloat_subnorms_false_matches_old():
 @pytest.mark.parametrize("fmt_name", ["int8", "fp8_e4m3", "fp8_e5m2", "fp4_e2m1",
                                        "bfloat16", "float16"])
 def test_quantize_equiv_old_elemwise_op(fmt_name):
-    """quantize(x, per_tensor/fmt) should match old quantize_elemwise_op path."""
-    from src.quantize.elemwise import _quantize_elemwise
+    """quantize(x, per_tensor/fmt) should match old quantize_elemwise_op path.
+
+    Integer formats normalize to [-1,1] before elemwise; float formats are direct.
+    """
+    from src.tests._compat import _quantize_elemwise
+    from src.formats.base import FormatBase
 
     torch.manual_seed(42)
     x = torch.randn(4, 32)
-    scheme = QuantScheme.per_tensor(fmt_name)
+    fmt = FormatBase.from_str(fmt_name)
+    # Integer formats need fp32 scale_storage to match _quantize_elemwise (no POT)
+    ss = "fp32" if fmt.ebits == 0 else "pot"
+    scheme = QuantScheme(format=fmt_name, granularity=GranularitySpec.per_tensor(),
+                         scale_storage=ss)
     result = quantize(x, scheme)
-    expected = _quantize_elemwise(x, fmt_name, round_mode="nearest")
+    if fmt.ebits == 0:
+        amax = x.abs().max().clamp(min=1e-12)
+        expected = _quantize_elemwise(x / amax, fmt_name, round_mode="nearest") * amax
+    else:
+        expected = _quantize_elemwise(x, fmt_name, round_mode="nearest")
     assert torch.allclose(result, expected, atol=1e-7), \
         f"{fmt_name}: max diff = {(result - expected).abs().max()}"
 

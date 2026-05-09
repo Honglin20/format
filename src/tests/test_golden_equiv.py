@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from src.quantize.elemwise import quantize
-from src.quantize.mx_quantize import quantize_mx
 from src.quantize.bfloat_quantize import quantize_bfloat
 from src.tests._compat import scheme_from_mx_specs
 
@@ -83,10 +82,9 @@ def test_mx_quantize_golden(fmt):
     golden = _load_golden(f"mx_quantize_{fmt}_bs32.pt")
     info = scheme_from_mx_specs(golden["mx_specs"], use_mx_format=True)
     assert info is not None, f"Expected non-None scheme for {fmt}"
-    new_out = quantize_mx(
+    new_out = quantize(
         golden["input"].clone(),
         info.scheme,
-        axes=[-1],
     )
     assert torch.equal(new_out, golden["output"]), \
         f"mx golden mismatch for {fmt}"

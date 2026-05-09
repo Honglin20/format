@@ -14,6 +14,7 @@ from mx.specs import apply_mx_specs
 from src.ops.linear import QuantizedLinear, LinearFunction
 from src.scheme.op_config import OpQuantConfig
 from src.tests._compat import op_config_from_mx_specs
+from src.tests._formats import smoke_mx_specs_params, full_mx_specs_params
 
 
 # ---------------------------------------------------------------------------
@@ -75,35 +76,8 @@ def _assert_bit_exact(mx_out, src_out, label="output"):
 # Test configurations: (name, mx_specs dict)
 # ---------------------------------------------------------------------------
 
-MX_SPECS_CONFIGS = [
-    # Bfloat16 only
-    pytest.param("bfloat16", {"bfloat": 16}, id="bfloat16"),
-    # Bfloat16 + MX FP8E4M3
-    pytest.param("bf16+mxfp8e4m3", {
-        "bfloat": 16, "a_elem_format": "fp8_e4m3",
-        "w_elem_format": "fp8_e4m3", "block_size": 32,
-    }, id="bf16+mxfp8e4m3"),
-    # Bfloat16 + MX FP8E5M2
-    pytest.param("bf16+mxfp8e5m2", {
-        "bfloat": 16, "a_elem_format": "fp8_e5m2",
-        "w_elem_format": "fp8_e5m2", "block_size": 32,
-    }, id="bf16+mxfp8e5m2"),
-    # Bfloat16 + MX INT8
-    pytest.param("bf16+mxint8", {
-        "bfloat": 16, "a_elem_format": "int8",
-        "w_elem_format": "int8", "block_size": 32,
-    }, id="bf16+mxint8"),
-    # MX FP8 only (no bfloat)
-    pytest.param("mxfp8e4m3", {
-        "a_elem_format": "fp8_e4m3",
-        "w_elem_format": "fp8_e4m3", "block_size": 32,
-    }, id="mxfp8e4m3-no-bf"),
-    # Bfloat16 + MX FP4
-    pytest.param("bf16+mxfp4", {
-        "bfloat": 16, "a_elem_format": "fp4_e2m1",
-        "w_elem_format": "fp4_e2m1", "block_size": 32,
-    }, id="bf16+mxfp4"),
-]
+MX_SPECS_CONFIGS = smoke_mx_specs_params()
+FULL_MX_SPECS_CONFIGS = full_mx_specs_params()
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +160,7 @@ class TestLinearBackward:
 class TestQuantizedLinearModule:
     """QuantizedLinear as nn.Module replacement."""
 
-    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_CONFIGS[:3])  # subset for speed
+    @pytest.mark.parametrize("name,mx_specs", MX_SPECS_CONFIGS)
     def test_module_forward_matches_functional(self, name, mx_specs):
         x, w, b = _make_tensors()
         cfg = op_config_from_mx_specs(mx_specs)
@@ -275,21 +249,7 @@ def _run_src_matmul(in1, in2, cfg, mode_config='aa'):
     )
 
 
-MX_SPECS_MATMUL = [
-    pytest.param("bfloat16", {"bfloat": 16}, id="bf16"),
-    pytest.param("bf16+mxfp8e4m3", {
-        "bfloat": 16, "a_elem_format": "fp8_e4m3",
-        "w_elem_format": "fp8_e4m3", "block_size": 32,
-    }, id="bf16+mxfp8e4m3"),
-    pytest.param("bf16+mxfp8e5m2", {
-        "bfloat": 16, "a_elem_format": "fp8_e5m2",
-        "w_elem_format": "fp8_e5m2", "block_size": 32,
-    }, id="bf16+mxfp8e5m2"),
-    pytest.param("mxfp8e4m3-no-bf", {
-        "a_elem_format": "fp8_e4m3",
-        "w_elem_format": "fp8_e4m3", "block_size": 32,
-    }, id="mxfp8e4m3-no-bf"),
-]
+MX_SPECS_MATMUL = smoke_mx_specs_params()
 
 
 class TestMatMulForward:
@@ -395,6 +355,122 @@ class TestBMMBackward:
         _assert_bit_exact(mx_gi1, src_gi1, label=f"bmm-grad_in1 ({name})")
 
     @pytest.mark.parametrize("name,mx_specs", MX_SPECS_MATMUL)
+    def test_backward_grad_in2(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        _, _, mx_gi2 = _run_mx_bmm(in1, in2, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        _, _, src_gi2 = _run_src_bmm(in1, in2, cfg)
+        _assert_bit_exact(mx_gi2, src_gi2, label=f"bmm-grad_in2 ({name})")
+
+
+# ===========================================================================
+# Slow full-format tests — all 8 MX formats (Linear, MatMul, BMM)
+# ===========================================================================
+
+
+class TestLinearForwardFull:
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_forward_with_bias(self, name, mx_specs):
+        x, w, b = _make_tensors()
+        mx_out, _, _, _ = _run_mx_linear(x, w, b, mx_specs, with_bias=True)
+        cfg = op_config_from_mx_specs(mx_specs)
+        src_out, _, _, _ = _run_src_linear(x, w, b, cfg, with_bias=True)
+        _assert_bit_exact(mx_out, src_out, label=f"linear-fwd ({name})")
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_forward_no_bias(self, name, mx_specs):
+        x, w, b = _make_tensors()
+        mx_out, _, _, _ = _run_mx_linear(x, w, None, mx_specs, with_bias=False)
+        cfg = op_config_from_mx_specs(mx_specs)
+        src_out, _, _, _ = _run_src_linear(x, w, None, cfg, with_bias=False)
+        _assert_bit_exact(mx_out, src_out, label=f"linear-fwd-nobias ({name})")
+
+
+class TestLinearBackwardFull:
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_backward_grad_input(self, name, mx_specs):
+        x, w, b = _make_tensors()
+        _, mx_gi, _, _ = _run_mx_linear(x, w, b, mx_specs, with_bias=True)
+        cfg = op_config_from_mx_specs(mx_specs)
+        _, src_gi, _, _ = _run_src_linear(x, w, b, cfg, with_bias=True)
+        _assert_bit_exact(mx_gi, src_gi, label=f"linear-grad_input ({name})")
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_backward_grad_weight(self, name, mx_specs):
+        x, w, b = _make_tensors()
+        _, _, mx_gw, _ = _run_mx_linear(x, w, b, mx_specs, with_bias=True)
+        cfg = op_config_from_mx_specs(mx_specs)
+        _, _, src_gw, _ = _run_src_linear(x, w, b, cfg, with_bias=True)
+        _assert_bit_exact(mx_gw, src_gw, label=f"linear-grad_weight ({name})")
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_backward_grad_bias(self, name, mx_specs):
+        x, w, b = _make_tensors()
+        _, _, _, mx_gb = _run_mx_linear(x, w, b, mx_specs, with_bias=True)
+        cfg = op_config_from_mx_specs(mx_specs)
+        _, _, _, src_gb = _run_src_linear(x, w, b, cfg, with_bias=True)
+        _assert_bit_exact(mx_gb, src_gb, label=f"linear-grad_bias ({name})")
+
+
+class TestMatMulForwardFull:
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_forward_aa(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        mx_out, _, _ = _run_mx_matmul(in1, in2, mx_specs, mode_config='aa')
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        src_out, _, _ = _run_src_matmul(in1, in2, cfg, mode_config='aa')
+        _assert_bit_exact(mx_out, src_out, label=f"matmul-fwd-aa ({name})")
+
+
+class TestMatMulBackwardFull:
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_backward_grad_in1(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        _, mx_gi1, _ = _run_mx_matmul(in1, in2, mx_specs, mode_config='aa')
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        _, src_gi1, _ = _run_src_matmul(in1, in2, cfg, mode_config='aa')
+        _assert_bit_exact(mx_gi1, src_gi1, label=f"matmul-grad_in1 ({name})")
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_backward_grad_in2(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        _, _, mx_gi2 = _run_mx_matmul(in1, in2, mx_specs, mode_config='aa')
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        _, _, src_gi2 = _run_src_matmul(in1, in2, cfg, mode_config='aa')
+        _assert_bit_exact(mx_gi2, src_gi2, label=f"matmul-grad_in2 ({name})")
+
+
+class TestBMMForwardFull:
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_forward(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        mx_out, _, _ = _run_mx_bmm(in1, in2, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        src_out, _, _ = _run_src_bmm(in1, in2, cfg)
+        _assert_bit_exact(mx_out, src_out, label=f"bmm-fwd ({name})")
+
+
+class TestBMMBackwardFull:
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
+    def test_backward_grad_in1(self, name, mx_specs):
+        in1, in2 = _make_matmul_tensors()
+        _, mx_gi1, _ = _run_mx_bmm(in1, in2, mx_specs)
+        cfg = op_config_from_mx_specs(mx_specs, op_type="matmul")
+        _, src_gi1, _ = _run_src_bmm(in1, in2, cfg)
+        _assert_bit_exact(mx_gi1, src_gi1, label=f"bmm-grad_in1 ({name})")
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("name,mx_specs", FULL_MX_SPECS_CONFIGS)
     def test_backward_grad_in2(self, name, mx_specs):
         in1, in2 = _make_matmul_tensors()
         _, _, mx_gi2 = _run_mx_bmm(in1, in2, mx_specs)

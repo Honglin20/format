@@ -13,7 +13,7 @@ import torch.nn as nn
 import mx
 from mx.specs import apply_mx_specs
 
-from src.context.quantize_context import QuantizeContext
+from src.session import QuantizeContext
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec, GranularityMode
@@ -385,14 +385,17 @@ class TestMxEquivalence:
     # ---- SIMD ops: identity with direct src/ops calls ----
 
     def test_simd_add_identity_mxint8(self):
-        """QuantizeContext(torch.add, mxint8) == simd_add(inner_scheme=mxint8)."""
-        from src.ops.elemwise import simd_add
+        """QuantizeContext(torch.add, bf16) == simd_add(inner_scheme=bf16).
 
-        s = _mx_scheme_from_specs({
-            "bfloat": 16, "a_elem_format": "int8",
-            "w_elem_format": "int8", "block_size": 32,
-        })
-        cfg = OpQuantConfig(input=s, output=s)
+        MX SIMD ops use elemwise (storage) quantization only — not per_block MX compute.
+        """
+        from src.ops.elemwise import simd_add
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
+
+        s = QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(storage=s)
 
         a, b = torch.randn(4, 32), torch.randn(4, 32) * 0.5
         direct = simd_add(a.clone(), b.clone(), inner_scheme=s, quantize_backprop=True)
@@ -403,14 +406,14 @@ class TestMxEquivalence:
         _assert_bit_exact(ctx_result, direct, "add-identity-mxint8")
 
     def test_simd_div_identity_mxint8(self):
-        """QuantizeContext(torch.div, mxint8) == simd_div(inner_scheme=mxint8)."""
+        """QuantizeContext(torch.div, bf16) == simd_div(inner_scheme=bf16)."""
         from src.ops.elemwise import simd_div
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
 
-        s = _mx_scheme_from_specs({
-            "bfloat": 16, "a_elem_format": "int8",
-            "w_elem_format": "int8", "block_size": 32,
-        })
-        cfg = OpQuantConfig(input=s, output=s)
+        s = QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(storage=s)
 
         a = torch.randn(4, 32)
         b = torch.randn(4, 32).abs() + 0.5
@@ -422,14 +425,14 @@ class TestMxEquivalence:
         _assert_bit_exact(ctx_result, direct, "div-identity-mxint8")
 
     def test_simd_exp_identity_mxint8(self):
-        """QuantizeContext(torch.exp, mxint8) == simd_exp(inner_scheme=mxint8)."""
+        """QuantizeContext(torch.exp, bf16) == simd_exp(inner_scheme=bf16)."""
         from src.ops.elemwise import simd_exp
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
 
-        s = _mx_scheme_from_specs({
-            "bfloat": 16, "a_elem_format": "int8",
-            "w_elem_format": "int8", "block_size": 32,
-        })
-        cfg = OpQuantConfig(input=s, output=s)
+        s = QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(storage=s)
 
         x = torch.randn(4, 32)
         direct = simd_exp(x.clone(), inner_scheme=s, quantize_backprop=True)
@@ -442,12 +445,12 @@ class TestMxEquivalence:
     def test_simd_add_backward_identity_mxint8(self):
         """QuantizeContext(torch.add).backward() == simd_add().backward()."""
         from src.ops.elemwise import simd_add
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.bf16_fp16 import BFloat16Format
 
-        s = _mx_scheme_from_specs({
-            "bfloat": 16, "a_elem_format": "int8",
-            "w_elem_format": "int8", "block_size": 32,
-        })
-        cfg = OpQuantConfig(input=s, output=s)
+        s = QuantScheme(format=BFloat16Format(), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(storage=s)
 
         a, b = torch.randn(4, 32), torch.randn(4, 32) * 0.5
 
@@ -805,7 +808,7 @@ class TestQuantizeModelUnified:
 
     def test_all_ops_quantized(self):
         """quantize_model(model, cfg) → model(x) quantizes both paths."""
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
@@ -824,7 +827,7 @@ class TestQuantizeModelUnified:
 
     def test_forward_backward_runs(self):
         """quantize_model model can run forward + backward without error."""
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
@@ -842,7 +845,7 @@ class TestQuantizeModelUnified:
     def test_export_onnx(self, tmp_path):
         """model.export_onnx via quantize_model produces valid ONNX."""
         import onnx
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         s = _scheme("int8", GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         model = ModelWithInlineOps()
@@ -859,7 +862,7 @@ class TestQuantizeModelUnified:
 
     def test_identical_to_separate_paths(self):
         """quantize_model result == explicit module replacement + QuantizeContext."""
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         from src.ops.linear import QuantizedLinear
         s = _scheme("int8", GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
@@ -888,7 +891,7 @@ class TestQuantizeModelUnified:
 
     def test_op_cfgs_per_op_override(self):
         """Per-op cfg override works through quantize_model."""
-        from src.mapping.quantize_model import quantize_model
+        from src.session import quantize_model
         default_cfg = OpQuantConfig()       # passthrough (no quant)
         matmul_cfg = _cfg_fw("int8")        # int8 quant
 

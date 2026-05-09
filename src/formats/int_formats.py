@@ -37,12 +37,22 @@ class IntFormat(FormatBase):
         from src.scheme.granularity import GranularityMode
         if scheme.granularity.mode == GranularityMode.PER_BLOCK:
             return super().export_onnx(g, x, scheme)
-        scale = g.op("Constant", value_t=torch.tensor(1.0, dtype=torch.float32))
+
+        # int2 cannot be represented with ONNX QuantizeLinear/DequantizeLinear
+        # (no 2-bit integer type support in standard ONNX ops). Fall back to
+        # custom MxQuantize op.
+        if self.mbits <= 2:
+            return super().export_onnx(g, x, scheme)
+
+        # Try to get real calibration scale from the current module's
+        # output_scale buffer (set by LinearFunction.symbolic()).
+        scale_val = 1.0
+        from src.session._context import _onnx_current_scale_var
+        current_scale = _onnx_current_scale_var.get()
+        if current_scale is not None and current_scale.numel() == 1:
+            scale_val = current_scale.item()
+
+        scale = g.op("Constant", value_t=torch.tensor(scale_val, dtype=torch.float32))
         zp = g.op("Constant", value_t=torch.tensor(0, dtype=torch.int8))
         xq = g.op("QuantizeLinear", x, scale, zp)
         return g.op("DequantizeLinear", xq, scale, zp)
-
-    def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None):
-        return super().quantize(x, granularity, round_mode, allow_denorm,
-                                scale=scale)

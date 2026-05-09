@@ -1,5 +1,5 @@
 import torch.nn as nn
-from src.analysis.mixin import ObservableMixin
+from src.observer import ObservableMixin
 from src.analysis.report import Report
 
 
@@ -8,8 +8,7 @@ class AnalysisContext:
 
     Usage:
         with AnalysisContext(model, [QSNRObserver()]) as ctx:
-            for batch in data:
-                model(batch)
+            eval_fn(model, data)
         report = ctx.report()
     """
 

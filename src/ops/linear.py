@@ -13,10 +13,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.scheme.op_config import OpQuantConfig
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 
 _F_linear = F.linear
 from src.quantize import quantize
-from src.analysis.mixin import ObservableMixin
+from src.observer.mixin import ObservableMixin
 
 
 class LinearFunction(torch.autograd.Function):
@@ -63,11 +64,14 @@ class LinearFunction(torch.autograd.Function):
             fp_w = w; w = quantize(w, cfg.weight)
             if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, w, cfg.weight)
 
-        # bias: storage only
+        # bias: storage → compute
         q_bias = b
         if b is not None and cfg.storage is not None:
             fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
             if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if b is not None and cfg.bias is not None:
+            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
         # Save for backward: post-storage if training, raw if STE
         if cfg.is_training:
@@ -84,19 +88,23 @@ class LinearFunction(torch.autograd.Function):
         # matmul
         y = _F_linear(x, w)
 
-        # output step 1 (post-matmul): storage
+        # output step 1 (post-matmul): storage (per-tensor, ignores scale)
         if cfg.storage is not None:
-            fp_y = y; y = quantize(y, cfg.storage, scale=output_scale)
+            fp_y = y; y = quantize(y, cfg.storage)
             if emit_fn: emit_fn("output", 0, "output_post_quant", fp_y, y, cfg.storage)
 
         # bias add + output step 2 (post-bias): storage
         if q_bias is not None:
-            y = y + q_bias
+            _enter_quantize()
+            try:
+                y = y + q_bias
+            finally:
+                _exit_quantize()
             if cfg.storage is not None:
-                fp_y = y; y = quantize(y, cfg.storage, scale=output_scale)
+                fp_y = y; y = quantize(y, cfg.storage)
                 if emit_fn: emit_fn("output", 1, "output_post_quant", fp_y, y, cfg.storage)
 
-        # output compute (applied after all storage steps)
+        # output compute: calibrated scale applies here (per-channel / per-block)
         if cfg.output is not None:
             fp_y = y; y = quantize(y, cfg.output, scale=output_scale)
             if emit_fn: emit_fn("output", 2, "output_post_quant", fp_y, y, cfg.output)
@@ -177,34 +185,46 @@ class LinearFunction(torch.autograd.Function):
     @staticmethod
     def symbolic(g, x, w, b, cfg, name, emit_fn, output_scale=None):
         from src.onnx.helpers import _emit_quantize_node
+        from src.session._context import _export_scales_var, _onnx_current_scale_var
 
-        if cfg.storage is not None:
-            x = _emit_quantize_node(g, x, cfg.storage)
-        if cfg.input is not None:
-            x = _emit_quantize_node(g, x, cfg.input)
-
-        if cfg.storage is not None:
-            w = _emit_quantize_node(g, w, cfg.storage)
-        if cfg.weight is not None:
-            w = _emit_quantize_node(g, w, cfg.weight)
-
-        wt = g.op("Transpose", w, perm_i=[1, 0])
-        y = g.op("MatMul", x, wt)
-
-        if cfg.storage is not None:
-            y = _emit_quantize_node(g, y, cfg.storage)
-
-        if b is not None:
+        scales = _export_scales_var.get()
+        current_scale = None
+        if scales:
+            current_scale = scales.get(name)
+            if current_scale is None:
+                current_scale = scales.get("")
+        _onnx_current_scale_var.set(current_scale)
+        try:
             if cfg.storage is not None:
-                b = _emit_quantize_node(g, b, cfg.storage)
-            y = g.op("Add", y, b)
+                x = _emit_quantize_node(g, x, cfg.storage)
+            if cfg.input is not None:
+                x = _emit_quantize_node(g, x, cfg.input)
+
+            if cfg.storage is not None:
+                w = _emit_quantize_node(g, w, cfg.storage)
+            if cfg.weight is not None:
+                w = _emit_quantize_node(g, w, cfg.weight)
+
+            wt = g.op("Transpose", w, perm_i=[1, 0])
+            y = g.op("MatMul", x, wt)
+
             if cfg.storage is not None:
                 y = _emit_quantize_node(g, y, cfg.storage)
 
-        if cfg.output is not None:
-            y = _emit_quantize_node(g, y, cfg.output)
+            if b is not None:
+                if cfg.storage is not None:
+                    b = _emit_quantize_node(g, b, cfg.storage)
+                if cfg.bias is not None:
+                    b = _emit_quantize_node(g, b, cfg.bias)
+                y = g.op("Add", y, b)
+                if cfg.storage is not None:
+                    y = _emit_quantize_node(g, y, cfg.storage)
 
-        return y
+            if cfg.output is not None:
+                y = _emit_quantize_node(g, y, cfg.output)
+            return y
+        finally:
+            _onnx_current_scale_var.set(None)
 
 
 class QuantizedLinear(ObservableMixin, nn.Linear):

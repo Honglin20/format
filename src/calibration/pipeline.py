@@ -14,19 +14,20 @@ Design:
 
   Scales can also be inspected mid-collection via :meth:`scales`.
 """
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
 
 from src.calibration.strategies import ScaleStrategy
+from src.scheme.granularity import GranularityMode
 
 
 class CalibrationSession:
     """Context manager for activation-scale calibration.
 
     Args:
-        model: PyTorch model (typically the quantized model from QuantSession).
+        model: PyTorch model (typically the quantized model from _QuantSession).
         strategy: ``ScaleStrategy`` instance used to compute final scales.
         axis: Dimension along which per-slice statistics are tracked.
         assign: If True (default), scales are auto-assigned as module
@@ -36,8 +37,7 @@ class CalibrationSession:
     Example::
 
         with CalibrationSession(model, MaxScaleStrategy()) as calib:
-            for batch in calib_data:
-                model(batch)
+            eval_fn(model, calib_data)
         # Scales are auto-assigned on exit — model is now calibrated.
     """
 
@@ -84,10 +84,14 @@ class CalibrationSession:
 
         Can be called inside or after the ``with`` block.  Each call
         re-computes from the current running-amax state.
+
+        The running amax is already correctly shaped (scalar for PER_TENSOR,
+        (C,) for PER_CHANNEL).  Strategies are not re-applied here because
+        they expect raw-data tensors, not pre-computed amax.
         """
         scales: Dict[str, torch.Tensor] = {}
         for name, amax in self._running_amax.items():
-            scales[name] = self.strategy.compute(amax, self.axis)
+            scales[name] = amax.clamp(min=1e-12)
         return scales
 
     def assign_scales(self, scales: Optional[Dict[str, torch.Tensor]] = None) -> List[str]:
@@ -106,6 +110,9 @@ class CalibrationSession:
 
     def save_scales(self, filepath: str, scales: Optional[Dict[str, torch.Tensor]] = None) -> str:
         """Save scale factors to disk.
+
+        .. deprecated::
+           Use the standalone ``save_scales(scales, filepath)`` function instead.
 
         Args:
             filepath: Path to save the scales dict (e.g. ``"scales.pt"``).
@@ -127,6 +134,9 @@ class CalibrationSession:
     ) -> Dict[str, torch.Tensor]:
         """Load scales from disk and optionally assign to model modules.
 
+        .. deprecated::
+           Use the standalone ``load_scales(filepath)`` function instead.
+
         Args:
             filepath: Path to the saved scales file (e.g. ``"scales.pt"``).
             assign: If True (default), assign scales as ``_output_scale``
@@ -143,6 +153,9 @@ class CalibrationSession:
     @staticmethod
     def load_scales_from(filepath: str) -> Dict[str, torch.Tensor]:
         """Load scales from disk (standalone, no model required).
+
+        .. deprecated::
+           Use the standalone ``load_scales(filepath)`` function instead.
 
         Args:
             filepath: Path to the saved scales file.
@@ -182,7 +195,22 @@ class CalibrationSession:
     def _make_hook(self, name: str):
         def _hook(module, _input, output):
             x = output.detach()
-            amax = torch.amax(torch.abs(x), dim=self.axis, keepdim=True)
+            # Compute amax with shape determined by output granularity.
+            # PER_TENSOR: scalar. PER_CHANNEL: (C,) — reduce all dims
+            # except channel_axis so each channel has its own scale.
+            mode, channel_axis = self._output_granularity(module)
+            if mode == GranularityMode.PER_TENSOR:
+                amax = torch.amax(torch.abs(x))
+            elif mode == GranularityMode.PER_CHANNEL:
+                ax = channel_axis if channel_axis >= 0 else x.ndim + channel_axis
+                dims_to_reduce = [i for i in range(x.ndim) if i != ax]
+                amax = torch.amax(
+                    torch.abs(x), dim=tuple(dims_to_reduce), keepdim=True,
+                )
+            else:
+                # PER_BLOCK / DYNAMIC_GROUP: per-element or caller-driven
+                amax = torch.amax(torch.abs(x), dim=self.axis, keepdim=True)
+
             if name in self._running_amax:
                 self._running_amax[name] = torch.max(
                     self._running_amax[name], amax
@@ -190,6 +218,14 @@ class CalibrationSession:
             else:
                 self._running_amax[name] = amax
         return _hook
+
+    @staticmethod
+    def _output_granularity(module):
+        """Return (mode, channel_axis) for the module's output quant scheme."""
+        if hasattr(module, "cfg") and module.cfg.output is not None:
+            g = module.cfg.output.granularity
+            return g.mode, g.channel_axis
+        return GranularityMode.PER_TENSOR, 0
 
 
 # ------------------------------------------------------------------
@@ -237,19 +273,28 @@ class CalibrationPipeline(CalibrationSession):
         super().__init__(model, strategy, axis=axis, assign=False)
         self.num_batches = num_batches
 
-    def calibrate(self, dataloader) -> Dict[str, torch.Tensor]:
+    def calibrate(self, dataloader, *, eval_fn: Optional[Callable] = None) -> Dict[str, torch.Tensor]:
         """Run calibration over *dataloader* and return per-layer scales.
 
         Legacy wrapper — opens a context-manager session internally.
+
+        Args:
+            dataloader: Iterable of batches.
+            eval_fn: ``(model, data) -> Any``. Controls how the model is
+                called during calibration. When None, falls back to
+                ``self.model(inputs)`` for each batch.
         """
         with self:
             with torch.no_grad():
-                for i, batch in enumerate(dataloader):
-                    if i >= self.num_batches:
-                        break
-                    if isinstance(batch, (list, tuple)):
-                        inputs = batch[0]
-                    else:
-                        inputs = batch
-                    self.model(inputs)
+                if eval_fn is not None:
+                    eval_fn(self.model, dataloader)
+                else:
+                    for i, batch in enumerate(dataloader):
+                        if i >= self.num_batches:
+                            break
+                        if isinstance(batch, (list, tuple)):
+                            inputs = batch[0]
+                        else:
+                            inputs = batch
+                        self.model(inputs)
         return self.scales()

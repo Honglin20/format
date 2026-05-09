@@ -1,5 +1,5 @@
 """
-Equivalence tests for src/quantize/vector.py vs mx/vector_ops.py.
+Equivalence tests for src/ops/vec_ops.py vs mx/vector_ops.py.
 
 TDD: Every function tested against old code — bit-identical output required.
 """
@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from mx import vector_ops as old_vec
-from src.quantize import vector
+from src.ops import vec_ops as vector
 from src.scheme.quant_scheme import QuantScheme
 
 

@@ -5,11 +5,11 @@ tensor-level quantization strategy.
 from dataclasses import dataclass, field
 from typing import Union
 
-from ..formats.base import FormatBase
+from ..formats.base import FormatBase, _VALID_ROUND_MODES
 from .granularity import GranularitySpec
 from .transform import TransformBase, IdentityTransform
 
-_VALID_ROUND_MODES = {"nearest", "floor", "even", "dither"}
+_VALID_SCALE_STORAGES = {"fp32", "pot"}
 
 
 def _resolve_format(fmt: Union[str, FormatBase]) -> FormatBase:
@@ -39,6 +39,7 @@ class QuantScheme:
     """Default: PER_TENSOR (single shared scale for the whole tensor)."""
     transform: TransformBase = field(default_factory=IdentityTransform)
     round_mode: str = "nearest"
+    scale_storage: str = "pot"
 
     def __post_init__(self):
         # Coerce string format to FormatBase (supports factory methods accepting str)
@@ -65,6 +66,12 @@ class QuantScheme:
         if self.round_mode not in _VALID_ROUND_MODES:
             raise ValueError(
                 f"Invalid round_mode {self.round_mode!r}. Must be one of {_VALID_ROUND_MODES}"
+            )
+
+        # Validate scale_storage
+        if self.scale_storage not in _VALID_SCALE_STORAGES:
+            raise ValueError(
+                f"Invalid scale_storage {self.scale_storage!r}. Must be one of {_VALID_SCALE_STORAGES}"
             )
 
     @staticmethod

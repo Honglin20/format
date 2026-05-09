@@ -358,17 +358,19 @@ def test_nf4_inf_nan_per_tensor(nf4):
 
 
 def test_nf4_inf_nan_per_channel(nf4):
-    """NaN in channel makes entire channel NaN (amax becomes NaN)."""
+    """NaN in a channel makes that entire channel NaN (per-channel amax = NaN)."""
     torch.manual_seed(42)
     x = torch.randn(2, 5)
     x[1, 2] = float('nan')
     scheme = QuantScheme.per_channel("nf4", axis=1)
     y = quantize_via_scheme(x, scheme)
     assert y.shape == (2, 5)
-    # Row 0 has no NaN → all finite
-    assert torch.isfinite(y[0, :]).all()
-    # Row 1 has NaN at position 2, which corrupts amax → all NaN in row 1
-    assert torch.isnan(y[1, :]).all()
+    # Per-channel amax is computed over batch dim → NaN in channel 2 (row 1)
+    # makes the channel-2 amax NaN → channel 2 is NaN for ALL rows.
+    assert torch.isfinite(y[0, [0, 1, 3, 4]]).all()  # non-NaN channels are finite
+    assert torch.isfinite(y[1, [0, 1, 3, 4]]).all()
+    assert torch.isnan(y[0, 2])  # channel 2 amax is NaN → NaN for all rows
+    assert torch.isnan(y[1, 2])
 
 
 def test_nf4_large_random_values_are_finite(nf4):
@@ -416,7 +418,8 @@ def test_nf4_per_channel_with_scale_kwarg(nf4):
     torch.manual_seed(42)
     x = torch.randn(4, 8)
     scheme = QuantScheme.per_channel("nf4", axis=-1)
-    amax = torch.amax(torch.abs(x), dim=-1, keepdim=True).clamp(min=1e-12)
+    dims = tuple(i for i in range(x.ndim) if i != (x.ndim - 1))
+    amax = torch.amax(torch.abs(x), dim=dims, keepdim=True).clamp(min=1e-12)
     y_auto = quantize_via_scheme(x, scheme)
     y_scaled = quantize_via_scheme(x, scheme, scale=amax)
     assert torch.equal(y_auto, y_scaled)

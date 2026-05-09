@@ -7,7 +7,7 @@ Run:  PYTHONPATH=. python examples/02_session_workflow.py
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from _model import ToyMLP
+from pipeline._model import ToyMLP
 from src.formats.base import FormatBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
