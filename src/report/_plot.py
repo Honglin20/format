@@ -648,7 +648,7 @@ class StudyPlotAccessor:
 
         Raises:
             ValueError: If correlation data is not available (requires both
-                ``true_error=True`` and QSNRObserver active).
+                ``keep_fp32=True`` and QSNRObserver active (default)).
         """
         if role not in _VALID_PLOT_ROLES:
             raise ValueError(
@@ -656,14 +656,14 @@ class StudyPlotAccessor:
                 f"{sorted(_VALID_PLOT_ROLES)}."
             )
 
-        data = self._report._correlate_hook_observer(role)
+        data = self._report.correlate_hook_observer(role)
         has_any = any(
             bool(info["matched"]) for info in data.values()
         )
         if not has_any:
             raise ValueError(
                 "Error propagation data not available. "
-                "Requires both true_error=True and QSNRObserver active. "
+                "Requires qsnr observer (included in default outputs) and keep_fp32=True. "
                 + _how_to("qsnr")
             )
 
@@ -782,14 +782,14 @@ class StudyPlotAccessor:
                 f"{sorted(_VALID_PLOT_ROLES)}."
             )
 
-        data = self._report._correlate_hook_observer(role)
+        data = self._report.correlate_hook_observer(role)
         has_any = any(
             bool(info["matched"]) for info in data.values()
         )
         if not has_any:
             raise ValueError(
                 "Accumulated vs local data not available. "
-                "Requires both true_error=True and QSNRObserver active. "
+                "Requires qsnr observer (included in default outputs) and keep_fp32=True. "
                 + _how_to("qsnr")
             )
 

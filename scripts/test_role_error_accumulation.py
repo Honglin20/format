@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 
 from src.session._config import QuantConfig
-from src.session._session import Session, _extract_qsnr_mse
+from src.session._session import Session
 from src.report._study_report import StudyReport
 from src.report._plot import StudyPlotAccessor
 from src.report._tables import StudyTablesAccessor
@@ -101,7 +101,7 @@ def analyse_error_accumulation():
 
     # Extract per-layer per-role QSNR
     roles_to_check = ["input", "weight", "output"]
-    per_role_qsnr = {role: _extract_qsnr_mse(obs, role=role)[0] for role in roles_to_check}
+    per_role_qsnr = {role: result.qsnr_per_role(role=role)[0] for role in roles_to_check}
 
     # Map observer keys to module short names
     idx_to_name = _get_linear_layer_map(model)
@@ -144,7 +144,7 @@ def analyse_error_accumulation():
         if abs(o_slope) < 2.0 and abs(o_trend) < 2.0:
             print(f"\n  >>> Output QSNR does NOT show significant error accumulation")
             print(f"  >>> across layers (|slope|={abs(o_slope):.1f} dB, |trend|={abs(o_trend):.1f} dB).")
-            print(f"  >>> This validates the _extract_qsnr_mse design decision:")
+            print(f"  >>> This validates the output-role QSNR design decision:")
             print(f"  >>> output QSNR is the appropriate per-layer quality metric.")
             print(f"  >>> Input/weight QSNR can differ due to re-quantization effects.")
         else:

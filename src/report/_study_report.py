@@ -129,81 +129,30 @@ class StudyReport:
 
         return StudyTablesAccessor(self)
 
-    # ── _correlate_hook_observer ──────────────────────────────────────────
+    # ── correlate_hook_observer ─────────────────────────────────────────
 
-    def _correlate_hook_observer(self, role: str = "output") -> dict:
-        """Correlate accumulated (hook) QSNR with local (observer) QSNR.
+    def correlate_hook_observer(self, role: str = "output") -> dict:
+        """Correlate accumulated (hook) QSNR with local (observer) QSNR
+        across all results.
 
-        For each SessionResult, extracts accumulated QSNR from
-        ``qsnr_per_layer`` (true_error hook path) and local QSNR from
-        ``observers_data`` (QSNRObserver path) via ``_extract_qsnr_mse``.
-        Matches observer keys to hook keys by prefix.
+        Delegates to :meth:`SessionResult.correlate_hook_observer` for each
+        result, then aggregates by config name.
 
         Args:
             role: Tensor role for observer data (default ``"output"``).
 
         Returns:
             ``{config_name: {"matched": [...], "observer_only": [...],
-            "hook_only": [...]}}`` where each matched entry is
-            ``(hook_key, accumulated_qsnr, local_qsnr)``.
-            Returns empty dict if no correlation data is available.
+            "hook_only": [...]}}``. Returns empty dict if no correlation
+            data is available.
         """
-        from src.session._session import _extract_qsnr_mse
-
         result: dict = {}
         for part_results in self._results.values():
             for r in part_results:
                 cfg_name = r.name or "(unnamed)"
-
-                accum = r.qsnr_per_layer
-                if not accum:
-                    continue
-                if not r.observers_data:
-                    continue
-
-                local, _ = _extract_qsnr_mse(r.observers_data, role=role)
-                if not local:
-                    continue
-
-                hook_keys = set(accum.keys())
-
-                # Group observer keys by matching hook key
-                obs_by_hook: dict = {}
-                unmatched_obs: list = []
-
-                for obs_key, local_qsnr in sorted(local.items()):
-                    matched = None
-                    for hk in hook_keys:
-                        if obs_key == hk or obs_key.startswith(hk + "."):
-                            matched = hk
-                            break
-                    if matched:
-                        obs_by_hook.setdefault(matched, []).append(
-                            (obs_key, local_qsnr)
-                        )
-                    else:
-                        unmatched_obs.append((obs_key, local_qsnr))
-
-                # Build matched list: for each hook key, take min local QSNR
-                matched_list = []
-                for hk in sorted(hook_keys):
-                    if hk in obs_by_hook:
-                        min_local = min(v for _, v in obs_by_hook[hk])
-                        matched_list.append((hk, accum[hk], min_local))
-
-                matched_hks = set(hk for hk, _, _ in matched_list)
-                hook_only_list = [
-                    (hk, accum[hk])
-                    for hk in sorted(hook_keys)
-                    if hk not in matched_hks
-                ]
-
-                result[cfg_name] = {
-                    "matched": matched_list,
-                    "observer_only": unmatched_obs,
-                    "hook_only": hook_only_list,
-                }
-
+                corr = r.correlate_hook_observer(role=role)
+                if corr:
+                    result[cfg_name] = corr
         return result
 
     # ── _avg_qsnr_mse ────────────────────────────────────────────────────
@@ -269,6 +218,10 @@ class StudyReport:
                     entry["qsnr_per_layer"] = r.qsnr_per_layer
                 if r.mse_per_layer:
                     entry["mse_per_layer"] = r.mse_per_layer
+                if r.accum_qsnr_per_layer:
+                    entry["accum_qsnr_per_layer"] = r.accum_qsnr_per_layer
+                if r.accum_mse_per_layer:
+                    entry["accum_mse_per_layer"] = r.accum_mse_per_layer
                 serializable[part_name][r.name] = entry
         return serializable
 
@@ -415,7 +368,7 @@ class StudyReport:
                 print(f"  Warning: cost_decomposition failed: {e}")
 
         # ── Error propagation figures ────────────────────────────────
-        corr = self._correlate_hook_observer()
+        corr = self.correlate_hook_observer()
         any_corr = any(
             bool(info["matched"]) for info in corr.values()
         )
@@ -521,6 +474,8 @@ class StudyReport:
                     delta=entry.get("delta"),
                     qsnr_per_layer=entry.get("qsnr_per_layer", {}),
                     mse_per_layer=entry.get("mse_per_layer", {}),
+                    accum_qsnr_per_layer=entry.get("accum_qsnr_per_layer", {}),
+                    accum_mse_per_layer=entry.get("accum_mse_per_layer", {}),
                 )
                 part_results.append(result)
             results[part_name] = part_results

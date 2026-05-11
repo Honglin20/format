@@ -23,7 +23,6 @@ import torch.nn as nn
 
 from src.session import Session, QuantConfig
 from src.report._study_report import StudyReport
-from src.session._session import _extract_qsnr_mse
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -177,15 +176,15 @@ def main():
         quantize_nonlinear=False,
     )
     session = Session(model, cfg)
-    result = session.run(data, outputs=["qsnr", "mse"], true_error=True)
+    result = session.run(data, outputs=["qsnr", "mse"])
 
     # ── Verify hook / observer keys ──────────────────────────────────
     print(f"\n{minor_sep}")
     print("  Hook vs Observer — Key Coverage")
     print(minor_sep)
 
-    hook_keys = sorted(result.qsnr_per_layer.keys())
-    local_qsnr, _ = _extract_qsnr_mse(result.observers_data, role="output")
+    hook_keys = sorted(result.accum_qsnr_per_layer.keys())
+    local_qsnr, _ = result.qsnr_per_role(role="output")
     observer_keys = sorted(local_qsnr.keys())
 
     print(f"  Hook layers:     {len(hook_keys)}")
@@ -230,14 +229,14 @@ def main():
         marker = ""
         if hk in hook_only:
             marker = " [hook-only]"
-        print(f"  {hk:<50} {result.qsnr_per_layer[hk]:6.1f} dB{marker}")
+        print(f"  {hk:<50} {result.accum_qsnr_per_layer[hk]:6.1f} dB{marker}")
 
     # ── StudyReport correlation ─────────────────────────────────────
     print(f"\n{minor_sep}")
-    print("  StudyReport._correlate_hook_observer()")
+    print("  StudyReport.correlate_hook_observer()")
     print(minor_sep)
     report = StudyReport({"transformer": [result]})
-    corr = report._correlate_hook_observer(role="output")
+    corr = report.correlate_hook_observer(role="output")
 
     for cfg_name, info in corr.items():
         n_m = len(info["matched"])

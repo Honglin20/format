@@ -45,16 +45,10 @@ print(result2.summary())
 如需按其他 role 查看：
 
 ```python
-from src.session._session import _extract_qsnr_mse
-
-# 只看 output（默认）
-qsnr_out, _ = _extract_qsnr_mse(result.observers_data, role="output")
-
-# 只看 weight
-qsnr_w, _ = _extract_qsnr_mse(result.observers_data, role="weight")
-
-# 只看 input（仅第一层有意义）
-qsnr_in, _ = _extract_qsnr_mse(result.observers_data, role="input")
+# 按 role 提取 QSNR（无需导入私有函数）
+qsnr_out, _ = result.qsnr_per_role(role="output")
+qsnr_w, _ = result.qsnr_per_role(role="weight")
+qsnr_in, _ = result.qsnr_per_role(role="input")
 ```
 
 ## 误差传播分析：累积 vs 本地
@@ -63,7 +57,7 @@ qsnr_in, _ = _extract_qsnr_mse(result.observers_data, role="input")
 
 | 测量路径 | 数据来源 | 度量含义 | 覆盖范围 |
 |---------|---------|---------|---------|
-| **累积误差**（Hook） | `true_error=True`，逐层对比 fp32 vs quant output | 从第一层累加到此层的总误差 | `_MODULE_MAPPING` 中的模块（Linear/Conv/Norm/...） |
+| **累积误差**（Hook） | 自动启用（当 `"qsnr"` observer 激活时），逐层对比 fp32 vs quant output | 从第一层累加到此层的总误差 | `_MODULE_MAPPING` 中的模块（Linear/Conv/Norm/...） |
 | **本地误差**（Observer） | QSNRObserver，在量化算子内部 `_emit` 事件 | 仅此层本次量化引入的误差 | 同上 + patched inline ops（`torch.matmul` 等） |
 
 Observer 覆盖范围 > Hook（`hook ⊂ observer`），因此可发现未被 hook 覆盖的自定义模块（如 attention 中的 `torch.matmul`）。
@@ -71,18 +65,17 @@ Observer 覆盖范围 > Hook（`hook ⊂ observer`），因此可发现未被 ho
 ```python
 from src.session import Session, QuantConfig
 
-# true_error=True 同时启用 hook（累积）和 observer（本地）两条路径
-result = Session(model, cfg).run(
-    calib_data, outputs=["qsnr", "mse"], true_error=True,
-)
+# 累积 + 本地两条路径自动同时采集（outputs 默认含 "qsnr"）
+result = Session(model, cfg).run(calib_data)
 
 # 累积 QSNR（hook，逐层对比 fp32 参考输出）
-print(result.qsnr_per_layer)   # {"0": 33.9, "2": 34.0, "3": 31.5}
+print(result.accum_qsnr_per_layer)   # {"0": 33.9, "2": 34.0, "3": 31.5}
 
 # 本地 QSNR（observer，量化算子内部测量）
-from src.session._session import _extract_qsnr_mse
-local_qsnr, _ = _extract_qsnr_mse(result.observers_data, role="output")
-print(local_qsnr)              # {"0": 55.4, "1.matmul": 55.4, "2": 314.0, "3": 57.0}
+print(result.qsnr_per_layer)         # {"0": 55.4, "1.matmul": 55.4, "2": 314.0, "3": 57.0}
+
+# 按 role 提取本地 QSNR
+local_qsnr, _ = result.qsnr_per_role(role="output")
 ```
 
 ### 诊断表与可视化
@@ -92,7 +85,10 @@ from src.report._study_report import StudyReport
 
 report = StudyReport({"my_config": [result]})
 
-# 终端诊断表：每层 Accum QSNR / Local QSNR / Delta / Headroom / Diagnosis
+# 单结果：直接从 result.tables 输出
+print(result.tables.error_source_analysis(role="output"))
+
+# 多配置对比：从 report.tables 输出
 print(report.tables.error_source_analysis(role="output"))
 
 # 三行面板图：分组柱状图 + δ-QSNR + Headroom 诊断

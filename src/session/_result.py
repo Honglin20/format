@@ -1,16 +1,20 @@
 """SessionResult dataclass and its accessor methods.
 
 SessionResult is the output of running one Session (one QuantConfig).
-It holds accuracy deltas, per-layer QSNR/MSE metrics, raw observer data,
-and cost estimates, plus user-facing accessor methods for display.
+It holds accuracy deltas, per-layer QSNR/MSE metrics (both local observer
+and accumulated hook paths), raw observer data, and cost estimates, plus
+user-facing accessor methods for display.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from src.session._config import QuantConfig
+
+if TYPE_CHECKING:
+    from src.report._session_tables import SessionTablesAccessor
 
 
 @dataclass
@@ -28,14 +32,152 @@ class SessionResult:
     delta: Optional[Dict[str, float]] = None
     qsnr_per_layer: Dict[str, float] = field(default_factory=dict)
     mse_per_layer: Dict[str, float] = field(default_factory=dict)
+    accum_qsnr_per_layer: Dict[str, float] = field(default_factory=dict)
+    accum_mse_per_layer: Dict[str, float] = field(default_factory=dict)
     observers_data: Dict[str, Any] = field(default_factory=dict)
     cost: Any = None
     cost_fp32: Any = None
     sq_transforms: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------------
+    # Accessor properties
+    # ------------------------------------------------------------------
+
+    @property
+    def tables(self) -> "SessionTablesAccessor":
+        """Terminal table output accessor.
+
+        Returns a :class:`SessionTablesAccessor` with methods like
+        :meth:`~SessionTablesAccessor.error_source_analysis` and
+        :meth:`~SessionTablesAccessor.per_layer_qsnr`.
+        """
+        from src.report._session_tables import SessionTablesAccessor
+
+        return SessionTablesAccessor(self)
+
+    @property
+    def report(self) -> "AnalysisReport":
+        """Distribution analysis accessor.
+
+        Returns an :class:`AnalysisReport` wrapping this result's
+        ``observers_data``, enabling taxonomy, profile, and sensitivity
+        analysis.
+
+        Example::
+
+            result.report().taxonomy.classify()
+            DistributionProfile.from_report(result.report())
+            ErrorByDistribution(result.report())
+        """
+        from src.analysis.report import AnalysisReport
+
+        return AnalysisReport(self.observers_data)
+
+    # ------------------------------------------------------------------
     # Accessor methods
     # ------------------------------------------------------------------
+
+    def correlate_hook_observer(self, role: str = "output") -> dict:
+        """Correlate accumulated (hook) QSNR with local (observer) QSNR.
+
+        Matches observer keys to hook keys by prefix: ``obs_key == hook_key``
+        or ``obs_key.startswith(hook_key + ".")``. For each matched hook key,
+        the minimum local QSNR across sub-slices is taken.
+
+        Args:
+            role: Tensor role for observer data (default ``"output"``).
+
+        Returns:
+            ``{"matched": [(hook_key, accum_qsnr, local_qsnr), ...],
+            "observer_only": [(obs_key, local_qsnr), ...],
+            "hook_only": [(hook_key, accum_qsnr), ...]}``.
+            Returns empty dict if no hook or local data.
+        """
+        accum = self.accum_qsnr_per_layer
+        if not accum:
+            return {}
+
+        local, _ = self.qsnr_per_role(role=role)
+        if not local:
+            return {}
+
+        hook_keys = set(accum.keys())
+        obs_by_hook: dict = {}
+        unmatched_obs: list = []
+
+        for obs_key, local_qsnr in sorted(local.items()):
+            matched_hk = None
+            for hk in hook_keys:
+                if obs_key == hk or obs_key.startswith(hk + "."):
+                    matched_hk = hk
+                    break
+            if matched_hk:
+                obs_by_hook.setdefault(matched_hk, []).append(
+                    (obs_key, local_qsnr)
+                )
+            else:
+                unmatched_obs.append((obs_key, local_qsnr))
+
+        matched_list = []
+        for hk in sorted(hook_keys):
+            if hk in obs_by_hook:
+                min_local = min(v for _, v in obs_by_hook[hk])
+                matched_list.append((hk, accum[hk], min_local))
+
+        matched_hks = set(hk for hk, _, _ in matched_list)
+        hook_only = [
+            (hk, accum[hk])
+            for hk in sorted(hook_keys)
+            if hk not in matched_hks
+        ]
+
+        return {
+            "matched": matched_list,
+            "observer_only": unmatched_obs,
+            "hook_only": hook_only,
+        }
+
+    def qsnr_per_role(
+        self, role: str = "output"
+    ) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """Extract per-layer QSNR and MSE from observers_data for a given role.
+
+        Only metrics from *role* (default ``"output"``) are considered. Input
+        and weight QSNR are excluded because they measure qualitatively
+        different things: input re-quantization of already-quantized data and
+        static weight error. Only output QSNR captures the layer's true
+        end-to-end quantization quality.
+
+        Within the selected role, the worst-case (minimum QSNR, maximum MSE)
+        across all quantization stages and slices is used.
+
+        Args:
+            role: Tensor role to extract (``"input"`` / ``"weight"`` /
+                ``"output"`` / ``"bias"``). Default ``"output"``.
+
+        Returns:
+            ``(qsnr_per_layer, mse_per_layer)`` — each is ``Dict[str, float]``.
+        """
+        qsnr_map: Dict[str, float] = {}
+        mse_map: Dict[str, float] = {}
+        for layer, roles in self.observers_data.items():
+            stages = roles.get(role)
+            if stages is None:
+                continue
+            for _stage, slices in stages.items():
+                for _slice_key, metrics in slices.items():
+                    if "qsnr_db" in metrics:
+                        v = metrics["qsnr_db"]
+                        if v == v:  # exclude nan
+                            prev = qsnr_map.get(layer)
+                            if prev is None or v < prev:
+                                qsnr_map[layer] = v
+                    if "mse" in metrics:
+                        mse_map[layer] = max(
+                            mse_map.get(layer, 0.0),
+                            metrics["mse"],
+                        )
+        return qsnr_map, mse_map
 
     def summary(self) -> str:
         """One-line human-readable summary of the quantization result.

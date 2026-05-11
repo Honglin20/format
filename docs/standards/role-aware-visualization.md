@@ -49,7 +49,7 @@ crest_vs_qsnr_output.png
 
 ### R4: 聚合数据的 role 必须声明
 
-当数据源已限定 role（如 `SessionResult.qsnr_per_layer` 来自 `_extract_qsnr_mse(role="output")`），消费者必须在标题/表头中标明：
+当数据源已限定 role（如 `SessionResult.qsnr_per_layer` 始终为 output role），消费者必须在标题/表头中标明：
 
 ```python
 # _tables.py — 终端表格 header
@@ -98,7 +98,7 @@ crest_vs_qsnr_output.png
 
 ```
 # ✓ 正确
-ax.set_ylabel("QSNR (dB)")；legend(["Accumulated (true_error)", "Local (observer)"])
+ax.set_ylabel("QSNR (dB)")；legend(["Accumulated (hook)", "Local (observer)"])
 
 # ✗ 错误 — 两个不同来源的数据共用同一标签
 ax.set_ylabel("QSNR (dB)")；legend(["QSNR", "QSNR"])

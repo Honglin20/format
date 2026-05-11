@@ -67,7 +67,7 @@ class StudyTablesAccessor:
         """Per-layer error source diagnosis: accumulated vs local QSNR.
 
         For each config and matched layer, shows accumulated QSNR (hook
-        path, true_error), local QSNR (observer path), delta-QSNR
+        path), local QSNR (observer path), delta-QSNR
         (drop from previous layer), headroom, and a diagnosis.
 
         Diagnosis thresholds:
@@ -81,13 +81,20 @@ class StudyTablesAccessor:
         Returns:
             Formatted text table.
         """
-        data = self._report._correlate_hook_observer(role)
+        data: dict = {}
+        for part_results in self._report._results.values():
+            for r in part_results:
+                cfg_name = r.name or "(unnamed)"
+                corr = r.correlate_hook_observer(role=role)
+                if corr:
+                    data[cfg_name] = corr
 
         if not data:
             return (
                 "No error propagation data available.\n"
-                "Requires both true_error=True and QSNRObserver active.\n"
-                "session.run(calib_data, outputs=['qsnr'], true_error=True)"
+                "Requires QSNRObserver active (included in default outputs)\n"
+                "and keep_fp32=True (default).\n"
+                "session.run(calib_data, outputs=['qsnr'])"
             )
 
         lines: list[str] = []

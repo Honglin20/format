@@ -136,8 +136,10 @@ outputs=["qsnr", "distribution", "fit", "accuracy"]           # + distribution_f
 |------|------|------|
 | `result.name` | `str` | 配置名 |
 | `result.config` | `QuantConfig` | 原始配置对象 |
-| `result.qsnr_per_layer` | `Dict[str, float]` | `{层名: QSNR dB}` |
-| `result.mse_per_layer` | `Dict[str, float]` | `{层名: MSE}` |
+| `result.qsnr_per_layer` | `Dict[str, float]` | 本地 QSNR（observer 测量的逐层量化噪声，output role） |
+| `result.mse_per_layer` | `Dict[str, float]` | 本地 MSE（observer 测量，output role） |
+| `result.accum_qsnr_per_layer` | `Dict[str, float]` | 累积 QSNR（hook 测量，quant vs fp32 参考输出的逐层对比） |
+| `result.accum_mse_per_layer` | `Dict[str, float]` | 累积 MSE（hook 测量） |
 | `result.fp32_metrics` | `Dict[str, float]` | eval_fn 在 fp32 模型上的输出 |
 | `result.quant_metrics` | `Dict[str, float]` | eval_fn 在量化模型上的输出 |
 | `result.delta` | `Dict[str, float]` | 精度差（fp32 - quant） |
@@ -153,6 +155,8 @@ outputs=["qsnr", "distribution", "fit", "accuracy"]           # + distribution_f
 | `.accuracy_table()` | `str` | FP32 vs Quant 对比表（需 eval_fn） |
 | `.top_k_qsnr(k, reverse=False)` | `List[Tuple]` | QSNR 最差/最好的 k 层 |
 | `.layer_report()` | `DataFrame` | 逐层 QSNR + MSE（需 pandas） |
+| `.qsnr_per_role(role)` | `Tuple[Dict, Dict]` | 从 observers_data 提取指定 role 的 (qsnr, mse) |
+| `.tables` | `SessionTablesAccessor` | 终端表格输出（per_layer_qsnr, error_source_analysis） |
 
 ## 获取 observer 原始数据
 

@@ -54,3 +54,55 @@ PyTorch old-style ONNX exporter 分两阶段：
 2. ONNX 建图（调 `symbolic()` 生成节点）
 
 `_quantize_per_block()` 已加 `torch.jit.is_tracing()` guard 跳过 `_reshape_to_blocks`。新增量化路径时，若涉及 JIT-unfriendly 操作（Tensor.item()、动态 shape 分支），必须在入口加同样的 guard。symbolic() 负责在 ONNX 图中表达量化语义，forward() 只负责 shape 推断。
+
+## Result 类访问器模式
+
+所有持有分析数据的 result dataclass 必须暴露 `.tables` 访问器属性（终端/格式化输出）。必要时也可暴露 `.plot` 访问器（可视化）。
+
+**模式**：
+
+```python
+# 1. 访问器类：构造时接收父对象引用，方法操作父对象数据
+class XxxTablesAccessor:
+    def __init__(self, report: "XxxReport"):
+        self._report = report
+
+    def some_table(self, ...) -> str:
+        ...  # 从 self._report 读取数据，返回格式化文本
+
+# 2. 在父对象上以 @property 暴露，lazy import 避免循环依赖
+@property
+def tables(self) -> "XxxTablesAccessor":
+    from src.xxx._tables import XxxTablesAccessor
+    return XxxTablesAccessor(self)
+```
+
+**当前遵循此模式的类**：
+
+| 父类 | 访问器 | `_report` 字段 |
+|------|-------|---------------|
+| `StudyReport` | `.tables` → `StudyTablesAccessor` | `self._report._results` |
+| `StudyReport` | `.plot` → `StudyPlotAccessor` | `self._report._results` / `self._report.to_dataframe()` |
+| `SessionResult` | `.tables` → `SessionTablesAccessor` | `self._result`（qsnr_per_layer / accum_qsnr_per_layer / qsnr_per_role） |
+
+**规则**：
+
+1. 访问器方法用公共名（不下划线），返回 `str`（tables）或 `plt.Figure`（plot）。
+2. 访问器内部不做数据采集——只读取已有数据并格式化。数据采集在 Session 阶段完成。
+3. 访问器构造函数只接受一个参数：父对象引用。
+4. 跨 accessor 共享的计算逻辑放在父类，方法名不下划线表示公共 API。逻辑必须放在最小数据单元上（如 `SessionResult.correlate_hook_observer()`），聚合层通过迭代委托复用。
+5. 数据缺失时抛出 `ValueError` 并提供操作指导（告知缺少哪些 `outputs` key）。
+
+## 能力归属原则
+
+分析能力必须归属到最小数据单元（`SessionResult`），聚合层（`StudyReport`）不做独立分析，只负责跨配置对比和格式化。
+
+| 层级 | 角色 | 示例 |
+|------|------|------|
+| `SessionResult` | 拥有分析能力 | `correlate_hook_observer()`, `qsnr_per_role()`, `.report`, `.tables` |
+| `StudyReport` | 跨配置委托聚合 | `correlate_hook_observer()` 聚合各 result；`.tables` / `.plot` 跨配置叠加 |
+
+**规则**：
+1. 新增分析能力时，先在 `SessionResult` 上实现，`StudyReport` 通过迭代委托复用。
+2. `StudyReport` 的方法如果只做聚合（`for r in results: r.method()`），也必须暴露为公共 API，便于 `StudyTablesAccessor` 和 `StudyPlotAccessor` 调用。
+3. 核心算法只存在于 `SessionResult`，不得在 `StudyReport` 中重复实现。

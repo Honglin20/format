@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from src.session._config import QuantConfig
-from src.session._session import Session, _extract_qsnr_mse
+from src.session._session import Session
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -98,9 +98,8 @@ def run_and_trace(n_layers=8, seed=42):
     print_model_structure(qmodel, "quant model (qmodel)")
 
     # Observer per-role QSNR
-    obs = result.observers_data
-    input_q, _ = _extract_qsnr_mse(obs, role="input")
-    weight_q, _ = _extract_qsnr_mse(obs, role="weight")
+    input_q, _ = result.qsnr_per_role(role="input")
+    weight_q, _ = result.qsnr_per_role(role="weight")
 
     # Capture (input, output) at each Linear layer
     fp32_captured = capture_linear_outputs(fp32_model, data)

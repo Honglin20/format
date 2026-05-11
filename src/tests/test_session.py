@@ -256,7 +256,7 @@ def test_analyze_with_custom_observers():
 
 
 # ---------------------------------------------------------------------------
-# 5b. True-error analysis (Session.analyze(true_error=True))
+# 5b. Accumulated-error analysis (Session.analyze hook path)
 # ---------------------------------------------------------------------------
 
 
@@ -279,8 +279,8 @@ def test_cfg_causes_quantization_with_scheme():
     assert cfg_causes_quantization(OpQuantConfig(grad_input=scheme))
 
 
-def test_true_error_returns_qsnr_per_layer():
-    """true_error=True should populate qsnr_per_layer and mse_per_layer."""
+def test_accum_qsnr_populated():
+    """Hook path should populate accum_qsnr_per_layer when qsnr is in outputs."""
     from src.session._session import Session
     from src.session._config import QuantConfig
     model = _make_small_model()
@@ -288,17 +288,17 @@ def test_true_error_returns_qsnr_per_layer():
     session = Session(model, config)
     session.quantize()
     session.analyze(
-        torch.randn(4, 4), outputs=[], true_error=True,
+        torch.randn(4, 4), outputs=["qsnr"],
     )
-    assert len(session._qsnr_per_layer) > 0
-    assert len(session._mse_per_layer) > 0
-    for qsnr in session._qsnr_per_layer.values():
+    assert len(session._accum_qsnr_per_layer) > 0
+    assert len(session._accum_mse_per_layer) > 0
+    for qsnr in session._accum_qsnr_per_layer.values():
         assert qsnr > 0
         assert not torch.tensor(qsnr).isnan()
 
 
-def test_true_error_multi_batch_accumulation():
-    """Multi-batch true_error should accumulate across batches."""
+def test_accum_qsnr_multi_batch_accumulation():
+    """Multi-batch accum QSNR should accumulate across batches."""
     from src.session._session import Session
     from src.session._config import QuantConfig
     model = _make_small_model()
@@ -308,23 +308,23 @@ def test_true_error_multi_batch_accumulation():
 
     # Single batch
     session.analyze(
-        [torch.randn(4, 4)], outputs=[], true_error=True,
+        [torch.randn(4, 4)], outputs=["qsnr"],
     )
-    single_qsnr = dict(session._qsnr_per_layer)
+    single_qsnr = dict(session._accum_qsnr_per_layer)
 
     # Multiple batches — same layers should be present
     session2 = Session(model, config)
     session2.quantize()
     session2.analyze(
         [torch.randn(4, 4) for _ in range(4)],
-        outputs=[], true_error=True,
+        outputs=["qsnr"],
     )
-    multi_qsnr = dict(session2._qsnr_per_layer)
+    multi_qsnr = dict(session2._accum_qsnr_per_layer)
     assert set(single_qsnr.keys()) == set(multi_qsnr.keys())
 
 
-def test_true_error_with_eval_fn():
-    """true_error=True with eval_fn should use eval_fn, not direct model()."""
+def test_accum_qsnr_with_eval_fn():
+    """Hook path with eval_fn should use eval_fn, not direct model()."""
     from src.session._session import Session
     from src.session._config import QuantConfig
     model = _make_small_model()
@@ -343,16 +343,16 @@ def test_true_error_with_eval_fn():
         m(data)
 
     session.analyze(
-        torch.randn(4, 4), outputs=[], true_error=True,
+        torch.randn(4, 4), outputs=["qsnr"],
         eval_fn=my_eval,
     )
     assert len(called_fp32) == 1
     assert len(called_quant) == 1
-    assert len(session._qsnr_per_layer) > 0
+    assert len(session._accum_qsnr_per_layer) > 0
 
 
-def test_true_error_with_observers_combined():
-    """true_error=True + observers should give true error AND observer data."""
+def test_hook_and_observer_combined():
+    """qsnr output should give both accum (hook) and local (observer) data."""
     from src.session._session import Session
     from src.session._config import QuantConfig
     model = _make_small_model()
@@ -361,14 +361,15 @@ def test_true_error_with_observers_combined():
     session.quantize()
 
     session.analyze(
-        torch.randn(4, 4), outputs=["qsnr"], true_error=True,
+        torch.randn(4, 4), outputs=["qsnr"],
     )
+    assert len(session._accum_qsnr_per_layer) > 0
     assert len(session._qsnr_per_layer) > 0
     assert len(session._observers_data) > 0
 
 
-def test_true_error_excludes_non_quantizing_modules():
-    """Modules with empty cfg should be excluded from true_error comparison."""
+def test_accum_qsnr_excludes_non_quantizing_modules():
+    """Modules with empty cfg should be excluded from accum hook comparison."""
     from src.session._session import Session
     from src.session._config import QuantConfig
     model = _make_small_model()
@@ -377,11 +378,11 @@ def test_true_error_excludes_non_quantizing_modules():
     session.quantize()
 
     session.analyze(
-        torch.randn(4, 4), outputs=[], true_error=True,
+        torch.randn(4, 4), outputs=["qsnr"],
     )
 
     # Every reported layer QSNR should be a finite number
-    for name, qsnr in session._qsnr_per_layer.items():
+    for name, qsnr in session._accum_qsnr_per_layer.items():
         assert qsnr == qsnr  # not NaN
         assert qsnr > 0
 
@@ -1201,7 +1202,7 @@ class TestMultiBatchAccumulation:
 
 
 class TestTrueErrorEndToEnd:
-    """End-to-end verification: Session true_error matches manual computation."""
+    """End-to-end verification: accum (hook) QSNR matches manual computation."""
 
     def _make_deterministic_model(self):
         """Model with fixed weights so output is deterministic."""
@@ -1212,7 +1213,7 @@ class TestTrueErrorEndToEnd:
         return model
 
     def test_qsnr_matches_manual_computation(self):
-        """Session true_error QSNR must match manual hook-based computation."""
+        """Session accum QSNR must match manual hook-based computation."""
         from src.session._session import Session
         from src.session._config import QuantConfig
         import math
@@ -1275,16 +1276,16 @@ class TestTrueErrorEndToEnd:
         # Session computation
         session2 = Session(self._make_deterministic_model(), config)
         session2.quantize()
-        session2.analyze(x, outputs=[], true_error=True)
+        session2.analyze(x, outputs=["qsnr"])
 
         # Same layers
-        assert set(session2._qsnr_per_layer.keys()) == set(manual_qsnr.keys())
+        assert set(session2._accum_qsnr_per_layer.keys()) == set(manual_qsnr.keys())
 
         # Values must match within floating-point error
         for name in manual_qsnr:
-            assert abs(session2._qsnr_per_layer[name] - manual_qsnr[name]) < 1e-5, (
+            assert abs(session2._accum_qsnr_per_layer[name] - manual_qsnr[name]) < 1e-5, (
                 f"Mismatch at {name}: "
-                f"session={session2._qsnr_per_layer[name]:.6f} "
+                f"session={session2._accum_qsnr_per_layer[name]:.6f} "
                 f"manual={manual_qsnr[name]:.6f}"
             )
 
@@ -1380,11 +1381,12 @@ class TestTrueErrorEndToEnd:
 
 
 class TestExtractQSNRMSE:
-    """Verify _extract_qsnr_mse role filtering and worst-case selection."""
+    """Verify SessionResult.qsnr_per_role() role filtering and worst-case selection."""
 
     def test_extracts_output_role_only(self):
         """Only output role QSNR is extracted; input/weight are ignored."""
-        from src.session._session import _extract_qsnr_mse
+        from src.session._result import SessionResult
+        from src.session._config import QuantConfig
 
         data = {
             "fc1": {
@@ -1393,12 +1395,14 @@ class TestExtractQSNRMSE:
                 "output": {"stage1": {"s0": {"qsnr_db": 30.0}}},
             },
         }
-        qsnr, mse = _extract_qsnr_mse(data)
+        r = SessionResult(name="test", config=QuantConfig(), observers_data=data)
+        qsnr, mse = r.qsnr_per_role()
         assert qsnr == {"fc1": 30.0}
 
     def test_takes_worst_case_across_stages(self):
         """Minimum QSNR across all stages and slices is used."""
-        from src.session._session import _extract_qsnr_mse
+        from src.session._result import SessionResult
+        from src.session._config import QuantConfig
 
         data = {
             "fc1": {
@@ -1408,12 +1412,14 @@ class TestExtractQSNRMSE:
                 },
             },
         }
-        qsnr, mse = _extract_qsnr_mse(data)
+        r = SessionResult(name="test", config=QuantConfig(), observers_data=data)
+        qsnr, mse = r.qsnr_per_role()
         assert qsnr == {"fc1": 15.0}
 
     def test_nan_values_are_skipped(self):
         """NaN QSNR values are excluded from worst-case selection."""
-        from src.session._session import _extract_qsnr_mse
+        from src.session._result import SessionResult
+        from src.session._config import QuantConfig
 
         data = {
             "fc1": {
@@ -1425,19 +1431,22 @@ class TestExtractQSNRMSE:
                 },
             },
         }
-        qsnr, mse = _extract_qsnr_mse(data)
+        r = SessionResult(name="test", config=QuantConfig(), observers_data=data)
+        qsnr, mse = r.qsnr_per_role()
         assert qsnr == {"fc1": 30.0}
 
     def test_role_not_present_returns_empty(self):
         """If output role is absent, nothing is extracted."""
-        from src.session._session import _extract_qsnr_mse
+        from src.session._result import SessionResult
+        from src.session._config import QuantConfig
 
         data = {
             "fc1": {
                 "input": {"stage1": {"s0": {"qsnr_db": 10.0}}},
             },
         }
-        qsnr, mse = _extract_qsnr_mse(data)
+        r = SessionResult(name="test", config=QuantConfig(), observers_data=data)
+        qsnr, mse = r.qsnr_per_role()
         assert qsnr == {}
 
 

@@ -84,22 +84,21 @@ def main():
         quantize_nonlinear=False,
     )
     session = Session(model, cfg)
-    result = session.run(data, outputs=["qsnr", "mse"], true_error=True)
+    result = session.run(data, outputs=["qsnr", "mse"])
 
     # ── Verify hook / observer keys ──────────────────────────────────
     print(f"\n{minor_sep}")
     print("  Hook vs Observer Keys")
     print(minor_sep)
-    print(f"  Hook keys (accumulated):     {sorted(result.qsnr_per_layer.keys())}")
+    print(f"  Hook keys (accumulated):     {sorted(result.accum_qsnr_per_layer.keys())}")
     print(f"  Observer raw keys:           {sorted(result.observers_data.keys())}")
 
-    # Extract local QSNR (output role)
-    from src.session._session import _extract_qsnr_mse
-    local_qsnr, _ = _extract_qsnr_mse(result.observers_data, role="output")
+    # Extract local QSNR (output role) via public accessor
+    local_qsnr, _ = result.qsnr_per_role(role="output")
     print(f"  Local QSNR keys (output):    {sorted(local_qsnr.keys())}")
 
     # Match observer → hook by prefix
-    hook_keys = set(result.qsnr_per_layer.keys())
+    hook_keys = set(result.accum_qsnr_per_layer.keys())
     all_matched = set()
     observer_only = []
     for ok in sorted(local_qsnr.keys()):
@@ -110,7 +109,7 @@ def main():
                 break
         if matched:
             all_matched.add(ok)
-            print(f"    ✓ {ok:<28} → hook '{matched}'  local={local_qsnr[ok]:.1f}  accum={result.qsnr_per_layer[matched]:.1f}")
+            print(f"    ✓ {ok:<28} → hook '{matched}'  local={local_qsnr[ok]:.1f}  accum={result.accum_qsnr_per_layer[matched]:.1f}")
         else:
             observer_only.append(ok)
             print(f"    ⊙ {ok:<28} → NO hook match  (observer-only)  local={local_qsnr[ok]:.1f}")
@@ -125,10 +124,10 @@ def main():
 
     # ── Build StudyReport & run correlation ──────────────────────────
     print(f"\n{minor_sep}")
-    print("  StudyReport._correlate_hook_observer()")
+    print("  StudyReport.correlate_hook_observer()")
     print(minor_sep)
     report = StudyReport({"test": [result]})
-    corr = report._correlate_hook_observer(role="output")
+    corr = report.correlate_hook_observer(role="output")
 
     for cfg_name, info in corr.items():
         print(f"  Config: {cfg_name}")
@@ -146,6 +145,12 @@ def main():
                 print(f"    {hk:<20} accum={acc:.2f} dB")
 
     # ── Terminal table ───────────────────────────────────────────────
+    print(f"\n{minor_sep}")
+    print("  Terminal Table — result.tables.error_source_analysis()")
+    print(minor_sep)
+    single_table = result.tables.error_source_analysis(role="output")
+    print(single_table)
+
     print(f"\n{minor_sep}")
     print("  Terminal Table — report.tables.error_source_analysis()")
     print(minor_sep)

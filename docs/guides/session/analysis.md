@@ -59,34 +59,40 @@ result = Session(model, cfg).run(calib_data, outputs=["qsnr", "distribution"])
 
 ## 误差传播分析：累积 vs 本地
 
-量化误差有两条独立的测量路径——**累积误差**（`true_error` hook）和**本地误差**（QSNRObserver）。单独看任一条都只能回答「某层现在有多差」；把两条路径关联起来才能回答「某层差是因为自己还是因为上游」。
+量化误差有两条独立的测量路径——**累积误差**（hook）和**本地误差**（QSNRObserver）。单独看任一条都只能回答「某层现在有多差」；把两条路径关联起来才能回答「某层差是因为自己还是因为上游」。
 
 ### 两条路径
 
-| 路径 | 开启方式 | 测量方式 | 每层度量 |
+| 路径 | 存储字段 | 测量方式 | 每层度量 |
 |------|---------|---------|---------|
-| Hook（累积） | `true_error=True` | 量化模型 forward 时，逐层 hook 抓取输出，与 fp32 参考输出计算 QSNR | 从第一层到当前层的**累积误差** |
-| Observer（本地） | `outputs=["qsnr"]`（默认） | 量化算子内部 `_emit()` 事件，比较量化前后 tensor | 仅此层量化引入的**本地误差** |
+| Hook（累积） | `accum_qsnr_per_layer` | 量化模型 forward 时，逐层 hook 抓取输出，与 fp32 参考输出计算 QSNR | 从第一层到当前层的**累积误差** |
+| Observer（本地） | `qsnr_per_layer` | 量化算子内部 `_emit()` 事件，比较量化前后 tensor | 仅此层量化引入的**本地误差** |
+
+两条路径在 `"qsnr"` observer 启用时（默认）**同时采集**，分别存入独立字段，不再需要用 `true_error` 参数切换。
 
 **关键不等式**：Observer 覆盖范围 ⊃ Hook 覆盖范围（`hook ⊂ observer`）。Hook 只覆盖 `_MODULE_MAPPING` 中的模块（Linear/Conv/Norm/...），Observer 额外覆盖 patched inline ops（如 `torch.matmul`、`torch.add`），可捕获未被 hook 覆盖的自定义模块。
 
 ### 启用累积误差
 
+无需额外参数——当 `"qsnr"` 在 outputs 中时（默认），两条路径自动同时采集：
+
 ```python
-# true_error=True 同时启用两条路径
 result = Session(model, cfg).run(
-    calib_data, outputs=["qsnr", "mse"], true_error=True,
+    calib_data,
+    # outputs=["qsnr"] 是默认值，无需显式指定
 )
 
 # 累积 QSNR（hook 数据）
-print(result.qsnr_per_layer)
+print(result.accum_qsnr_per_layer)
 # {"embedding": 33.8, "layers.0.ffn.2": 27.7, "output": 27.8, ...}
 
-# 本地 QSNR（observer 数据，只取 output role）
-from src.session._session import _extract_qsnr_mse
-local_qsnr, _ = _extract_qsnr_mse(result.observers_data, role="output")
-print(local_qsnr)
+# 本地 QSNR（observer 数据，仅 output role）
+print(result.qsnr_per_layer)
 # {"embedding": 55.5, "layers.0.self_attn.matmul": 55.4, ...}
+
+# 按其他 role 提取本地 QSNR
+local_weight, _ = result.qsnr_per_role(role="weight")
+local_input, _ = result.qsnr_per_role(role="input")
 ```
 
 **实现细节**：
@@ -97,20 +103,32 @@ print(local_qsnr)
 ### 关联分析
 
 ```python
+# 直接从 SessionResult 获取关联数据（推荐）
+corr = result.correlate_hook_observer(role="output")
+# 返回 {"matched": [...], "observer_only": [...], "hook_only": [...]}
+
+for hk, accum, local in corr["matched"]:
+    headroom = local - accum  # 越大 = 越可能是传播
+    print(f"{hk}: accum={accum:.1f}  local={local:.1f}  headroom={headroom:+.1f}")
+
+# 多配置对比时，通过 StudyReport 聚合：
 from src.report._study_report import StudyReport
 
 report = StudyReport({"my_config": [result]})
-
-# _correlate_hook_observer() 提取 hook/observer 对应关系
-corr = report._correlate_hook_observer(role="output")
-# 返回 {"my_config": {"matched": [...], "observer_only": [...], "hook_only": [...]}}
-
-for hk, accum, local in corr["my_config"]["matched"]:
-    headroom = local - accum  # 越大 = 越可能是传播
-    print(f"{hk}: accum={accum:.1f}  local={local:.1f}  headroom={headroom:+.1f}")
+corr_all = report.correlate_hook_observer(role="output")
+# 返回 {"my_config": {"matched": [...], ...}}
 ```
 
 ### 诊断表
+
+单结果模式下，直接从 SessionResult 输出诊断表：
+
+```python
+# 单结果：直接使用 result.tables
+print(result.tables.error_source_analysis(role="output"))
+```
+
+多配置对比时，使用 StudyReport 的 tables accessor：
 
 ```python
 print(report.tables.error_source_analysis(role="output"))
@@ -224,7 +242,7 @@ report = ctx.report()
 
 ## 分布分析与误差关联
 
-拿到 observer 数据后，可以对分布指纹做聚合分析：
+拿到 observer 数据后，可以对分布指纹做聚合分析。单结果模式通过 `result.report()` 获取 `AnalysisReport`，独立模式通过 `ctx.report()`：
 
 ```python
 from src.analysis.correlation import (
@@ -234,18 +252,24 @@ from src.analysis.correlation import (
     LayerSensitivity,
 )
 
+# SessionResult 模式（推荐）
+report = result.report()
+
+# 独立 AnalysisContext 模式
+# report = ctx.report()
+
 # 从报吿构建分布画像
-profile = DistributionProfile.from_report(ctx.report())
+profile = DistributionProfile.from_report(report)
 profile.print_profile()
 
 # 自动将层分类到 8 种分布类型
-taxonomy = DistributionTaxonomy.from_report(ctx.report())
+taxonomy = DistributionTaxonomy.from_report(report)
 taxonomy.print_taxonomy()
 taxonomy.print_taxonomy(ascii_plots=True)          # ASCII 分布图
 exemplars = taxonomy.get_exemplars("heavy-tailed", n=3)
 
 # 找出误差最大的层
-eb = ErrorByDistribution(ctx.report())
+eb = ErrorByDistribution(report)
 for layer, role, qsnr in eb.rank_layers(by="qsnr_db", k=5, ascending=True):
     print(f"{layer}/{role}: {qsnr:.1f} dB")
 
@@ -255,7 +279,7 @@ for name, info in groups.items():
     print(f"{name}: avg_qsnr={info['avg_qsnr']:.1f} dB, {info['verdict']}")
 
 # 最敏感的层
-sens = LayerSensitivity(ctx.report())
+sens = LayerSensitivity(report)
 for layer, role, mse in sens.topk(k=5, metric="mse"):
     print(f"{layer}/{role}: MSE={mse:.6f}")
 ```

@@ -58,8 +58,8 @@ results/
 | `correlation_heatmap()` | `"distribution"` + `"qsnr"` | — |
 | `cost_decomposition()` | — | cost 已执行 |
 | `role_distribution_comparison()` | `"distribution"` | — |
-| `error_propagation(role)` | `"qsnr"` | `true_error=True`（需 hook + observer 数据） |
-| `accumulated_vs_local(role)` | `"qsnr"` | `true_error=True`（需 hook + observer 数据） |
+| `error_propagation(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认，需 hook + observer 数据） |
+| `accumulated_vs_local(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认，需 hook + observer 数据） |
 
 不满足时抛出 `ValueError` 并说明缺少的 observer 或步骤。
 
@@ -205,8 +205,8 @@ report = Study(configs, model=model).run(
 | `"fit"` | DistributionFitObserver | distribution_fit table（需 `scipy`） |
 | `"accuracy"` | — （无 observer） | accuracy table（需 `eval_fn`） |
 | `"cost"` | — （无 observer） | pareto_frontier, cost_decomposition（需 `needs_cost=True`） |
-| `"error_propagation"` | —（需 `true_error=True`） | error_propagation, accumulated_vs_local |
-| `"error_source"` | —（需 `true_error=True`） | error_source_analysis table |
+| `"error_propagation"` | `"qsnr"`（默认） | error_propagation, accumulated_vs_local |
+| `"error_source"` | `"qsnr"`（默认） | error_source_analysis table |
 
 ---
 
@@ -240,7 +240,7 @@ g.map_dataframe(sns.scatterplot, x="crest_factor", y="qsnr_db")
 
 ## 误差传播分析（P3.4）
 
-需要同时启用 `true_error=True`（累积 QSNR）和 `"qsnr"` observer（本地 QSNR）。详见 [误差分析](analysis.md#误差传播分析累积-vs-本地)。
+需要 `"qsnr"` observer（默认启用）和 `keep_fp32=True`（默认），两条路径自动同时采集。详见 [误差分析](analysis.md#误差传播分析累积-vs-本地)。
 
 ### 误差传播面板 `error_propagation(role)` <small>P3.4</small>
 
@@ -254,7 +254,7 @@ fig = report.plot.error_propagation(role="output")
 - **Row 2**：δ-QSNR 柱状图 — `acc[i-1] − acc[i]`，正值表示该层引入的增量误差
 - **Row 3**：Headroom 柱状图 — `local − accumulated`，按诊断阈值着色（绿=Source / 橙=Mixed / 红=Propagated）
 
-**所需 observer**: `"qsnr"` + `true_error=True`
+**所需 observer**: `"qsnr"`（默认启用）+ `keep_fp32=True`（默认）
 
 ---
 
@@ -270,7 +270,7 @@ fig = report.plot.accumulated_vs_local(role="output")
 - y=x 对角线：在线上 = Source（本地误差主导），高于线 = Propagated（累积误差主导）
 - 自动标注 outlier（headroom > 15 dB 或 < 3 dB）
 
-**所需 observer**: `"qsnr"` + `true_error=True`
+**所需 observer**: `"qsnr"`（默认启用）+ `keep_fp32=True`（默认）
 
 ---
 
