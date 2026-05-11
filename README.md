@@ -25,9 +25,10 @@ def eval_fn(m, data):
 result = Session(model, QuantConfig(name="int8", w_format="int8")).run(
     calib_data, eval_fn=eval_fn)
 
-print(result.summary())            # 一行摘要
-print(result.accuracy_table())     # 精度对比表
-for name, qsnr in result.top_k_qsnr(3):
+print(result.summary())                  # local QSNR（逐 op）
+print(result.summary(qsnr_type="accum"))  # accumulated QSNR（端到端）
+print(result.accuracy_table())            # FP32/Quant/Δ 精度对比表
+for name, qsnr in result.top_k_qsnr(3, qsnr_type="accum"):
     print(f"  {name}: {qsnr:.1f} dB")
 
 # 换个格式只需改一个字符串
@@ -36,81 +37,13 @@ cfg = QuantConfig(name="fp4-mx", w_format="fp4_e2m1", w_granularity="per_block",
                   a_block_size=32)
 result2 = Session(model, cfg).run(calib_data, eval_fn=eval_fn)
 print(result2.summary())
-```
 
-## 按 Role 查看 QSNR
-
-`result.qsnr_per_layer` 默认提取 **output** role 的 QSNR——它能跨层横向对比并追踪累积误差传播。input QSNR 在第一层之后是「已量化数据再量化」（虚高），weight QSNR 是静态的与深度无关。
-
-如需按其他 role 查看：
-
-```python
-# 按 role 提取 QSNR（无需导入私有函数）
-qsnr_out, _ = result.qsnr_per_role(role="output")
-qsnr_w, _ = result.qsnr_per_role(role="weight")
-qsnr_in, _ = result.qsnr_per_role(role="input")
-```
-
-## 误差传播分析：累积 vs 本地
-
-量化误差有两套独立的测量路径，结合使用可分辨某层误差是**自己量化引入的（Source）**还是**前层传播过来的（Propagated）**：
-
-| 测量路径 | 数据来源 | 度量含义 | 覆盖范围 |
-|---------|---------|---------|---------|
-| **累积误差**（Hook） | 自动启用（当 `"qsnr"` observer 激活时），逐层对比 fp32 vs quant output | 从第一层累加到此层的总误差 | `_MODULE_MAPPING` 中的模块（Linear/Conv/Norm/...） |
-| **本地误差**（Observer） | QSNRObserver，在量化算子内部 `_emit` 事件 | 仅此层本次量化引入的误差 | 同上 + patched inline ops（`torch.matmul` 等） |
-
-Observer 覆盖范围 > Hook（`hook ⊂ observer`），因此可发现未被 hook 覆盖的自定义模块（如 attention 中的 `torch.matmul`）。
-
-```python
-from src.session import Session, QuantConfig
-
-# 累积 + 本地两条路径自动同时采集（outputs 默认含 "qsnr"）
-result = Session(model, cfg).run(calib_data)
-
-# 累积 QSNR（hook，逐层对比 fp32 参考输出）
-print(result.accum_qsnr_per_layer)   # {"0": 33.9, "2": 34.0, "3": 31.5}
-
-# 本地 QSNR（observer，量化算子内部测量）
-print(result.qsnr_per_layer)         # {"0": 55.4, "1.matmul": 55.4, "2": 314.0, "3": 57.0}
-
-# 按 role 提取本地 QSNR
-local_qsnr, _ = result.qsnr_per_role(role="output")
-```
-
-### 诊断表与可视化
-
-```python
-from src.report._study_report import StudyReport
-
-report = StudyReport({"my_config": [result]})
-
-# 单结果：直接从 result.tables 输出
-print(result.tables.error_source_analysis(role="output"))
-
-# 多配置对比：从 report.tables 输出
-print(report.tables.error_source_analysis(role="output"))
-
-# 三行面板图：分组柱状图 + δ-QSNR + Headroom 诊断
-report.plot.error_propagation(role="output")
-
-# 散点图：Accumulated vs Local QSNR，y=x 对角线区分 Source vs Propagated
-report.plot.accumulated_vs_local(role="output")
-
-# 一键导出所有图表和 CSV
-report.save("output/")
-```
-
-**诊断规则**（Headroom = Local − Accumulated）：
-- ≤ 3 dB → **Source**：该层是主要误差来源
-- 3–10 dB → **Mixed**：部分自产，部分传播
-- \> 10 dB → **Propagated**：误差主要来自前层累积
-
-### 演示脚本
-
-```bash
-python scripts/test_error_propagation.py          # 4 层简单模型，含 observer-only CustomMatMul
-python scripts/test_transformer_error_propagation.py  # 4 层 Transformer Encoder
+# 多 config 对比：Study 统一 DataFrame，含 FP32 基线
+from src.session import Study
+study = Study([cfg, cfg2], model=model)
+report = study.run(calib_data, eval_fn=eval_fn)
+report.print_summary()                    # 所有 config 一张表，含 fp32_*/delta_* 列
+report.print_summary(qsnr_type="accum")   # 切换为端到端累积 QSNR
 ```
 
 ## 文档导航
