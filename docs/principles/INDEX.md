@@ -4,6 +4,7 @@
 
 | 文件 | 内容 | 何时读 |
 |------|------|--------|
+| [testing-layer.md](testing-layer.md) | 测试层级：最终回归高层 API（Session/Study） | 写任何测试前 |
 | [tdd.md](tdd.md) | TDD 流程：先写失败测试 → 实现 → 通过 | 实现任何代码前 |
 | [review-gate.md](review-gate.md) | Review agent 门：检查清单 + 派遣模板 | 每个子任务完成后 |
 | [math-verification.md](math-verification.md) | 数学验证：先推导，后验证 | 涉及量化数值正确性时 |

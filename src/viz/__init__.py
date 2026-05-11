@@ -9,6 +9,7 @@ from src.viz.figures import (
     transform_delta,
     error_vs_distribution,
     layer_type_qsnr,
+    per_layer_role_histogram,
     _get_acc_val,
 )
 from src.viz.figures import save_figure
@@ -36,6 +37,7 @@ __all__ = [
     "transform_delta",
     "error_vs_distribution",
     "layer_type_qsnr",
+    "per_layer_role_histogram",
     "_compute_best_transform_per_layer",
     "_get_acc_val",
 ]

@@ -94,8 +94,9 @@ x_q = quantize(x, scheme)
 | 新增量化格式 | `docs/standards/adding-format.md` → `docs/architecture/001-*.md` |
 | 新增 Observer | `docs/standards/adding-observer.md` → `docs/architecture/002-*.md` |
 | 新增 Transform | `docs/standards/adding-transform.md` → `docs/architecture/001-*.md` |
-| 写量化测试用例 | `docs/standards/quantization-testing.md` → `docs/verification/README.md` |
+| 写量化测试用例 | `docs/principles/testing-layer.md` → `docs/standards/quantization-testing.md` → `docs/verification/README.md` |
 | 涉及数学正确性 | `docs/principles/math-verification.md` — 先推导，后验证 |
+| 新增可视化/表格 | `docs/standards/role-aware-visualization.md` — role 区分规范 |
 | 新增公共 API | `docs/standards/api-design.md` |
 | 子任务做完了，准备收尾 | `docs/principles/review-gate.md` → `docs/workflow/subtask-lifecycle.md` |
 | 提交代码 | `docs/workflow/branching-commits.md` |

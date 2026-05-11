@@ -63,6 +63,13 @@
 |------|------|
 | [2026-05-07-session-refactor.md](2026-05-07-session-refactor.md) | Session 统一入口 + Output-Driven 实施计划 |
 
+## True Error 累积误差
+
+| 文件 | 内容 |
+|------|------|
+| [2026-05-10-true-error-accumulation.md](2026-05-10-true-error-accumulation.md) | True Error v1: hook + observer 混合方案（已废弃，见下方统一方案） |
+| [2026-05-10-unified-stash-true-error.md](2026-05-10-unified-stash-true-error.md) | True Error v2: 统一 Stash 双树方案（当前方案） |
+
 ## 其他
 
 | 文件 | 内容 |

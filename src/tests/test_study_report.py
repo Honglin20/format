@@ -331,9 +331,7 @@ class TestStudyReport:
             figures_dir = os.path.join(tmpdir, "figures")
             assert os.path.isdir(figures_dir)
             assert os.path.isfile(os.path.join(figures_dir, "qsnr_comparison.png"))
-            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr_input.png"))
-            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr_weight.png"))
-            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr_output.png"))
+            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr.png"))
 
     def test_save_empty_results(self):
         report = StudyReport({})
@@ -416,62 +414,62 @@ class TestStudyReport:
 
     def test_crest_vs_qsnr_smoke(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
-        fig = report.plot.crest_vs_qsnr(role="input")
+        fig = report.plot.crest_vs_qsnr(roles=("input",))
         assert fig is not None
 
     def test_crest_vs_qsnr_no_crest_data(self, mock_result_a):
         report = StudyReport({"p1": [mock_result_a]})
         with pytest.raises(ValueError, match="Crest factor data not available"):
-            report.plot.crest_vs_qsnr(role="input")
+            report.plot.crest_vs_qsnr(roles=("input",))
 
     def test_crest_vs_qsnr_invalid_role(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
         with pytest.raises(ValueError, match="Invalid role"):
-            report.plot.crest_vs_qsnr(role="grad_output")
+            report.plot.crest_vs_qsnr(roles=("grad_output",))
 
     def test_crest_vs_qsnr_valid_role_no_data(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
         with pytest.raises(ValueError, match="No data for role"):
-            report.plot.crest_vs_qsnr(role="bias")
+            report.plot.crest_vs_qsnr(roles=("bias",))
 
     # ── P0.1: outlier_analysis ────────────────────────────────────────
 
     def test_outlier_analysis_smoke(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
-        fig = report.plot.outlier_analysis(role="input")
+        fig = report.plot.outlier_analysis(roles=("input",))
         assert fig is not None
 
     def test_outlier_analysis_no_outlier_data(self, mock_result_a):
         report = StudyReport({"p1": [mock_result_a]})
         with pytest.raises(ValueError, match="Outlier ratio data not available"):
-            report.plot.outlier_analysis(role="input")
+            report.plot.outlier_analysis(roles=("input",))
 
     def test_outlier_analysis_invalid_role(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
         with pytest.raises(ValueError, match="Invalid role"):
-            report.plot.outlier_analysis(role="grad_input")
+            report.plot.outlier_analysis(roles=("grad_input",))
 
     def test_outlier_analysis_role_no_data(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
         with pytest.raises(ValueError, match="No data for role"):
-            report.plot.outlier_analysis(role="bias")
+            report.plot.outlier_analysis(roles=("bias",))
 
     # ── P0.2: per_block_qsnr ─────────────────────────────────────────
 
     def test_per_block_qsnr_smoke(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
-        fig = report.plot.per_block_qsnr(role="input")
+        fig = report.plot.per_block_qsnr(roles=("input",))
         assert fig is not None
 
     def test_per_block_qsnr_no_stats(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
         with pytest.raises(ValueError, match="Per-block QSNR statistics not available"):
-            report.plot.per_block_qsnr(role="input")
+            report.plot.per_block_qsnr(roles=("input",))
 
     def test_per_block_qsnr_invalid_role(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
         with pytest.raises(ValueError, match="Invalid role"):
-            report.plot.per_block_qsnr(role="grad_output")
+            report.plot.per_block_qsnr(roles=("grad_output",))
 
     # ── P0.4: pareto_frontier ────────────────────────────────────────
 
@@ -552,8 +550,8 @@ class TestStudyReport:
             # Core figures
             assert os.path.isfile(os.path.join(figures_dir, "qsnr_comparison.png"))
             # New figures
-            assert os.path.isfile(os.path.join(figures_dir, "outlier_input.png"))
-            assert os.path.isfile(os.path.join(figures_dir, "per_block_qsnr_input.png"))
+            assert os.path.isfile(os.path.join(figures_dir, "outlier_analysis.png"))
+            assert os.path.isfile(os.path.join(figures_dir, "per_block_qsnr.png"))
             assert os.path.isfile(os.path.join(figures_dir, "correlation_heatmap.png"))
             assert os.path.isfile(os.path.join(figures_dir, "role_distribution.png"))
             # cost figures should not exist (no cost data)

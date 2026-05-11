@@ -36,6 +36,19 @@ _ctx_state: contextvars.ContextVar[Optional[_CtxState]] = contextvars.ContextVar
 )
 
 
+# Observer-only mode: lightweight state for inline-op observer tracking during
+# analysis.  When set, patched torch/F ops emit observer events WITHOUT
+# re-quantizing — they use the original function and record the result.
+@dataclass
+class _ObserverState:
+    observers: List = field(default_factory=list)
+
+
+_observer_state: contextvars.ContextVar[Optional[_ObserverState]] = (
+    contextvars.ContextVar("observer_state", default=None)
+)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Module stack (was: _stack.py)
 # ══════════════════════════════════════════════════════════════════════════════

@@ -92,6 +92,13 @@ class LinearFunction(torch.autograd.Function):
         if cfg.storage is not None:
             fp_y = y; y = quantize(y, cfg.storage)
             if emit_fn: emit_fn("output", 0, "output_post_quant", fp_y, y, cfg.storage)
+        elif emit_fn is not None:
+            # Emit output event even without storage so observers register
+            # this layer. Use the first available output/input scheme so the
+            # event is not silently dropped.
+            _out_scheme = cfg.output or cfg.input or cfg.weight
+            if _out_scheme is not None:
+                emit_fn("output", 0, "output_post_quant", y, y, _out_scheme)
 
         # bias add + output step 2 (post-bias): storage
         if q_bias is not None:

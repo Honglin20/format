@@ -27,5 +27,5 @@
 
 ## 已知测试状态
 
-`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 2,093 passed
+`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 2,496 passed
 `test_golden_equiv.py` 有 26 个预存在失败（golden data `.pt` 文件未 staging）

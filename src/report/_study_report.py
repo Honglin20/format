@@ -88,8 +88,9 @@ class StudyReport:
                             all_keys.update(m.keys())
                         for key in sorted(all_keys):
                             values = [m[key] for m in all_metrics if key in m]
-                            if values:
-                                row[key] = sum(values) / len(values)
+                            numeric = [v for v in values if isinstance(v, (int, float))]
+                            if numeric:
+                                row[key] = sum(numeric) / len(numeric)
 
                         rows.append(row)
 
@@ -127,6 +128,83 @@ class StudyReport:
         from src.report._tables import StudyTablesAccessor
 
         return StudyTablesAccessor(self)
+
+    # ── _correlate_hook_observer ──────────────────────────────────────────
+
+    def _correlate_hook_observer(self, role: str = "output") -> dict:
+        """Correlate accumulated (hook) QSNR with local (observer) QSNR.
+
+        For each SessionResult, extracts accumulated QSNR from
+        ``qsnr_per_layer`` (true_error hook path) and local QSNR from
+        ``observers_data`` (QSNRObserver path) via ``_extract_qsnr_mse``.
+        Matches observer keys to hook keys by prefix.
+
+        Args:
+            role: Tensor role for observer data (default ``"output"``).
+
+        Returns:
+            ``{config_name: {"matched": [...], "observer_only": [...],
+            "hook_only": [...]}}`` where each matched entry is
+            ``(hook_key, accumulated_qsnr, local_qsnr)``.
+            Returns empty dict if no correlation data is available.
+        """
+        from src.session._session import _extract_qsnr_mse
+
+        result: dict = {}
+        for part_results in self._results.values():
+            for r in part_results:
+                cfg_name = r.name or "(unnamed)"
+
+                accum = r.qsnr_per_layer
+                if not accum:
+                    continue
+                if not r.observers_data:
+                    continue
+
+                local, _ = _extract_qsnr_mse(r.observers_data, role=role)
+                if not local:
+                    continue
+
+                hook_keys = set(accum.keys())
+
+                # Group observer keys by matching hook key
+                obs_by_hook: dict = {}
+                unmatched_obs: list = []
+
+                for obs_key, local_qsnr in sorted(local.items()):
+                    matched = None
+                    for hk in hook_keys:
+                        if obs_key == hk or obs_key.startswith(hk + "."):
+                            matched = hk
+                            break
+                    if matched:
+                        obs_by_hook.setdefault(matched, []).append(
+                            (obs_key, local_qsnr)
+                        )
+                    else:
+                        unmatched_obs.append((obs_key, local_qsnr))
+
+                # Build matched list: for each hook key, take min local QSNR
+                matched_list = []
+                for hk in sorted(hook_keys):
+                    if hk in obs_by_hook:
+                        min_local = min(v for _, v in obs_by_hook[hk])
+                        matched_list.append((hk, accum[hk], min_local))
+
+                matched_hks = set(hk for hk, _, _ in matched_list)
+                hook_only_list = [
+                    (hk, accum[hk])
+                    for hk in sorted(hook_keys)
+                    if hk not in matched_hks
+                ]
+
+                result[cfg_name] = {
+                    "matched": matched_list,
+                    "observer_only": unmatched_obs,
+                    "hook_only": hook_only_list,
+                }
+
+        return result
 
     # ── _avg_qsnr_mse ────────────────────────────────────────────────────
 
@@ -202,12 +280,15 @@ class StudyReport:
         Produces (conditionally, based on available data):
         - ``tables/accuracy.csv`` — per-config accuracy comparison
         - ``figures/qsnr_comparison.png`` — per-layer QSNR overlay
-        - ``figures/crest_vs_qsnr_<role>.png`` — crest factor vs QSNR
-        - ``figures/outlier_<role>.png`` — outlier analysis (distribution)
-        - ``figures/per_block_qsnr_<role>.png`` — per-block QSNR stats
+        - ``figures/crest_vs_qsnr.png`` — crest factor vs QSNR by role
+        - ``figures/outlier_analysis.png`` — outlier analysis by role
+        - ``figures/per_block_qsnr.png`` — per-block QSNR stats by role
         - ``figures/correlation_heatmap.png`` — feature correlation matrix
         - ``figures/role_distribution.png`` — per-role distribution comparison
         - ``figures/pareto_qsnr.png`` / ``pareto_accuracy.png`` — Pareto frontier
+        - ``figures/error_propagation.png`` — accumulated vs local QSNR decomposition
+        - ``figures/accumulated_vs_local.png`` — scatter: accumulated vs local QSNR
+        - ``tables/error_source.txt`` — per-layer error source diagnosis
         - ``figures/cost_decomposition.png`` — cost FLOPs breakdown
         - ``results.json`` — full serialized results
         """
@@ -249,36 +330,33 @@ class StudyReport:
 
         # ── Crest factor vs QSNR figure ──────────────────────────────
         if df is not None and not df.empty and "crest_factor" in df.columns:
-            for role in ("input", "weight", "output"):
-                try:
-                    fig = self.plot.crest_vs_qsnr(role=role)
-                    fig.savefig(f"{output_dir}/figures/crest_vs_qsnr_{role}.png",
-                                dpi=300, bbox_inches="tight")
-                    plt.close(fig)
-                except Exception as e:
-                    print(f"  Warning: crest_vs_qsnr({role}) failed: {e}")
+            try:
+                fig = self.plot.crest_vs_qsnr()
+                fig.savefig(f"{output_dir}/figures/crest_vs_qsnr.png",
+                            dpi=300, bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"  Warning: crest_vs_qsnr failed: {e}")
 
         # ── Outlier analysis figure ──────────────────────────────────
         if df is not None and not df.empty and "outlier_ratio" in df.columns:
-            for role in ("input", "weight", "output"):
-                try:
-                    fig = self.plot.outlier_analysis(role=role)
-                    fig.savefig(f"{output_dir}/figures/outlier_{role}.png",
-                                dpi=300, bbox_inches="tight")
-                    plt.close(fig)
-                except Exception as e:
-                    print(f"  Warning: outlier_analysis({role}) failed: {e}")
+            try:
+                fig = self.plot.outlier_analysis()
+                fig.savefig(f"{output_dir}/figures/outlier_analysis.png",
+                            dpi=300, bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"  Warning: outlier_analysis failed: {e}")
 
         # ── Per-block QSNR figure ────────────────────────────────────
         if df is not None and not df.empty and "qsnr_db_std" in df.columns:
-            for role in ("input", "weight", "output"):
-                try:
-                    fig = self.plot.per_block_qsnr(role=role)
-                    fig.savefig(f"{output_dir}/figures/per_block_qsnr_{role}.png",
-                                dpi=300, bbox_inches="tight")
-                    plt.close(fig)
-                except Exception as e:
-                    print(f"  Warning: per_block_qsnr({role}) failed: {e}")
+            try:
+                fig = self.plot.per_block_qsnr()
+                fig.savefig(f"{output_dir}/figures/per_block_qsnr.png",
+                            dpi=300, bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"  Warning: per_block_qsnr failed: {e}")
 
         # ── Correlation heatmap ──────────────────────────────────────
         if df is not None and not df.empty and "skewness" in df.columns:
@@ -299,6 +377,16 @@ class StudyReport:
                 plt.close(fig)
             except Exception as e:
                 print(f"  Warning: role_distribution_comparison failed: {e}")
+
+        # ── Per-layer role distribution histograms ───────────────────
+        if self._results:  # uses raw observer buffers, not dataframe
+            try:
+                fig = self.plot.per_layer_role_histogram(k=5)
+                fig.savefig(f"{output_dir}/figures/per_layer_role_histogram.png",
+                            dpi=300, bbox_inches="tight")
+                plt.close(fig)
+            except Exception as e:
+                print(f"  Warning: per_layer_role_histogram failed: {e}")
 
         # ── Pareto frontier ──────────────────────────────────────────
         any_cost = any(
@@ -325,6 +413,42 @@ class StudyReport:
                 plt.close(fig)
             except Exception as e:
                 print(f"  Warning: cost_decomposition failed: {e}")
+
+        # ── Error propagation figures ────────────────────────────────
+        corr = self._correlate_hook_observer()
+        any_corr = any(
+            bool(info["matched"]) for info in corr.values()
+        )
+        if any_corr:
+            for fig_name, fig_method in [
+                ("error_propagation", self.plot.error_propagation),
+                ("accumulated_vs_local", self.plot.accumulated_vs_local),
+            ]:
+                try:
+                    fig = fig_method()
+                    fig.savefig(
+                        f"{output_dir}/figures/{fig_name}.png",
+                        dpi=300, bbox_inches="tight",
+                    )
+                    plt.close(fig)
+                    print(f"  {fig_name}.png: saved")
+                except Exception as e:
+                    print(f"  Warning: {fig_name} failed: {e}")
+
+            # Error source table
+            try:
+                table_text = self.tables.error_source_analysis()
+                if table_text and "No " not in table_text[:30]:
+                    with open(
+                        f"{output_dir}/tables/error_source.txt", "w"
+                    ) as f:
+                        f.write(table_text)
+                    print(
+                        "  error_source.txt: saved to "
+                        f"{output_dir}/tables/error_source.txt"
+                    )
+            except Exception as e:
+                print(f"  Warning: error_source_analysis failed: {e}")
 
         # ── results.json ─────────────────────────────────────────────
         with open(f"{output_dir}/results.json", "w") as f:

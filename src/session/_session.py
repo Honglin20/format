@@ -44,7 +44,7 @@ from src.calibration.strategies import (
 from src.ops.conv import QuantizedConv2d
 from src.ops.linear import QuantizedLinear
 from src.quantize import quantize as _quantize_fn
-from src.scheme.op_config import OpQuantConfig
+from src.scheme.op_config import OpQuantConfig, cfg_causes_quantization
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.transform import IdentityTransform
 from src.session._config import QuantConfig
@@ -542,7 +542,7 @@ class Session:
     # Step 1: Quantize
     # ------------------------------------------------------------------
 
-    def quantize(self, *, calib_data=None) -> "Session":
+    def quantize(self, *, calib_data=None, eval_fn=None) -> "Session":
         """Build the quantized model. Must be called first.
 
         After this method returns, ``session.qmodel`` is available for
@@ -552,6 +552,8 @@ class Session:
             calib_data: Calibration data. Required when ``transform`` is
                 ``"smoothquant"`` or ``"prescale"``. Not needed for other
                 transforms or MX per_block formats.
+            eval_fn: Optional ``(model, data) -> Any`` for custom model
+                interaction during SmoothQuant calibration.
 
         Raises:
             ValueError: If ``calib_data`` is ``None`` but the transform
@@ -571,6 +573,7 @@ class Session:
                 self._model,
                 calib_data,
                 alpha=self._config.sq_alpha,
+                eval_fn=eval_fn,
             )
             model = fuse_smoothquant_weights(self._model, self._sq_transforms)
         else:
@@ -624,6 +627,7 @@ class Session:
                 init=self._config.prescale_init,
                 pot=self._config.prescale_pot,
                 granularity=self._config.prescale_granularity,
+                eval_fn=eval_fn,
             )
             if self._config.lsq_steps > 0:
                 from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
@@ -632,7 +636,7 @@ class Session:
                     num_steps=self._config.lsq_steps,
                     lr=self._config.lsq_lr,
                 )
-                self._quant_session.optimize_scales(opt, calib_data)
+                self._quant_session.optimize_scales(opt, calib_data, eval_fn=eval_fn)
 
         return self
 
@@ -693,15 +697,22 @@ class Session:
         *,
         outputs: Union[str, List[str]] = "default",
         eval_fn: Optional[Callable] = None,
+        true_error: bool = False,
     ) -> "Session":
-        """Run error analysis with observers on the quantized model.
+        """Run error analysis on the quantized model.
 
         Args:
             calib_data: Data to run through the model for analysis.
             outputs: Output keys — ``"default"``, ``"all"``, or a list of
                 specific keys (``"qsnr"``, ``"mse"``, ``"histogram"``, ...).
             eval_fn: Optional ``(model, data) -> Any`` for custom model
-                interaction.
+                interaction.  When provided it is **always** used for every
+                forward pass — ``model(batch)`` is never called directly.
+            true_error: If True and ``keep_fp32=True``, compute true
+                accumulated per-layer QSNR by comparing each quantized
+                module's output against the pure fp32 reference output
+                (captured by a separate fp32 forward pass).  This replaces
+                the default local (pre-quant vs post-quant) QSNR.
 
         Raises:
             RuntimeError: If ``.quantize()`` has not been called yet.
@@ -709,22 +720,153 @@ class Session:
         if self._quant_session is None:
             raise RuntimeError("Call .quantize() first")
 
+        import math
+        from collections import defaultdict
+
         from src.report._spec import resolve_outputs as _resolve_outputs
 
         observer_keys, _needs_eval, _needs_cost = _resolve_outputs(outputs)
         observer_keys_set = set(observer_keys)
 
-        if not observer_keys_set:
+        can_true = (
+            true_error
+            and self._keep_fp32
+            and self._quant_session.fp32_model is not None
+        )
+
+        if not observer_keys_set and not can_true:
             return self
 
-        observers = [_OBSERVER_MAP[k]() for k in sorted(observer_keys_set)]
+        observers = [_OBSERVER_MAP[k]() for k in sorted(observer_keys_set)] if observer_keys_set else []
 
-        with self._quant_session.analyze(observers=observers) as ctx:
-            _run_model(self._quant_session, calib_data, eval_fn)
+        # ── True-error path ──────────────────────────────────────────
+        if can_true:
+            qmodel = self._quant_session.qmodel
+            fp32_model = self._quant_session.fp32_model
 
-        report = ctx.report()
-        self._observers_data = report._raw
-        self._qsnr_per_layer, self._mse_per_layer = _extract_qsnr_mse(self._observers_data)
+            # Only include modules whose config actually triggers
+            # quantization.  Modules with an empty / all-None config
+            # produce bit-exact fp32 output and would inflate QSNR.
+            quant_names = [
+                name for name, mod in qmodel.named_modules()
+                if hasattr(mod, "cfg") and cfg_causes_quantization(mod.cfg)
+            ]
+
+            fp32_name_to_mod = dict(fp32_model.named_modules())
+            qname_to_mod = dict(qmodel.named_modules())
+
+            # Multi-batch: when *eval_fn* is None and *calib_data* is a
+            # list of tensors we control the loop ourselves so every
+            # batch contributes to the accumulated statistics.  With an
+            # *eval_fn* the user owns the loop — we make a single pass
+            # and aggregate whatever the hooks see.
+            multi_batch = (
+                eval_fn is None
+                and isinstance(calib_data, (list, tuple))
+            )
+            batches = list(calib_data) if multi_batch else [calib_data]
+
+            accum_signal: dict = defaultdict(float)
+            accum_error: dict = defaultdict(float)
+            accum_count: dict = defaultdict(int)
+
+            # If observers were requested they ride on the quant forward
+            # pass(es).  Wrap the whole loop so observer aggregates see
+            # all batches.
+            obs_ctx = (
+                self._quant_session.analyze(observers=observers)
+                if observers else None
+            )
+            if obs_ctx is not None:
+                obs_ctx.__enter__()
+
+            try:
+                for batch in batches:
+                    # -- fp32 reference forward -----------------------
+                    fp32_refs: Dict[str, torch.Tensor] = {}
+                    fp32_hooks = []
+                    for name in quant_names:
+                        mod = fp32_name_to_mod.get(name)
+                        if mod is None:
+                            continue
+                        def _fp32_hook(_m, _inp, out, n=name):
+                            fp32_refs[n] = out.detach()
+                        fp32_hooks.append(
+                            mod.register_forward_hook(_fp32_hook))
+
+                    with torch.no_grad():
+                        if eval_fn is not None:
+                            eval_fn(fp32_model, batch)
+                        else:
+                            fp32_model(batch)
+                    for h in fp32_hooks:
+                        h.remove()
+
+                    # -- quant forward --------------------------------
+                    quant_outs: Dict[str, torch.Tensor] = {}
+                    quant_hooks = []
+                    for name in quant_names:
+                        mod = qname_to_mod.get(name)
+                        if mod is None:
+                            continue
+                        def _quant_hook(_m, _inp, out, n=name):
+                            quant_outs[n] = out.detach()
+                        quant_hooks.append(
+                            mod.register_forward_hook(_quant_hook))
+
+                    with torch.no_grad():
+                        if eval_fn is not None:
+                            eval_fn(self._quant_session, batch)
+                        else:
+                            self._quant_session(batch)
+                    for h in quant_hooks:
+                        h.remove()
+
+                    # -- accumulate ----------------------------------
+                    for name, fp in fp32_refs.items():
+                        q = quant_outs.get(name)
+                        if q is None or fp.shape != q.shape:
+                            continue
+                        accum_signal[name] += fp.pow(2).sum().item()
+                        accum_error[name] += (
+                            (fp - q).pow(2).sum().item()
+                        )
+                        accum_count[name] += fp.numel()
+            finally:
+                if obs_ctx is not None:
+                    obs_ctx.__exit__(None, None, None)
+
+            # Collect observer report (if any)
+            if obs_ctx is not None:
+                self._observers_data = obs_ctx.report()._raw
+
+            # Compute per-layer QSNR / MSE from accumulated statistics
+            self._qsnr_per_layer = {}
+            self._mse_per_layer = {}
+            for name in sorted(accum_signal):
+                if accum_count[name] == 0:
+                    continue
+                mean_signal = accum_signal[name] / accum_count[name]
+                mean_error = accum_error[name] / accum_count[name]
+                if mean_error > 1e-30:
+                    self._qsnr_per_layer[name] = 10.0 * math.log10(
+                        max(mean_signal, 1e-12) / mean_error
+                    )
+                self._mse_per_layer[name] = mean_error
+
+            # When true_error produced results, we are done — the local
+            # (observer-based) path below is intentionally skipped so
+            # that true_error always takes precedence.
+            return self
+
+        # ── Observer-only path (true_error=False) ────────────────────
+        if observers:
+            with self._quant_session.analyze(observers=observers) as ctx:
+                _run_model(self._quant_session, calib_data, eval_fn)
+            self._observers_data = ctx.report()._raw
+            self._qsnr_per_layer, self._mse_per_layer = _extract_qsnr_mse(
+                self._observers_data
+            )
 
         return self
 
@@ -860,20 +1002,27 @@ class Session:
         eval_data=None,
         eval_fn: Optional[Callable] = None,
         outputs: Union[str, List[str]] = "default",
+        true_error: bool = False,
     ) -> SessionResult:
         """Run the full quantization workflow. Backward-compatible shortcut.
 
         Equivalent to calling ``.quantize() → .calibrate() → .analyze() →
         .evaluate() → .cost() → .result`` in sequence, with conditional
         evaluation and cost estimation based on *outputs*.
+
+        Args:
+            true_error: If True, compute per-layer QSNR against fp32
+                reference (true accumulated error) instead of local
+                quantization error.  Requires ``keep_fp32=True`` (default).
         """
         from src.report._spec import resolve_outputs as _resolve_outputs
 
         observer_keys, needs_eval, needs_cost = _resolve_outputs(outputs)
 
-        self.quantize(calib_data=calib_data)
+        self.quantize(calib_data=calib_data, eval_fn=eval_fn)
         self.calibrate(calib_data, eval_fn=eval_fn)
-        self.analyze(calib_data, outputs=outputs, eval_fn=eval_fn)
+        self.analyze(calib_data, outputs=outputs, eval_fn=eval_fn,
+                     true_error=true_error)
 
         if needs_eval and eval_fn is not None:
             self.evaluate(

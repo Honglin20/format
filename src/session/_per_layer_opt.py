@@ -177,8 +177,6 @@ def per_layer_optimal(
                     layer_name,
                 )
                 continue
-            if layer_name not in sq_transforms:
-                continue
             sq_t = sq_transforms[layer_name]
             op_cfg = per_layer_cfgs[layer_name]
             if base_cfg.weight_only:

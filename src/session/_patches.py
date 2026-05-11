@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from src.quantize.elemwise import _is_in_quantize
-from src.session._context import _ctx_state, _EMPTY_CFG
+from src.session._context import _ctx_state, _EMPTY_CFG, _observer_state
 from src.session._context import get_layer_name
 
 # Eagerly import Function classes so their module-level _torch_* saves are
@@ -112,19 +112,53 @@ def _patched(op_name, orig_fn):
 
     The decorated function signature is ``fn(state, cfg, *args, **kwargs)``.
     The guard (no active context, _EMPTY_CFG passthrough) is handled automatically.
+
+    Also checks for observer-only state: when ``_observer_state`` is set (during
+    analysis), the original function runs unchanged but an observer event is
+    emitted so analysis can track inline-op calls.
     """
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             state = _get_state()
-            if state is None:
-                return orig_fn(*args, **kwargs)
-            cfg = state.resolve(op_name)
-            if cfg == _EMPTY_CFG:
-                return orig_fn(*args, **kwargs)
-            return fn(state, cfg, *args, **kwargs)
+            if state is not None:
+                cfg = state.resolve(op_name)
+                if cfg == _EMPTY_CFG:
+                    return orig_fn(*args, **kwargs)
+                return fn(state, cfg, *args, **kwargs)
+            # Observer-only mode: emit event without re-quantizing
+            obs_state = _observer_state.get(None)
+            if obs_state is not None and obs_state.observers:
+                result = orig_fn(*args, **kwargs)
+                _emit_observer_event(obs_state, op_name, result)
+                return result
+            return orig_fn(*args, **kwargs)
         return wrapper
     return decorator
+
+
+def _emit_observer_event(obs_state, op_name: str, result):
+    """Emit an observer event for an inline op result during analysis."""
+    if not isinstance(result, torch.Tensor):
+        return
+    layer_name = get_layer_name()
+    if not layer_name:
+        return
+    from src.scheme.quant_scheme import QuantScheme
+    from src.observer.events import QuantEvent
+    full_name = f"{layer_name}.{op_name}"
+    placeholder_scheme = QuantScheme()  # default INT8 — scheme required so emit fires
+    event = QuantEvent(
+        layer_name=full_name,
+        role="output",
+        pipeline_index=0,
+        stage="output_post_quant",
+        fp32_tensor=result.detach(),
+        quant_tensor=result.detach(),
+        scheme=placeholder_scheme,
+    )
+    for obs in obs_state.observers:
+        obs.on_event(event)
 
 
 # ---------------------------------------------------------------------------

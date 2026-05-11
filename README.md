@@ -57,6 +57,66 @@ qsnr_w, _ = _extract_qsnr_mse(result.observers_data, role="weight")
 qsnr_in, _ = _extract_qsnr_mse(result.observers_data, role="input")
 ```
 
+## 误差传播分析：累积 vs 本地
+
+量化误差有两套独立的测量路径，结合使用可分辨某层误差是**自己量化引入的（Source）**还是**前层传播过来的（Propagated）**：
+
+| 测量路径 | 数据来源 | 度量含义 | 覆盖范围 |
+|---------|---------|---------|---------|
+| **累积误差**（Hook） | `true_error=True`，逐层对比 fp32 vs quant output | 从第一层累加到此层的总误差 | `_MODULE_MAPPING` 中的模块（Linear/Conv/Norm/...） |
+| **本地误差**（Observer） | QSNRObserver，在量化算子内部 `_emit` 事件 | 仅此层本次量化引入的误差 | 同上 + patched inline ops（`torch.matmul` 等） |
+
+Observer 覆盖范围 > Hook（`hook ⊂ observer`），因此可发现未被 hook 覆盖的自定义模块（如 attention 中的 `torch.matmul`）。
+
+```python
+from src.session import Session, QuantConfig
+
+# true_error=True 同时启用 hook（累积）和 observer（本地）两条路径
+result = Session(model, cfg).run(
+    calib_data, outputs=["qsnr", "mse"], true_error=True,
+)
+
+# 累积 QSNR（hook，逐层对比 fp32 参考输出）
+print(result.qsnr_per_layer)   # {"0": 33.9, "2": 34.0, "3": 31.5}
+
+# 本地 QSNR（observer，量化算子内部测量）
+from src.session._session import _extract_qsnr_mse
+local_qsnr, _ = _extract_qsnr_mse(result.observers_data, role="output")
+print(local_qsnr)              # {"0": 55.4, "1.matmul": 55.4, "2": 314.0, "3": 57.0}
+```
+
+### 诊断表与可视化
+
+```python
+from src.report._study_report import StudyReport
+
+report = StudyReport({"my_config": [result]})
+
+# 终端诊断表：每层 Accum QSNR / Local QSNR / Delta / Headroom / Diagnosis
+print(report.tables.error_source_analysis(role="output"))
+
+# 三行面板图：分组柱状图 + δ-QSNR + Headroom 诊断
+report.plot.error_propagation(role="output")
+
+# 散点图：Accumulated vs Local QSNR，y=x 对角线区分 Source vs Propagated
+report.plot.accumulated_vs_local(role="output")
+
+# 一键导出所有图表和 CSV
+report.save("output/")
+```
+
+**诊断规则**（Headroom = Local − Accumulated）：
+- ≤ 3 dB → **Source**：该层是主要误差来源
+- 3–10 dB → **Mixed**：部分自产，部分传播
+- \> 10 dB → **Propagated**：误差主要来自前层累积
+
+### 演示脚本
+
+```bash
+python scripts/test_error_propagation.py          # 4 层简单模型，含 observer-only CustomMatMul
+python scripts/test_transformer_error_propagation.py  # 4 层 Transformer Encoder
+```
+
 ## 文档导航
 
 ### 使用指南
@@ -65,8 +125,8 @@ qsnr_in, _ = _extract_qsnr_mse(result.observers_data, role="input")
 |------|------|
 | [Session 概览](docs/guides/session/overview.md) | 量化生命周期：quantize → calibrate → analyze → evaluate → cost |
 | [SessionResult & 结果查看](docs/guides/session/result.md) | summary / accuracy_table / layer_report / QSNR / MSE |
-| [绘图 & 可视化](docs/guides/session/plotting.md) | 10 种内置图表：QSNR/MSE/outlier/block-QSNR/Pareto/correlation/cost/role-distribution |
-| [误差分析](docs/guides/session/analysis.md) | 5 种 Observer、分布分析、LayerSensitivity |
+| [绘图 & 可视化](docs/guides/session/plotting.md) | 12 种内置图表：QSNR/MSE/outlier/block-QSNR/Pareto/correlation/cost/role-distribution/error-propagation |
+| [误差分析](docs/guides/session/analysis.md) | 5 种 Observer、分布分析、LayerSensitivity、累积 vs 本地误差传播 |
 | [格式选择](docs/guides/formats.md) | int8/fp8/nf4 等格式对比 & 自定义格式注册 |
 | [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block 选择 |
 | [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive |

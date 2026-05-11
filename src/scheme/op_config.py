@@ -64,3 +64,22 @@ class OpQuantConfig:
     def is_training(self) -> bool:
         """True if any backward field is non-None (QAT active)."""
         return any(getattr(self, name) is not None for name in _BACKWARD_FIELD_NAMES)
+
+
+def cfg_causes_quantization(cfg) -> bool:
+    """Return True if *cfg* would cause any actual tensor quantization.
+
+    An ``OpQuantConfig`` that is ``None``, equal to the empty default, or
+    has every role set to ``None`` never triggers a ``quantize()`` call.
+    Modules carrying such a config are pure-passthrough and should be
+    excluded from true-error comparison (their output is bit-exact with
+    the fp32 reference).
+    """
+    if cfg is None:
+        return False
+    if cfg == OpQuantConfig():
+        return False
+    for f in fields(cfg):
+        if getattr(cfg, f.name) is not None:
+            return True
+    return False

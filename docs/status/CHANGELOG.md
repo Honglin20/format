@@ -5,6 +5,39 @@
 
 ---
 
+## Bug Fix — True Error 累积误差分析修复 ✅ (2026-05-10)
+
+修复 `Session.analyze(true_error=True)` 两个 bug 并简化实现：
+
+**问题：**
+- `_is_passthrough` 只在 `QuantizedLinear` 设置，其他 21 个 Quantized* 类型空 cfg 模块被错误纳入对比，产出 QSNR = ∞
+- 多 batch 只保留最后一个，之前 batch 的 hook 捕获值被覆盖
+
+**方案：**
+- fp32 参考用现有原始 nn.Module deep copy（`fp32_model`），天然 golden reference，零验证成本
+- forward hook 捕获模块 output（累积误差天然定义在模块边界）
+- 新增 `cfg_causes_quantization(cfg)` 在 `src/scheme/op_config.py`，遍历所有 dataclass 字段判断是否真的会触发量化
+- 多 batch 逐 batch 累加 `Σsignal / Σerror / count`，最终 `QSNR = 10 * log10(mean_signal / mean_error)`
+- `eval_fn` 作为第一优先级，所有 forward pass 优先走 eval_fn
+- 可同时与 observer 共存（一个 AnalysisContext 包裹整个循环）
+
+**与原方案对比：**
+- 放弃双 Quantized* passthrough 树（需改 22 个模块 + bit-exact 验证）
+- 放弃统一 stash 机制（input QSNR 与上一层 output 冗余，weight QSNR 是局部的可直接公式算）
+- 放弃 Phase 3 内联 op stash（observer 已覆盖局部误差）
+- ops/ 层零改动，只改 session 层
+
+**改动文件：**
+- `src/scheme/op_config.py` — 新增 `cfg_causes_quantization()`
+- `src/session/_session.py` — 重写 `analyze()` true-error 路径 + `quantize()`/`run()` 透传 eval_fn
+- `src/session/_model.py` — `_get_quantized_modules` 用 `cfg_causes_quantization`
+- `src/tests/test_session.py` — 7 个新测试
+- `docs/plans/2026-05-10-unified-stash-true-error.md` — 更新为简化方案文档
+
+测试：全量 2,496 passed（含 7 个新增）
+
+---
+
 ## Phase 9 — 学术量化研究可视化扩展
 
 ### P9.V1 — 8 个新增研究图表/表格 ✅ (2026-05-09)

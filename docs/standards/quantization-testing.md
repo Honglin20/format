@@ -85,3 +85,9 @@ def test_quantize_2():
 ## 负面测试
 
 每个量化函数的每个 `raise` 点至少一条 `pytest.raises` + `match=`。
+
+## 测试层级：回归高层 API
+
+量化测试同样受 **测试层级原则** 约束：最终提交的测试必须通过 `Session` / `Study` / `QuantConfig` / `resolve_config` 等高层用户接口调用。底层 API（`FormatBase.quantize()`、`_quantize_elemwise_core` 等）仅限开发调试，不允许留在最终测试代码中。
+
+详见 [`principles/testing-layer.md`](../principles/testing-layer.md)。

@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Union
 
 import torch.nn as nn
 
-from src.scheme.op_config import OpQuantConfig
+from src.scheme.op_config import OpQuantConfig, cfg_causes_quantization
 from src.session._context import QuantizeContext, _EMPTY_CFG
 from src.ops.conv import (
     QuantizedConv1d,
@@ -352,10 +352,15 @@ def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, na
 
 
 def _get_quantized_modules(model: nn.Module) -> List[tuple]:
-    """Return [(name, module), ...] for all Quantized* modules with cfg."""
+    """Return [(name, module), ...] for all Quantized* modules whose cfg
+    actually triggers quantization.
+
+    Modules with an empty / all-None config are skipped — they act as
+    pure passthrough and would distort statistics (e.g. inflate QSNR).
+    """
     result = []
     for name, module in model.named_modules():
-        if hasattr(module, "cfg") and not getattr(module, "_is_passthrough", False):
+        if hasattr(module, "cfg") and cfg_causes_quantization(module.cfg):
             result.append((name, module))
     return result
 
@@ -470,7 +475,7 @@ def _patch_forward(
             model,
             ctx_cfg,
             op_cfgs=op_cfgs,
-            observers=observers,
+            observers=model._quantize_observers,
         ):
             return original_forward(*args, **kwargs)
 

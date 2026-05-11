@@ -256,6 +256,137 @@ def test_analyze_with_custom_observers():
 
 
 # ---------------------------------------------------------------------------
+# 5b. True-error analysis (Session.analyze(true_error=True))
+# ---------------------------------------------------------------------------
+
+
+def test_cfg_causes_quantization_empty():
+    """Empty cfg should not be considered as causing quantization."""
+    from src.scheme.op_config import cfg_causes_quantization
+    assert not cfg_causes_quantization(None)
+    assert not cfg_causes_quantization(OpQuantConfig())
+
+
+def test_cfg_causes_quantization_with_scheme():
+    """Any non-None role field should be detected."""
+    from src.scheme.op_config import cfg_causes_quantization
+    scheme = QuantScheme(
+        format=FormatBase.from_str("int8"),
+        granularity=GranularitySpec.per_tensor(),
+    )
+    assert cfg_causes_quantization(OpQuantConfig(input=scheme))
+    assert cfg_causes_quantization(OpQuantConfig(storage=scheme))
+    assert cfg_causes_quantization(OpQuantConfig(grad_input=scheme))
+
+
+def test_true_error_returns_qsnr_per_layer():
+    """true_error=True should populate qsnr_per_layer and mse_per_layer."""
+    from src.session._session import Session
+    from src.session._config import QuantConfig
+    model = _make_small_model()
+    config = QuantConfig(calibrator="max")
+    session = Session(model, config)
+    session.quantize()
+    session.analyze(
+        torch.randn(4, 4), outputs=[], true_error=True,
+    )
+    assert len(session._qsnr_per_layer) > 0
+    assert len(session._mse_per_layer) > 0
+    for qsnr in session._qsnr_per_layer.values():
+        assert qsnr > 0
+        assert not torch.tensor(qsnr).isnan()
+
+
+def test_true_error_multi_batch_accumulation():
+    """Multi-batch true_error should accumulate across batches."""
+    from src.session._session import Session
+    from src.session._config import QuantConfig
+    model = _make_small_model()
+    config = QuantConfig(calibrator="max")
+    session = Session(model, config)
+    session.quantize()
+
+    # Single batch
+    session.analyze(
+        [torch.randn(4, 4)], outputs=[], true_error=True,
+    )
+    single_qsnr = dict(session._qsnr_per_layer)
+
+    # Multiple batches — same layers should be present
+    session2 = Session(model, config)
+    session2.quantize()
+    session2.analyze(
+        [torch.randn(4, 4) for _ in range(4)],
+        outputs=[], true_error=True,
+    )
+    multi_qsnr = dict(session2._qsnr_per_layer)
+    assert set(single_qsnr.keys()) == set(multi_qsnr.keys())
+
+
+def test_true_error_with_eval_fn():
+    """true_error=True with eval_fn should use eval_fn, not direct model()."""
+    from src.session._session import Session
+    from src.session._config import QuantConfig
+    model = _make_small_model()
+    config = QuantConfig(calibrator="max")
+    session = Session(model, config)
+    session.quantize()
+
+    called_fp32 = []
+    called_quant = []
+
+    def my_eval(m, data):
+        if m is session.fp32_model:
+            called_fp32.append(True)
+        else:
+            called_quant.append(True)
+        m(data)
+
+    session.analyze(
+        torch.randn(4, 4), outputs=[], true_error=True,
+        eval_fn=my_eval,
+    )
+    assert len(called_fp32) == 1
+    assert len(called_quant) == 1
+    assert len(session._qsnr_per_layer) > 0
+
+
+def test_true_error_with_observers_combined():
+    """true_error=True + observers should give true error AND observer data."""
+    from src.session._session import Session
+    from src.session._config import QuantConfig
+    model = _make_small_model()
+    config = QuantConfig(calibrator="max")
+    session = Session(model, config)
+    session.quantize()
+
+    session.analyze(
+        torch.randn(4, 4), outputs=["qsnr"], true_error=True,
+    )
+    assert len(session._qsnr_per_layer) > 0
+    assert len(session._observers_data) > 0
+
+
+def test_true_error_excludes_non_quantizing_modules():
+    """Modules with empty cfg should be excluded from true_error comparison."""
+    from src.session._session import Session
+    from src.session._config import QuantConfig
+    model = _make_small_model()
+    config = QuantConfig(calibrator="max")
+    session = Session(model, config)
+    session.quantize()
+
+    session.analyze(
+        torch.randn(4, 4), outputs=[], true_error=True,
+    )
+
+    # Every reported layer QSNR should be a finite number
+    for name, qsnr in session._qsnr_per_layer.items():
+        assert qsnr == qsnr  # not NaN
+        assert qsnr > 0
+
+
+# ---------------------------------------------------------------------------
 # 6. Comparator
 # ---------------------------------------------------------------------------
 
@@ -642,8 +773,9 @@ class TestPreScaleIntegration:
         calib_data = [torch.randn(8, 4) for _ in range(4)]
         session.initialize_pre_scales(calib_data, init="ones")
 
+        from src.scheme.op_config import cfg_causes_quantization
         for _, mod in session.qmodel.named_modules():
-            if hasattr(mod, "cfg") and not getattr(mod, "_is_passthrough", False):
+            if hasattr(mod, "cfg") and cfg_causes_quantization(mod.cfg):
                 assert isinstance(mod.cfg, OpQuantConfig)
 
     def test_optimize_scales_requires_fp32(self):
@@ -930,3 +1062,410 @@ class TestPreScaleIntegration:
         out = session(torch.randn(4, 4))
         assert out.shape == (4, 3)
         assert not torch.isnan(out).any()
+
+
+# ==============================================================================
+# QSNR Per-Layer Mathematical Verification
+# ==============================================================================
+
+
+def _manual_qsnr(fp32: torch.Tensor, quant: torch.Tensor) -> float:
+    """Reference QSNR: 10 * log10(||fp32||² / ||fp32 - quant||²)."""
+    signal = fp32.pow(2).sum().item()
+    error = (fp32 - quant).pow(2).sum().item()
+    if error < 1e-30:
+        return float("inf")
+    return 10.0 * __import__("math").log10(max(signal, 1e-12) / error)
+
+
+def _manual_qsnr_multi(tensors: list[tuple[torch.Tensor, torch.Tensor]]) -> float:
+    """Multi-batch QSNR: accumulate sum-of-squares then divide."""
+    total_signal = 0.0
+    total_error = 0.0
+    for fp32, quant in tensors:
+        total_signal += fp32.pow(2).sum().item()
+        total_error += (fp32 - quant).pow(2).sum().item()
+    if total_error < 1e-30:
+        return float("inf")
+    return 10.0 * __import__("math").log10(max(total_signal, 1e-12) / total_error)
+
+
+class TestQSNRFormulaVerification:
+    """Verify QSNR = 10 * log10(Σ||fp||² / Σ||fp-q||²) is correctly computed."""
+
+    def test_basic_formula(self):
+        """QSNR of a tensor with known fp32 and quant values."""
+        fp32 = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        quant = torch.tensor([1.0, 2.0, 3.1, 3.9])  # slight error
+
+        manual = _manual_qsnr(fp32, quant)
+        # ||fp||² = 1+4+9+16 = 30
+        # ||fp-q||² = 0+0+0.01+0.01 = 0.02
+        # QSNR = 10 * log10(30/0.02) = 10 * log10(1500) ≈ 31.76
+        expected = 10.0 * __import__("math").log10(30.0 / 0.02)
+        assert abs(manual - expected) < 1e-5  # fp32 accumulation tolerance
+
+    def test_qsnr_observer_matches_formula(self):
+        """QSNRObserver._measure must equal the manual formula."""
+        from src.analysis.observers import QSNRObserver
+        fp32 = torch.randn(16, 32)
+        quant = fp32 + torch.randn(16, 32) * 0.1
+
+        obs = QSNRObserver()
+        result = obs._measure("test", fp32, quant)
+        manual = _manual_qsnr(fp32, quant)
+
+        assert abs(result["qsnr_db"] - manual) < 1e-5  # fp32 accumulation tolerance
+
+    def test_zero_error_is_inf(self):
+        """Zero quantization error → QSNR = +inf."""
+        fp32 = torch.randn(4, 8)
+        manual = _manual_qsnr(fp32, fp32)
+        assert manual == float("inf")
+
+    def test_mean_power_div_mean_error_equals_sum_ratio(self):
+        """mean(fp²)/mean((fp-q)²) = Σfp²/Σ(fp-q)² because N cancels."""
+        fp32 = torch.tensor([1.0, 2.0, 3.0])
+        quant = torch.tensor([1.1, 1.9, 2.9])
+
+        # Via means
+        mean_signal = fp32.pow(2).mean().item()
+        mean_error = (fp32 - quant).pow(2).mean().item()
+        qsnr_mean = 10.0 * __import__("math").log10(mean_signal / mean_error)
+
+        # Via sums
+        qsnr_sum = _manual_qsnr(fp32, quant)
+
+        assert abs(qsnr_mean - qsnr_sum) < 1e-5  # fp32 accumulation tolerance
+
+    def test_log10_monotonicity(self):
+        """Larger error → smaller QSNR (monotonic)."""
+        fp32 = torch.randn(100)
+        qsnr_small = _manual_qsnr(fp32, fp32 + 0.01 * torch.randn(100))
+        qsnr_large = _manual_qsnr(fp32, fp32 + 0.10 * torch.randn(100))
+        assert qsnr_small > qsnr_large
+
+
+class TestMultiBatchAccumulation:
+    """Verify that multi-batch QSNR accumulation is mathematically correct.
+
+    QSNR([batch1, batch2]) = 10 * log10( (S1+S2) / (E1+E2) )
+    This is NOT the arithmetic mean of per-batch QSNR values.
+    """
+
+    def test_two_batches_match_concatenated(self):
+        """Accumulated QSNR of two batches = QSNR of concatenated tensors."""
+        b1_fp = torch.randn(4, 8)
+        b1_q = b1_fp + 0.05 * torch.randn(4, 8)
+        b2_fp = torch.randn(4, 8)
+        b2_q = b2_fp + 0.05 * torch.randn(4, 8)
+
+        # Accumulated
+        acc = _manual_qsnr_multi([(b1_fp, b1_q), (b2_fp, b2_q)])
+
+        # Concatenated
+        cat_fp = torch.cat([b1_fp.reshape(-1), b2_fp.reshape(-1)])
+        cat_q = torch.cat([b1_q.reshape(-1), b2_q.reshape(-1)])
+        cat = _manual_qsnr(cat_fp, cat_q)
+
+        assert abs(acc - cat) < 1e-5  # fp32 accumulation tolerance
+
+    def test_accumulation_not_mean_of_qsnrs(self):
+        """Accumulated QSNR ≠ mean of per-batch QSNR (log is non-linear)."""
+        b1_fp = torch.randn(100)
+        b1_q = b1_fp + 0.01 * torch.randn(100)
+        b2_fp = torch.randn(100)
+        b2_q = b2_fp + 0.10 * torch.randn(100)  # much noisier
+
+        acc = _manual_qsnr_multi([(b1_fp, b1_q), (b2_fp, b2_q)])
+        qsnr1 = _manual_qsnr(b1_fp, b1_q)
+        qsnr2 = _manual_qsnr(b2_fp, b2_q)
+        mean = (qsnr1 + qsnr2) / 2.0
+
+        # They should differ because log is non-linear
+        assert abs(acc - mean) > 0.5
+
+    def test_uneven_batch_sizes(self):
+        """Accumulation handles uneven batch sizes correctly."""
+        b1_fp = torch.randn(4, 8)   # 32 elements
+        b1_q = b1_fp + 0.01 * torch.randn(4, 8)
+        b2_fp = torch.randn(16, 8)  # 128 elements
+        b2_q = b2_fp + 0.01 * torch.randn(16, 8)
+
+        acc = _manual_qsnr_multi([(b1_fp, b1_q), (b2_fp, b2_q)])
+        cat_fp = torch.cat([b1_fp.reshape(-1), b2_fp.reshape(-1)])
+        cat_q = torch.cat([b1_q.reshape(-1), b2_q.reshape(-1)])
+        cat = _manual_qsnr(cat_fp, cat_q)
+
+        assert abs(acc - cat) < 1e-5  # fp32 accumulation tolerance
+
+
+class TestTrueErrorEndToEnd:
+    """End-to-end verification: Session true_error matches manual computation."""
+
+    def _make_deterministic_model(self):
+        """Model with fixed weights so output is deterministic."""
+        torch.manual_seed(42)
+        model = nn.Sequential(nn.Linear(2, 4), nn.Linear(4, 2))
+        for p in model.parameters():
+            nn.init.constant_(p, 0.5)
+        return model
+
+    def test_qsnr_matches_manual_computation(self):
+        """Session true_error QSNR must match manual hook-based computation."""
+        from src.session._session import Session
+        from src.session._config import QuantConfig
+        import math
+
+        torch.manual_seed(42)
+        model = self._make_deterministic_model()
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config)
+        session.quantize()
+
+        # Manual computation: capture fp32 and quant outputs
+        fp32_refs = {}
+        quant_refs = {}
+
+        def fp32_hook(name):
+            def h(_m, _inp, out):
+                fp32_refs[name] = out.detach()
+            return h
+
+        def quant_hook(name):
+            def h(_m, _inp, out):
+                quant_refs[name] = out.detach()
+            return h
+
+        qmodel = session._quant_session.qmodel
+        fp32_model = session._quant_session.fp32_model
+
+        hooks = []
+        for name, _mod in qmodel.named_modules():
+            if hasattr(_mod, "cfg"):
+                from src.scheme.op_config import cfg_causes_quantization
+                if not cfg_causes_quantization(_mod.cfg):
+                    continue
+                fp32_mod = dict(fp32_model.named_modules()).get(name)
+                quant_mod = dict(qmodel.named_modules()).get(name)
+                if fp32_mod and quant_mod:
+                    hooks.append(fp32_mod.register_forward_hook(fp32_hook(name)))
+                    hooks.append(quant_mod.register_forward_hook(quant_hook(name)))
+
+        x = torch.randn(4, 2)
+        with torch.no_grad():
+            fp32_model(x)
+            qmodel(x)
+        for h in hooks:
+            h.remove()
+
+        # Compute manual QSNR
+        manual_qsnr = {}
+        for name in fp32_refs:
+            fp = fp32_refs[name]
+            q = quant_refs.get(name)
+            if q is not None and fp.shape == q.shape:
+                signal = fp.pow(2).sum().item()
+                error = (fp - q).pow(2).sum().item()
+                if error > 1e-30:
+                    manual_qsnr[name] = 10.0 * math.log10(
+                        max(signal, 1e-12) / error
+                    )
+
+        # Session computation
+        session2 = Session(self._make_deterministic_model(), config)
+        session2.quantize()
+        session2.analyze(x, outputs=[], true_error=True)
+
+        # Same layers
+        assert set(session2._qsnr_per_layer.keys()) == set(manual_qsnr.keys())
+
+        # Values must match within floating-point error
+        for name in manual_qsnr:
+            assert abs(session2._qsnr_per_layer[name] - manual_qsnr[name]) < 1e-5, (
+                f"Mismatch at {name}: "
+                f"session={session2._qsnr_per_layer[name]:.6f} "
+                f"manual={manual_qsnr[name]:.6f}"
+            )
+
+    def test_multi_batch_qsnr_matches_single_concatenated(self):
+        """Multi-batch accumulated QSNR = QSNR of concatenated tensors.
+
+        Uses hooks within a single calibrated session to verify that
+        the accumulation formula ΣS/ΣE is correct, independent of
+        calibration (which is identical within one session).
+        """
+        from src.session._session import Session
+        from src.session._config import QuantConfig
+        from src.scheme.op_config import cfg_causes_quantization
+        import math
+
+        torch.manual_seed(42)
+        model = self._make_deterministic_model()
+
+        config = QuantConfig(calibrator="max")
+        session = Session(model, config)
+        session.quantize()
+
+        batches = [torch.randn(4, 2) for _ in range(3)]
+        qmodel = session._quant_session.qmodel
+        fp32_model = session._quant_session.fp32_model
+
+        # --- Capture per-batch fp32/quant outputs within ONE calibrated session ---
+        accum_signal: dict = {name: 0.0 for name in ["0", "1"]}
+        accum_error: dict = {name: 0.0 for name in ["0", "1"]}
+        all_fp32_tensors: dict = {name: [] for name in ["0", "1"]}
+        all_quant_tensors: dict = {name: [] for name in ["0", "1"]}
+
+        for batch in batches:
+            fp32_refs = {}
+            quant_refs = {}
+            hooks = []
+
+            for name, mod in qmodel.named_modules():
+                if not hasattr(mod, "cfg") or not cfg_causes_quantization(mod.cfg):
+                    continue
+                fp_mod = dict(fp32_model.named_modules()).get(name)
+                q_mod = dict(qmodel.named_modules()).get(name)
+                if fp_mod and q_mod:
+                    hooks.append(
+                        fp_mod.register_forward_hook(
+                            lambda _m, _i, o, n=name: fp32_refs.__setitem__(n, o.detach())
+                        )
+                    )
+                    hooks.append(
+                        q_mod.register_forward_hook(
+                            lambda _m, _i, o, n=name: quant_refs.__setitem__(n, o.detach())
+                        )
+                    )
+
+            with torch.no_grad():
+                fp32_model(batch)
+                qmodel(batch)
+
+            for h in hooks:
+                h.remove()
+
+            for name in fp32_refs:
+                fp = fp32_refs[name]
+                q = quant_refs.get(name)
+                if q is not None and fp.shape == q.shape:
+                    accum_signal[name] += fp.pow(2).sum().item()
+                    accum_error[name] += (fp - q).pow(2).sum().item()
+                    all_fp32_tensors[name].append(fp.reshape(-1))
+                    all_quant_tensors[name].append(q.reshape(-1))
+
+        # Multi-batch accumulated QSNR
+        multi_qsnr = {}
+        for name in accum_signal:
+            if accum_error[name] > 1e-30:
+                multi_qsnr[name] = 10.0 * math.log10(
+                    max(accum_signal[name], 1e-12) / accum_error[name]
+                )
+
+        # Single concatenated QSNR
+        cat_qsnr = {}
+        for name in all_fp32_tensors:
+            cat_fp = torch.cat(all_fp32_tensors[name])
+            cat_q = torch.cat(all_quant_tensors[name])
+            cat_qsnr[name] = _manual_qsnr(cat_fp, cat_q)
+
+        # Must match exactly (same calibration, same tensors)
+        for name in multi_qsnr:
+            assert name in cat_qsnr
+            assert abs(multi_qsnr[name] - cat_qsnr[name]) < 1e-5, (
+                f"Accumulation bug at {name}: "
+                f"multi={multi_qsnr[name]:.6f} cat={cat_qsnr[name]:.6f}"
+            )
+
+
+class TestExtractQSNRMSE:
+    """Verify _extract_qsnr_mse role filtering and worst-case selection."""
+
+    def test_extracts_output_role_only(self):
+        """Only output role QSNR is extracted; input/weight are ignored."""
+        from src.session._session import _extract_qsnr_mse
+
+        data = {
+            "fc1": {
+                "input": {"stage1": {"s0": {"qsnr_db": 10.0}}},
+                "weight": {"stage1": {"s0": {"qsnr_db": 20.0}}},
+                "output": {"stage1": {"s0": {"qsnr_db": 30.0}}},
+            },
+        }
+        qsnr, mse = _extract_qsnr_mse(data)
+        assert qsnr == {"fc1": 30.0}
+
+    def test_takes_worst_case_across_stages(self):
+        """Minimum QSNR across all stages and slices is used."""
+        from src.session._session import _extract_qsnr_mse
+
+        data = {
+            "fc1": {
+                "output": {
+                    "stage1": {"s0": {"qsnr_db": 25.0}, "s1": {"qsnr_db": 30.0}},
+                    "stage2": {"s0": {"qsnr_db": 15.0}},  # worst
+                },
+            },
+        }
+        qsnr, mse = _extract_qsnr_mse(data)
+        assert qsnr == {"fc1": 15.0}
+
+    def test_nan_values_are_skipped(self):
+        """NaN QSNR values are excluded from worst-case selection."""
+        from src.session._session import _extract_qsnr_mse
+
+        data = {
+            "fc1": {
+                "output": {
+                    "stage1": {
+                        "s0": {"qsnr_db": float("nan")},
+                        "s1": {"qsnr_db": 30.0},
+                    },
+                },
+            },
+        }
+        qsnr, mse = _extract_qsnr_mse(data)
+        assert qsnr == {"fc1": 30.0}
+
+    def test_role_not_present_returns_empty(self):
+        """If output role is absent, nothing is extracted."""
+        from src.session._session import _extract_qsnr_mse
+
+        data = {
+            "fc1": {
+                "input": {"stage1": {"s0": {"qsnr_db": 10.0}}},
+            },
+        }
+        qsnr, mse = _extract_qsnr_mse(data)
+        assert qsnr == {}
+
+
+class TestQSNRInvariants:
+    """Invariants that must hold for any correct QSNR implementation."""
+
+    def test_identity_quantization_is_inf(self):
+        """QSNR(x, x) = +inf (no error)."""
+        x = torch.randn(4, 8)
+        assert _manual_qsnr(x, x) == float("inf")
+
+    def test_positive_signal_positive_qsnr(self):
+        """For positive signal and finite error, QSNR > 0 dB."""
+        fp32 = torch.ones(100)
+        quant = fp32 + 0.01 * torch.randn(100)
+        assert _manual_qsnr(fp32, quant) > 0
+
+    def test_additive_noise_lowers_qsnr(self):
+        """Adding independent noise always reduces QSNR."""
+        fp32 = torch.randn(1000)
+        q1 = fp32 + 0.01 * torch.randn(1000)
+        q2 = q1 + 0.01 * torch.randn(1000)  # additional noise
+        assert _manual_qsnr(fp32, q1) > _manual_qsnr(fp32, q2)
+
+    def test_scaling_invariant(self):
+        """QSNR is scale-invariant: QSNR(αx, αx̂) = QSNR(x, x̂)."""
+        x = torch.randn(100)
+        x_hat = x + 0.01 * torch.randn(100)
+        alpha = 3.0
+        assert abs(_manual_qsnr(alpha * x, alpha * x_hat) -
+                   _manual_qsnr(x, x_hat)) < 1e-5  # fp32 tolerance

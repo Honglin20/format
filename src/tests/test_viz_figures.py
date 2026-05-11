@@ -398,7 +398,7 @@ class TestOutlierAnalysis:
         ]
         all_results = _make_all_results(slices)
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = outlier_analysis(all_results, output_dir=tmpdir, role="input")
+            fig = outlier_analysis(all_results, output_dir=tmpdir, roles=("input",))
             assert fig is not None
 
     def test_empty_data(self):
@@ -406,7 +406,7 @@ class TestOutlierAnalysis:
         all_results = _make_all_results(slices)
         with tempfile.TemporaryDirectory() as tmpdir:
             with pytest.raises(ValueError, match="Outlier ratio data not available"):
-                outlier_analysis(all_results, output_dir=tmpdir, role="input")
+                outlier_analysis(all_results, output_dir=tmpdir, roles=("input",))
 
     def test_no_slices(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -430,7 +430,7 @@ class TestPerBlockQSNR:
         ]
         all_results = _make_all_results(slices)
         with tempfile.TemporaryDirectory() as tmpdir:
-            fig = per_block_qsnr(all_results, output_dir=tmpdir, role="input")
+            fig = per_block_qsnr(all_results, output_dir=tmpdir, roles=("input",))
             assert fig is not None
 
     def test_empty_data(self):
@@ -438,7 +438,7 @@ class TestPerBlockQSNR:
         all_results = _make_all_results(slices)
         with tempfile.TemporaryDirectory() as tmpdir:
             with pytest.raises(ValueError, match="Per-block QSNR statistics not available"):
-                per_block_qsnr(all_results, output_dir=tmpdir, role="input")
+                per_block_qsnr(all_results, output_dir=tmpdir, roles=("input",))
 
 
 # ── P1.5: Correlation Heatmap ───────────────────────────────────────────

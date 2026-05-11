@@ -279,9 +279,9 @@ def histogram_overlay(
 
     Extracts histogram data from ``HistogramObserver`` (keys: ``fp32_hist``,
     ``quant_hist``, ``err_hist``) and renders the most quantization-sensitive
-    layers as overlaid semi-transparent bar charts. Sensitivity is determined
-    by QSNR (lower = more quantization-sensitive), with a fallback to
-    activation magnitude when no QSNR data is available.
+    (layer, role) pairs as overlaid semi-transparent bar charts. Sensitivity
+    is determined by QSNR (lower = more quantization-sensitive), with a
+    fallback to activation magnitude when no QSNR data is available.
 
     Args:
         all_results: Nested dict of ``{part: {config: {"report": ...}}}``.
@@ -305,13 +305,14 @@ def histogram_overlay(
             if not hasattr(report, "iter_slices"):
                 continue
             for layer, role, stage, slice_key, metrics in report.iter_slices():
-                if layer not in layer_hists and "fp32_hist" in metrics and "quant_hist" in metrics:
-                    layer_hists[layer] = {
+                key = f"{layer} [{role}]"
+                if key not in layer_hists and "fp32_hist" in metrics and "quant_hist" in metrics:
+                    layer_hists[key] = {
                         k: _to_numpy(metrics.get(k))
                         for k in ("fp32_hist", "quant_hist", "err_hist")
                     }
-                if layer not in layer_error and "qsnr_db" in metrics:
-                    layer_error[layer] = metrics["qsnr_db"]
+                if key not in layer_error and "qsnr_db" in metrics:
+                    layer_error[key] = metrics["qsnr_db"]
 
     if not layer_hists:
         raise ValueError(
@@ -342,7 +343,7 @@ def histogram_overlay(
     n = len(top_layers)
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
 
-    for ax, (layer, hist_data) in zip(axes[0], top_layers):
+    for ax, (layer_key, hist_data) in zip(axes[0], top_layers):
         for channel, color, label in [
             ("fp32_hist", "#3498db", "fp32"),
             ("quant_hist", "#e74c3c", "quant"),
@@ -355,7 +356,7 @@ def histogram_overlay(
             ax.fill_between(bin_centers, counts, alpha=0.35, color=color,
                             label=label, step="mid")
             ax.plot(bin_centers, counts, color=color, linewidth=0.8)
-        ax.set_title(layer, fontsize=9)
+        ax.set_title(layer_key, fontsize=9)
         ax.set_xlabel("Bin")
         ax.set_ylabel("Count")
         ax.legend(fontsize=7, loc="upper right")
@@ -969,9 +970,9 @@ def outlier_analysis(
     all_results: dict,
     *,
     output_dir: str,
-    role: str = "input",
+    roles=("input", "weight", "output"),
 ) -> plt.Figure:
-    """Outlier ratio per-layer bar chart + outlier vs QSNR scatter.
+    """Outlier ratio per-layer bar + outlier vs QSNR scatter, one row per role.
 
     Args:
         all_results: Nested dict ``{part: {config: {"report": ...}}}``.
@@ -979,12 +980,12 @@ def outlier_analysis(
             ``outlier_ratio`` (from DistributionObserver) and optionally
             ``qsnr_db`` (from QSNRObserver).
         output_dir: Output root directory.
-        role: Tensor role to plot (default ``"input"``).
+        roles: Tensor roles to plot (default ``("input", "weight", "output")``).
 
     Returns:
         matplotlib Figure.
     """
-    data_points = []
+    role_data: Dict[str, list] = {}
     for part_name, part_data in all_results.items():
         if not part_name.startswith("part_") or not isinstance(part_data, dict):
             continue
@@ -995,66 +996,73 @@ def outlier_analysis(
             if not hasattr(report, "iter_slices"):
                 continue
             for layer, r, stage, slice_key, metrics in report.iter_slices():
-                if r != role or "outlier_ratio" not in metrics:
+                if r not in roles or "outlier_ratio" not in metrics:
                     continue
-                data_points.append({
+                role_data.setdefault(r, []).append({
                     "config": config_name,
                     "layer": layer,
                     "outlier_ratio": metrics["outlier_ratio"],
                     "qsnr_db": metrics.get("qsnr_db", float("nan")),
                 })
 
-    if not data_points:
+    present = [r for r in roles if r in role_data]
+    if not present:
         raise ValueError(
-            f"Outlier ratio data not available for role {role!r}. "
+            f"Outlier ratio data not available for roles {list(roles)}. "
             + _how("DistributionObserver")
         )
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    n_rows = len(present)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4.5 * n_rows),
+                             squeeze=False)
 
-    layers = sorted(set(d["layer"] for d in data_points))
-    configs = sorted(set(d["config"] for d in data_points))
-    x = np.arange(len(layers))
-    width = 0.8 / max(len(configs), 1)
+    for row_idx, role in enumerate(present):
+        ax1, ax2 = axes[row_idx, 0], axes[row_idx, 1]
+        data_points = role_data[role]
 
-    # Panel 1: per-layer outlier ratio bar chart
-    for i, cfg in enumerate(configs):
-        per_layer = {}
-        for d in data_points:
-            if d["config"] == cfg:
-                per_layer.setdefault(d["layer"], []).append(d["outlier_ratio"])
-        values = [sum(per_layer.get(l, [0])) / max(len(per_layer.get(l, [0])), 1)
-                  for l in layers]
-        color = FALLBACK_CYCLE[i % len(FALLBACK_CYCLE)]
-        ax1.bar(x + i * width, values, width, label=cfg, color=color, alpha=0.7)
+        layers = sorted(set(d["layer"] for d in data_points))
+        configs = sorted(set(d["config"] for d in data_points))
+        x = np.arange(len(layers))
+        width = 0.8 / max(len(configs), 1)
 
-    ax1.set_xticks(x + width * (len(configs) - 1) / 2)
-    short_names = [l.replace("module.", "").replace("Quantized", "")[:20]
-                   for l in layers]
-    ax1.set_xticklabels(short_names, rotation=45, ha="right", fontsize=7)
-    ax1.set_ylabel("Outlier Ratio")
-    ax1.set_title(f"Outlier Ratio per Layer — {role}")
-    ax1.legend(fontsize=7)
-    ax1.grid(True, alpha=0.3, axis="y")
+        # Panel 1: per-layer outlier ratio bar chart
+        for i, cfg in enumerate(configs):
+            per_layer = {}
+            for d in data_points:
+                if d["config"] == cfg:
+                    per_layer.setdefault(d["layer"], []).append(d["outlier_ratio"])
+            values = [sum(per_layer.get(l, [0])) / max(len(per_layer.get(l, [0])), 1)
+                      for l in layers]
+            color = FALLBACK_CYCLE[i % len(FALLBACK_CYCLE)]
+            ax1.bar(x + i * width, values, width, label=cfg, color=color, alpha=0.7)
 
-    # Panel 2: outlier_ratio vs QSNR scatter
-    has_qsnr = any(not math.isnan(d["qsnr_db"]) for d in data_points)
-    for i, cfg in enumerate(configs):
-        cfg_pts = [d for d in data_points if d["config"] == cfg]
-        xs = [d["outlier_ratio"] for d in cfg_pts]
-        ys = [d["qsnr_db"] for d in cfg_pts] if has_qsnr else [0] * len(cfg_pts)
-        color = FALLBACK_CYCLE[i % len(FALLBACK_CYCLE)]
-        ax2.scatter(xs, ys, label=cfg, color=color, alpha=0.7, s=40)
+        ax1.set_xticks(x + width * (len(configs) - 1) / 2)
+        short_names = [l.replace("module.", "").replace("Quantized", "")[:20]
+                       for l in layers]
+        ax1.set_xticklabels(short_names, rotation=45, ha="right", fontsize=7)
+        ax1.set_ylabel("Outlier Ratio")
+        ax1.set_title(f"Outlier Ratio per Layer [{role}]")
+        ax1.legend(fontsize=7)
+        ax1.grid(True, alpha=0.3, axis="y")
 
-    ax2.set_xlabel("Outlier Ratio")
-    ax2.set_ylabel("QSNR (dB)" if has_qsnr else "(no QSNR)")
-    ax2.set_title(f"Outlier Ratio vs QSNR — {role}")
-    ax2.legend(fontsize=7)
-    ax2.grid(True, alpha=0.3)
+        # Panel 2: outlier_ratio vs QSNR scatter
+        has_qsnr = any(not math.isnan(d["qsnr_db"]) for d in data_points)
+        for i, cfg in enumerate(configs):
+            cfg_pts = [d for d in data_points if d["config"] == cfg]
+            xs = [d["outlier_ratio"] for d in cfg_pts]
+            ys = [d["qsnr_db"] for d in cfg_pts] if has_qsnr else [0] * len(cfg_pts)
+            color = FALLBACK_CYCLE[i % len(FALLBACK_CYCLE)]
+            ax2.scatter(xs, ys, label=cfg, color=color, alpha=0.7, s=40)
 
-    fig.suptitle("Outlier Analysis", fontsize=13)
+        ax2.set_xlabel("Outlier Ratio")
+        ax2.set_ylabel("QSNR (dB)" if has_qsnr else "(no QSNR)")
+        ax2.set_title(f"Outlier Ratio vs QSNR [{role}]")
+        ax2.legend(fontsize=7)
+        ax2.grid(True, alpha=0.3)
+
+    fig.suptitle("Outlier Analysis by Role", fontsize=13)
     fig.tight_layout()
-    save_figure(fig, output_dir, f"outlier_{role}")
+    save_figure(fig, output_dir, "outlier_analysis")
     return fig
 
 
@@ -1066,9 +1074,9 @@ def per_block_qsnr(
     all_results: dict,
     *,
     output_dir: str,
-    role: str = "input",
+    roles=("input", "weight", "output"),
 ) -> plt.Figure:
-    """Per-block QSNR statistics: std dev boxplot + min-vs-mean scatter.
+    """Per-block QSNR statistics: std dev boxplot + min-vs-mean, one row per role.
 
     Uses ``qsnr_db_std``, ``qsnr_db_min``, ``qsnr_db_max`` from
     QSNRObserver per-block mode.
@@ -1076,14 +1084,13 @@ def per_block_qsnr(
     Args:
         all_results: Nested dict ``{part: {config: {"report": ...}}}``.
         output_dir: Output root directory.
-        role: Tensor role to plot (default ``"input"``).
+        roles: Tensor roles to plot (default ``("input", "weight", "output")``).
 
     Returns:
         matplotlib Figure.
     """
-    layer_data = defaultdict(lambda: defaultdict(list))
-    has_min = False
-    has_std = False
+    role_layer_data: Dict[str, dict] = {}
+    any_data = False
 
     for part_name, part_data in all_results.items():
         if not part_name.startswith("part_") or not isinstance(part_data, dict):
@@ -1095,28 +1102,35 @@ def per_block_qsnr(
             if not hasattr(report, "iter_slices"):
                 continue
             for layer, r, stage, slice_key, metrics in report.iter_slices():
-                if r != role:
+                if r not in roles:
                     continue
+                ld = role_layer_data.setdefault(r, defaultdict(lambda: defaultdict(list)))
                 if "qsnr_db_std" in metrics:
-                    layer_data[layer]["qsnr_db_std"].append(metrics["qsnr_db_std"])
-                    has_std = True
+                    ld[layer]["qsnr_db_std"].append(metrics["qsnr_db_std"])
+                    any_data = True
                 if "qsnr_db_min" in metrics:
-                    layer_data[layer]["qsnr_db_min"].append(metrics["qsnr_db_min"])
-                    layer_data[layer]["qsnr_db"].append(metrics.get("qsnr_db", float("nan")))
-                    has_min = True
+                    ld[layer]["qsnr_db_min"].append(metrics["qsnr_db_min"])
+                    ld[layer]["qsnr_db"].append(metrics.get("qsnr_db", float("nan")))
+                    any_data = True
 
-    if not has_std and not has_min:
+    present = [r for r in roles if r in role_layer_data]
+    if not any_data or not present:
         raise ValueError(
-            f"Per-block QSNR statistics not available for role {role!r}. "
+            f"Per-block QSNR statistics not available for roles {list(roles)}. "
             "QSNRObserver collects per-block stats (qsnr_db_std/min/max) only "
             "when the format uses per_block granularity. "
             + _how("QSNRObserver")
         )
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    n_rows = len(present)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4.5 * n_rows),
+                             squeeze=False)
 
-    # Panel 1: qsnr_db_std per layer boxplot
-    if has_std:
+    for row_idx, role in enumerate(present):
+        ax1, ax2 = axes[row_idx, 0], axes[row_idx, 1]
+        layer_data = role_layer_data[role]
+
+        # Panel 1: qsnr_db_std per layer boxplot
         layers = sorted(layer_data.keys())
         std_data = []
         std_labels = []
@@ -1131,12 +1145,13 @@ def per_block_qsnr(
             ax1.boxplot(std_data, tick_labels=std_labels, patch_artist=True)
             ax1.set_xticklabels(std_labels, rotation=45, ha="right", fontsize=7)
 
-    ax1.set_ylabel("QSNR Std Dev (dB)")
-    ax1.set_title(f"Per-Block QSNR Std Dev — {role}")
-    ax1.grid(True, alpha=0.3, axis="y")
+        ax1.set_ylabel("QSNR Std Dev (dB)")
+        ax1.set_title(f"Per-Block QSNR Std Dev [{role}]")
+        ax1.grid(True, alpha=0.3, axis="y")
 
-    # Panel 2: qsnr_db_min vs qsnr_db scatter
-    if has_min:
+        # Panel 2: qsnr_db_min vs qsnr_db scatter
+        means_all = []
+        mins_all = []
         for l in sorted(layer_data.keys()):
             means = layer_data[l].get("qsnr_db", [])
             mins = layer_data[l].get("qsnr_db_min", [])
@@ -1145,22 +1160,24 @@ def per_block_qsnr(
                 avg_min = sum(mins) / max(len(mins), 1)
                 ax2.scatter(avg_mean, avg_min, s=40, alpha=0.7,
                            label=l[:30] if len(layer_data) <= 10 else "")
+                means_all.extend(means)
+                mins_all.extend(mins)
 
-        if means and mins:
-            all_vals = means + mins
+        if means_all and mins_all:
+            all_vals = means_all + mins_all
             lo, hi = min(all_vals), max(all_vals)
             ax2.plot([lo, hi], [lo, hi], "k--", linewidth=0.5, alpha=0.5)
 
-    ax2.set_xlabel("Mean QSNR (dB)")
-    ax2.set_ylabel("Min QSNR (dB)")
-    ax2.set_title(f"Min vs Mean QSNR — {role}")
-    if len(layer_data) <= 10:
-        ax2.legend(fontsize=6)
-    ax2.grid(True, alpha=0.3)
+        ax2.set_xlabel("Mean QSNR (dB)")
+        ax2.set_ylabel("Min QSNR (dB)")
+        ax2.set_title(f"Min vs Mean QSNR per Block [{role}]")
+        if len(layer_data) <= 10:
+            ax2.legend(fontsize=6)
+        ax2.grid(True, alpha=0.3)
 
-    fig.suptitle("Per-Block QSNR Distribution", fontsize=13)
+    fig.suptitle("Per-Block QSNR Distribution by Role", fontsize=13)
     fig.tight_layout()
-    save_figure(fig, output_dir, f"per_block_qsnr_{role}")
+    save_figure(fig, output_dir, "per_block_qsnr")
     return fig
 
 
@@ -1335,6 +1352,144 @@ def role_distribution_comparison(
     fig.suptitle("Distribution Feature Comparison Across Roles", fontsize=13)
     fig.tight_layout()
     save_figure(fig, output_dir, "role_distribution")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 18 — Per-layer role-separated fp32 distribution histograms
+# ---------------------------------------------------------------------------
+
+def per_layer_role_histogram(
+    all_results: dict,
+    *,
+    k: int = 5,
+    output_dir: str,
+    roles: tuple = ("input", "weight", "output"),
+) -> plt.Figure:
+    """Per-layer, per-role fp32 value distribution histograms for worst-QSNR layers.
+
+    For the *k* layers with the lowest QSNR, plots the fp32 value
+    distribution histogram for each role (input / weight / output) in a
+    grid layout (rows = layers, cols = roles). Uses ``HistogramObserver``
+    data (``fp32_hist``). Falls back to text-only distribution summary
+    from ``DistributionObserver`` when histogram data is unavailable.
+
+    Args:
+        all_results: Nested dict ``{part: {config: {"report": ...}}}``.
+            Reports are expected to have an ``iter_slices`` method
+            yielding ``(layer, role, stage, slice_key, metrics)`` tuples.
+        k: Number of worst-QSNR layers to show (default 5).
+        output_dir: Output root directory.
+        roles: Roles to display (default ``("input", "weight", "output")``).
+
+    Returns:
+        matplotlib Figure.
+    """
+    layer_role_hists: Dict[tuple, np.ndarray] = {}
+    layer_role_qsnr: Dict[tuple, float] = {}
+    layer_role_dist: Dict[tuple, dict] = {}  # DistributionObserver fallback
+
+    for part_name, part_data in all_results.items():
+        if not isinstance(part_data, dict):
+            continue
+        for config_name, config_data in part_data.items():
+            if not isinstance(config_data, dict) or "report" not in config_data:
+                continue
+            report = config_data["report"]
+            if not hasattr(report, "iter_slices"):
+                continue
+            for layer, role, stage, slice_key, metrics in report.iter_slices():
+                if role not in roles:
+                    continue
+                key = (layer, role)
+                if key not in layer_role_hists and "fp32_hist" in metrics:
+                    h = _to_numpy(metrics["fp32_hist"])
+                    if h is not None and len(h) > 0:
+                        layer_role_hists[key] = h
+                if key not in layer_role_qsnr and "qsnr_db" in metrics:
+                    layer_role_qsnr[key] = metrics["qsnr_db"]
+                if key not in layer_role_dist:
+                    dkeys = ("mean", "std", "skewness", "kurtosis", "min", "max")
+                    d = {dk: metrics[dk] for dk in dkeys if dk in metrics}
+                    if d:
+                        layer_role_dist[key] = d
+
+    if not layer_role_hists and not layer_role_dist:
+        raise ValueError(
+            "No histogram or distribution data available. "
+            + _how("HistogramObserver") + " " + _how("DistributionObserver")
+        )
+
+    # Rank layers by QSNR (lowest first), averaging across available roles
+    layer_qsnr_avg: Dict[str, list] = {}
+    for (layer, role), q in layer_role_qsnr.items():
+        layer_qsnr_avg.setdefault(layer, []).append(q)
+    for (layer, role) in set(list(layer_role_hists.keys()) + list(layer_role_dist.keys())):
+        layer_qsnr_avg.setdefault(layer, [])
+
+    ranked = sorted(
+        layer_qsnr_avg.items(),
+        key=lambda x: sum(x[1]) / max(len(x[1]), 1) if x[1] else float("inf"),
+    )
+    bottom_k_layers = [l for l, _ in ranked[:k]]
+
+    if not bottom_k_layers:
+        raise ValueError("No layers found with distribution data.")
+
+    present_roles = [r for r in roles if any(
+        (l, r) in layer_role_hists or (l, r) in layer_role_dist
+        for l in bottom_k_layers
+    )]
+    if not present_roles:
+        present_roles = list(roles)
+
+    n_rows = len(bottom_k_layers)
+    n_cols = len(present_roles)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.5 * n_cols, 3 * n_rows),
+                             squeeze=False)
+
+    for row_idx, layer in enumerate(bottom_k_layers):
+        for col_idx, role in enumerate(present_roles):
+            ax = axes[row_idx, col_idx]
+            key = (layer, role)
+
+            if key in layer_role_hists:
+                counts = layer_role_hists[key]
+                bin_centers = np.arange(len(counts))
+                ax.fill_between(bin_centers, counts, alpha=0.5, color="#3498db",
+                                step="mid")
+                ax.plot(bin_centers, counts, color="#3498db", linewidth=0.6)
+            elif key in layer_role_dist:
+                d = layer_role_dist[key]
+                lines = [
+                    f"mean={d.get('mean', 0):.2g}",
+                    f"std={d.get('std', 0):.2g}",
+                    f"skew={d.get('skewness', 0):.2f}",
+                    f"kurt={d.get('kurtosis', 0):.2f}",
+                ]
+                ax.text(0.5, 0.5, "\n".join(lines), transform=ax.transAxes,
+                        ha="center", va="center", fontsize=8,
+                        bbox=dict(boxstyle="round", facecolor="#f0f0f0", alpha=0.8))
+            else:
+                ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=9, color="gray")
+
+            qsnr_val = layer_role_qsnr.get(key, float("nan"))
+            qsnr_str = f"QSNR={qsnr_val:.1f}dB" if not math.isnan(qsnr_val) else ""
+            short_layer = layer.replace("module.", "").replace("Quantized", "")[:25]
+            ax.set_title(f"{short_layer}\n{role} {qsnr_str}", fontsize=7)
+            if row_idx == n_rows - 1:
+                ax.set_xlabel("Bin", fontsize=7)
+            if col_idx == 0:
+                ax.set_ylabel("Count", fontsize=7)
+            ax.tick_params(labelsize=6)
+            ax.grid(True, alpha=0.2)
+
+    fig.suptitle("Per-Layer fp32 Value Distribution — Worst-QSNR Layers",
+                 fontsize=12, y=1.01)
+    fig.tight_layout()
+    save_figure(fig, output_dir, "per_layer_role_histogram")
     return fig
 
 

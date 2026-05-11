@@ -58,6 +58,8 @@ results/
 | `correlation_heatmap()` | `"distribution"` + `"qsnr"` | — |
 | `cost_decomposition()` | — | cost 已执行 |
 | `role_distribution_comparison()` | `"distribution"` | — |
+| `error_propagation(role)` | `"qsnr"` | `true_error=True`（需 hook + observer 数据） |
+| `accumulated_vs_local(role)` | `"qsnr"` | `true_error=True`（需 hook + observer 数据） |
 
 不满足时抛出 `ValueError` 并说明缺少的 observer 或步骤。
 
@@ -203,6 +205,8 @@ report = Study(configs, model=model).run(
 | `"fit"` | DistributionFitObserver | distribution_fit table（需 `scipy`） |
 | `"accuracy"` | — （无 observer） | accuracy table（需 `eval_fn`） |
 | `"cost"` | — （无 observer） | pareto_frontier, cost_decomposition（需 `needs_cost=True`） |
+| `"error_propagation"` | —（需 `true_error=True`） | error_propagation, accumulated_vs_local |
+| `"error_source"` | —（需 `true_error=True`） | error_source_analysis table |
 
 ---
 
@@ -229,6 +233,44 @@ sns.pairplot(df[features].dropna(), diag_kind="kde")
 g = sns.FacetGrid(df, col="role", height=4)
 g.map_dataframe(sns.scatterplot, x="crest_factor", y="qsnr_db")
 ```
+
+---
+
+---
+
+## 误差传播分析（P3.4）
+
+需要同时启用 `true_error=True`（累积 QSNR）和 `"qsnr"` observer（本地 QSNR）。详见 [误差分析](analysis.md#误差传播分析累积-vs-本地)。
+
+### 误差传播面板 `error_propagation(role)` <small>P3.4</small>
+
+三行面板图，逐层对比累积误差与本地误差：
+
+```python
+fig = report.plot.error_propagation(role="output")
+```
+
+- **Row 1**：分组柱状图 — Accumulated QSNR（深色）vs Local QSNR（浅色）
+- **Row 2**：δ-QSNR 柱状图 — `acc[i-1] − acc[i]`，正值表示该层引入的增量误差
+- **Row 3**：Headroom 柱状图 — `local − accumulated`，按诊断阈值着色（绿=Source / 橙=Mixed / 红=Propagated）
+
+**所需 observer**: `"qsnr"` + `true_error=True`
+
+---
+
+### Accumulated vs Local 散点图 `accumulated_vs_local(role)` <small>P3.4</small>
+
+```python
+fig = report.plot.accumulated_vs_local(role="output")
+```
+
+- X 轴：Accumulated QSNR（hook，累积误差）
+- Y 轴：Local QSNR（observer，本地误差）
+- 每个点代表一个 matched layer
+- y=x 对角线：在线上 = Source（本地误差主导），高于线 = Propagated（累积误差主导）
+- 自动标注 outlier（headroom > 15 dB 或 < 3 dB）
+
+**所需 observer**: `"qsnr"` + `true_error=True`
 
 ---
 

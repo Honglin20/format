@@ -93,7 +93,7 @@ class StudyPlotAccessor:
         ax.set_xticklabels(short_names, rotation=45, ha="right", fontsize=7)
         ax.set_xlabel("Layer")
         ax.set_ylabel("QSNR (dB)")
-        ax.set_title("QSNR per Layer")
+        ax.set_title("QSNR per Layer (avg across input/weight/output)")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -101,26 +101,27 @@ class StudyPlotAccessor:
 
     # ── Crest factor vs QSNR scatter ────────────────────────────────────
 
-    def crest_vs_qsnr(self, role: str = "input") -> plt.Figure:
-        """Crest factor vs QSNR scatter, one point per (config, layer).
+    def crest_vs_qsnr(self, roles=("input", "weight", "output")) -> plt.Figure:
+        """Crest factor vs QSNR scatter, one panel per role.
 
         Args:
-            role: Tensor role to plot. Must be one of
+            roles: Tensor roles to plot. Default all three
+                ``("input", "weight", "output")``. Each must be one of
                 ``"input"``, ``"weight"``, ``"output"``, ``"bias"``.
 
         Returns:
-            matplotlib Figure.
+            matplotlib Figure with 1 × len(roles) subplots.
 
         Raises:
-            ValueError: If *role* is invalid, or if required observer data
-                (``crest_factor`` from DistributionObserver, ``qsnr_db`` from
-                QSNRObserver) is not present.
+            ValueError: If any role is invalid, or if required observer data
+                is not present.
         """
-        if role not in _VALID_PLOT_ROLES:
-            raise ValueError(
-                f"Invalid role {role!r}. Must be one of "
-                f"{sorted(_VALID_PLOT_ROLES)}."
-            )
+        for role in roles:
+            if role not in _VALID_PLOT_ROLES:
+                raise ValueError(
+                    f"Invalid role {role!r}. Must be one of "
+                    f"{sorted(_VALID_PLOT_ROLES)}."
+                )
 
         df = self._report.to_dataframe()
         needed = {"crest_factor", "qsnr_db"}
@@ -131,52 +132,58 @@ class StudyPlotAccessor:
                 + _how_to("distribution", "qsnr")
             )
 
-        role_df = df[df["role"] == role]
-        if role_df.empty:
-            available = sorted(df["role"].unique()) if "role" in df.columns else []
+        available = [r for r in roles if r in df["role"].values]
+        if not available:
+            all_roles = sorted(df["role"].unique()) if "role" in df.columns else []
             raise ValueError(
-                f"No data for role {role!r}. "
-                f"Roles present in the report: {available or '(none)'}."
+                f"No data for roles {list(roles)}. "
+                f"Roles present in the report: {all_roles or '(none)'}."
             )
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-        configs = sorted(role_df["config"].unique())
+        fig, axes = plt.subplots(1, len(available),
+                                 figsize=(6 * len(available), 5),
+                                 squeeze=False)
 
-        for cfg in configs:
-            cfg_df = role_df[role_df["config"] == cfg]
-            ax.scatter(cfg_df["crest_factor"], cfg_df["qsnr_db"],
-                       label=cfg, alpha=0.7, s=40)
+        for ax, role in zip(axes[0], available):
+            role_df = df[df["role"] == role]
+            configs = sorted(role_df["config"].unique())
+            for cfg in configs:
+                cfg_df = role_df[role_df["config"] == cfg]
+                ax.scatter(cfg_df["crest_factor"], cfg_df["qsnr_db"],
+                           label=cfg, alpha=0.7, s=40)
+            ax.set_xlabel("Crest Factor (peak / RMS)")
+            ax.set_ylabel("QSNR (dB)")
+            ax.set_title(f"{role}", fontsize=11)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
 
-        ax.set_xlabel("Crest Factor (peak / RMS)")
-        ax.set_ylabel("QSNR (dB)")
-        ax.set_title(f"Crest Factor vs QSNR — {role}")
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
+        fig.suptitle("Crest Factor vs QSNR by Role", fontsize=13)
         fig.tight_layout()
         return fig
 
 
     # ── Outlier analysis ───────────────────────────────────────────────
 
-    def outlier_analysis(self, role: str = "input") -> plt.Figure:
-        """Outlier ratio per-layer bar chart + outlier vs QSNR scatter.
+    def outlier_analysis(self, roles=("input", "weight", "output")) -> plt.Figure:
+        """Outlier ratio per-layer bar + outlier vs QSNR scatter, one row per role.
 
         Args:
-            role: Tensor role to plot. Must be one of
-                ``"input"``, ``"weight"``, ``"output"``, ``"bias"``.
+            roles: Tensor roles to plot. Default all three
+                ``("input", "weight", "output")``.
 
         Returns:
-            matplotlib Figure with two panels.
+            matplotlib Figure with len(roles) rows × 2 columns.
 
         Raises:
-            ValueError: If *role* is invalid, or if ``outlier_ratio`` from
+            ValueError: If any role is invalid, or if ``outlier_ratio`` from
                 DistributionObserver is not available.
         """
-        if role not in _VALID_PLOT_ROLES:
-            raise ValueError(
-                f"Invalid role {role!r}. Must be one of "
-                f"{sorted(_VALID_PLOT_ROLES)}."
-            )
+        for role in roles:
+            if role not in _VALID_PLOT_ROLES:
+                raise ValueError(
+                    f"Invalid role {role!r}. Must be one of "
+                    f"{sorted(_VALID_PLOT_ROLES)}."
+                )
 
         df = self._report.to_dataframe()
         if df is None or df.empty or "outlier_ratio" not in df.columns:
@@ -185,79 +192,87 @@ class StudyPlotAccessor:
                 + _how_to("distribution")
             )
 
-        role_df = df[df["role"] == role]
-        if role_df.empty:
-            available = sorted(df["role"].unique()) if "role" in df.columns else []
+        available = [r for r in roles if r in df["role"].values]
+        if not available:
+            all_roles = sorted(df["role"].unique()) if "role" in df.columns else []
             raise ValueError(
-                f"No data for role {role!r}. "
-                f"Roles present in the report: {available or '(none)'}."
+                f"No data for roles {list(roles)}. "
+                f"Roles present in the report: {all_roles or '(none)'}."
             )
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        n_rows = len(available)
+        fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4.5 * n_rows),
+                                 squeeze=False)
 
-        # Panel 1: per-layer outlier_ratio bar chart
-        layers = list(dict.fromkeys(role_df["layer"]))
-        configs = sorted(role_df["config"].unique())
-        x = np.arange(len(layers))
-        width = 0.8 / max(len(configs), 1)
+        for row_idx, role in enumerate(available):
+            ax1, ax2 = axes[row_idx, 0], axes[row_idx, 1]
+            role_df = df[df["role"] == role]
 
-        for i, cfg in enumerate(configs):
-            cfg_df = role_df[role_df["config"] == cfg]
-            per_layer = cfg_df.groupby("layer")["outlier_ratio"].mean()
-            values = [per_layer.get(l, 0) for l in layers]
-            ax1.bar(x + i * width, values, width, label=cfg, alpha=0.7)
+            # Panel 1: per-layer outlier_ratio bar chart
+            layers = list(dict.fromkeys(role_df["layer"]))
+            configs = sorted(role_df["config"].unique())
+            x = np.arange(len(layers))
+            width = 0.8 / max(len(configs), 1)
 
-        ax1.set_xticks(x + width * (len(configs) - 1) / 2)
-        ax1.set_xticklabels([_short_layer_name(l) for l in layers],
-                            rotation=45, ha="right", fontsize=7)
-        ax1.set_ylabel("Outlier Ratio")
-        ax1.set_title(f"Outlier Ratio per Layer — {role}")
-        ax1.legend(fontsize=7)
-        ax1.grid(True, alpha=0.3, axis="y")
+            for i, cfg in enumerate(configs):
+                cfg_df = role_df[role_df["config"] == cfg]
+                per_layer = cfg_df.groupby("layer")["outlier_ratio"].mean()
+                values = [per_layer.get(l, 0) for l in layers]
+                ax1.bar(x + i * width, values, width, label=cfg, alpha=0.7)
 
-        # Panel 2: outlier_ratio vs QSNR scatter
-        has_qsnr = "qsnr_db" in df.columns
-        for cfg in configs:
-            cfg_df = role_df[role_df["config"] == cfg]
-            if has_qsnr:
-                ax2.scatter(cfg_df["outlier_ratio"], cfg_df["qsnr_db"],
-                           label=cfg, alpha=0.7, s=40)
-            else:
-                ax2.scatter(cfg_df["outlier_ratio"],
-                           [0] * len(cfg_df), label=cfg, alpha=0.7, s=40)
+            ax1.set_xticks(x + width * (len(configs) - 1) / 2)
+            ax1.set_xticklabels([_short_layer_name(l) for l in layers],
+                                rotation=45, ha="right", fontsize=7)
+            ax1.set_ylabel("Outlier Ratio")
+            ax1.set_title(f"Outlier Ratio per Layer [{role}]")
+            ax1.legend(fontsize=7)
+            ax1.grid(True, alpha=0.3, axis="y")
 
-        ax2.set_xlabel("Outlier Ratio")
-        ax2.set_ylabel("QSNR (dB)" if has_qsnr else "(no QSNR)")
-        ax2.set_title(f"Outlier Ratio vs QSNR — {role}")
-        ax2.legend(fontsize=7)
-        ax2.grid(True, alpha=0.3)
+            # Panel 2: outlier_ratio vs QSNR scatter
+            has_qsnr = "qsnr_db" in df.columns
+            for cfg in configs:
+                cfg_df = role_df[role_df["config"] == cfg]
+                if has_qsnr:
+                    ax2.scatter(cfg_df["outlier_ratio"], cfg_df["qsnr_db"],
+                               label=cfg, alpha=0.7, s=40)
+                else:
+                    ax2.scatter(cfg_df["outlier_ratio"],
+                               [0] * len(cfg_df), label=cfg, alpha=0.7, s=40)
 
+            ax2.set_xlabel("Outlier Ratio")
+            ax2.set_ylabel("QSNR (dB)" if has_qsnr else "(no QSNR)")
+            ax2.set_title(f"Outlier Ratio vs QSNR [{role}]")
+            ax2.legend(fontsize=7)
+            ax2.grid(True, alpha=0.3)
+
+        fig.suptitle("Outlier Analysis by Role", fontsize=13)
         fig.tight_layout()
         return fig
 
     # ── Per-block QSNR distribution ─────────────────────────────────────
 
-    def per_block_qsnr(self, role: str = "input") -> plt.Figure:
-        """Per-block QSNR statistics (std + min-vs-mean scatter).
+    def per_block_qsnr(self, roles=("input", "weight", "output")) -> plt.Figure:
+        """Per-block QSNR statistics (std + min-vs-mean), one row per role.
 
         Uses ``qsnr_db_std``, ``qsnr_db_min``, ``qsnr_db_max`` collected by
         QSNRObserver in per-block mode.
 
         Args:
-            role: Tensor role to plot.
+            roles: Tensor roles to plot. Default all three
+                ``("input", "weight", "output")``.
 
         Returns:
-            matplotlib Figure with two panels.
+            matplotlib Figure with len(roles) rows × 2 columns.
 
         Raises:
-            ValueError: If per-block QSNR statistics are not available
-                (QSNRObserver not active with per-block granularity).
+            ValueError: If per-block QSNR statistics are not available.
         """
-        if role not in _VALID_PLOT_ROLES:
-            raise ValueError(
-                f"Invalid role {role!r}. Must be one of "
-                f"{sorted(_VALID_PLOT_ROLES)}."
-            )
+        for role in roles:
+            if role not in _VALID_PLOT_ROLES:
+                raise ValueError(
+                    f"Invalid role {role!r}. Must be one of "
+                    f"{sorted(_VALID_PLOT_ROLES)}."
+                )
 
         df = self._report.to_dataframe()
         needed = {"qsnr_db_std", "qsnr_db_min", "qsnr_db_max"}
@@ -276,58 +291,65 @@ class StudyPlotAccessor:
                 "per-block analysis was run."
             )
 
-        role_df = df[df["role"] == role]
-        if role_df.empty:
-            available = sorted(df["role"].unique()) if "role" in df.columns else []
+        available = [r for r in roles if r in df["role"].values]
+        if not available:
+            all_roles = sorted(df["role"].unique()) if "role" in df.columns else []
             raise ValueError(
-                f"No data for role {role!r}. "
-                f"Roles present in the report: {available or '(none)'}."
+                f"No data for roles {list(roles)}. "
+                f"Roles present in the report: {all_roles or '(none)'}."
             )
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-        layers = list(dict.fromkeys(role_df["layer"]))
-        configs = sorted(role_df["config"].unique())
+        n_rows = len(available)
+        fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4.5 * n_rows),
+                                 squeeze=False)
 
-        # Panel 1: per-layer qsnr_db_std box
-        layer_std_data = {}
-        for layer in layers:
-            ldf = role_df[role_df["layer"] == layer]
-            if "qsnr_db_std" in ldf.columns:
-                vals = ldf["qsnr_db_std"].dropna().tolist()
-                if vals:
-                    layer_std_data[layer] = vals
+        for row_idx, role in enumerate(available):
+            ax1, ax2 = axes[row_idx, 0], axes[row_idx, 1]
+            role_df = df[df["role"] == role]
+            layers = list(dict.fromkeys(role_df["layer"]))
+            configs = sorted(role_df["config"].unique())
 
-        if layer_std_data:
-            positions = range(len(layer_std_data))
-            ax1.boxplot(layer_std_data.values(), positions=positions,
-                        widths=0.6, patch_artist=True)
-            ax1.set_xticks(positions)
-            ax1.set_xticklabels([_short_layer_name(l) for l in layer_std_data],
-                                rotation=45, ha="right", fontsize=7)
-        ax1.set_ylabel("QSNR Std Dev (dB)")
-        ax1.set_title(f"Per-Block QSNR Std Dev — {role}")
-        ax1.grid(True, alpha=0.3, axis="y")
+            # Panel 1: per-layer qsnr_db_std box
+            layer_std_data = {}
+            for layer in layers:
+                ldf = role_df[role_df["layer"] == layer]
+                if "qsnr_db_std" in ldf.columns:
+                    vals = ldf["qsnr_db_std"].dropna().tolist()
+                    if vals:
+                        layer_std_data[layer] = vals
 
-        # Panel 2: qsnr_db_min vs qsnr_db mean scatter
-        for cfg in configs:
-            cfg_df = role_df[role_df["config"] == cfg]
-            if "qsnr_db_min" in cfg_df.columns and "qsnr_db" in cfg_df.columns:
-                ax2.scatter(cfg_df["qsnr_db"], cfg_df["qsnr_db_min"],
-                           label=cfg, alpha=0.7, s=40)
+            if layer_std_data:
+                positions = range(len(layer_std_data))
+                ax1.boxplot(layer_std_data.values(), positions=positions,
+                            widths=0.6, patch_artist=True)
+                ax1.set_xticks(positions)
+                ax1.set_xticklabels([_short_layer_name(l) for l in layer_std_data],
+                                    rotation=45, ha="right", fontsize=7)
+            ax1.set_ylabel("QSNR Std Dev (dB)")
+            ax1.set_title(f"Per-Block QSNR Std Dev [{role}]")
+            ax1.grid(True, alpha=0.3, axis="y")
 
-        ax2.set_xlabel("Mean QSNR (dB)")
-        ax2.set_ylabel("Min QSNR (dB)")
-        ax2.set_title(f"Min vs Mean QSNR per Block — {role}")
-        ax2.legend(fontsize=7)
-        ax2.grid(True, alpha=0.3)
+            # Panel 2: qsnr_db_min vs qsnr_db mean scatter
+            for cfg in configs:
+                cfg_df = role_df[role_df["config"] == cfg]
+                if "qsnr_db_min" in cfg_df.columns and "qsnr_db" in cfg_df.columns:
+                    ax2.scatter(cfg_df["qsnr_db"], cfg_df["qsnr_db_min"],
+                               label=cfg, alpha=0.7, s=40)
 
-        # Diagonal reference line
-        if "qsnr_db" in role_df.columns:
-            vals = role_df["qsnr_db"].dropna()
-            if not vals.empty:
-                lo, hi = vals.min(), vals.max()
-                ax2.plot([lo, hi], [lo, hi], "k--", linewidth=0.5, alpha=0.5)
+            ax2.set_xlabel("Mean QSNR (dB)")
+            ax2.set_ylabel("Min QSNR (dB)")
+            ax2.set_title(f"Min vs Mean QSNR per Block [{role}]")
+            ax2.legend(fontsize=7)
+            ax2.grid(True, alpha=0.3)
 
+            # Diagonal reference line
+            if "qsnr_db" in role_df.columns:
+                vals = role_df["qsnr_db"].dropna()
+                if not vals.empty:
+                    lo, hi = vals.min(), vals.max()
+                    ax2.plot([lo, hi], [lo, hi], "k--", linewidth=0.5, alpha=0.5)
+
+        fig.suptitle("Per-Block QSNR Distribution by Role", fontsize=13)
         fig.tight_layout()
         return fig
 
@@ -609,6 +631,215 @@ class StudyPlotAccessor:
         fig.tight_layout()
         return fig
 
+    # ── Error propagation ───────────────────────────────────────────────
+
+    def error_propagation(self, role: str = "output") -> plt.Figure:
+        """Accumulated vs local QSNR decomposition, 3-row panel.
+
+        Row 1: Grouped bar — accumulated QSNR (hook) vs local QSNR (observer).
+        Row 2: Delta-QSNR — drop in accumulated QSNR between consecutive layers.
+        Row 3: Headroom — local minus accumulated QSNR.
+
+        Args:
+            role: Tensor role to analyse (default ``"output"``).
+
+        Returns:
+            matplotlib Figure with 3 rows × 1 column.
+
+        Raises:
+            ValueError: If correlation data is not available (requires both
+                ``true_error=True`` and QSNRObserver active).
+        """
+        if role not in _VALID_PLOT_ROLES:
+            raise ValueError(
+                f"Invalid role {role!r}. Must be one of "
+                f"{sorted(_VALID_PLOT_ROLES)}."
+            )
+
+        data = self._report._correlate_hook_observer(role)
+        has_any = any(
+            bool(info["matched"]) for info in data.values()
+        )
+        if not has_any:
+            raise ValueError(
+                "Error propagation data not available. "
+                "Requires both true_error=True and QSNRObserver active. "
+                + _how_to("qsnr")
+            )
+
+        fig, axes = plt.subplots(3, 1, figsize=(14, 14), sharex=True)
+        colors = plt.cm.tab10(np.linspace(0, 1, max(len(data), 1)))
+
+        all_hook_keys: list = []
+        for idx, (cfg_name, info) in enumerate(data.items()):
+            matched = info["matched"]
+            if not matched:
+                continue
+
+            hook_keys = [m[0] for m in matched]
+            acc_qsnrs = [m[1] for m in matched]
+            loc_qsnrs = [m[2] for m in matched]
+            if not all_hook_keys:
+                all_hook_keys = hook_keys
+
+            x = np.arange(len(hook_keys))
+            width = 0.35
+            n_cfgs = max(len(data), 1)
+            group_width = width * 2 + 0.1
+            offset = (idx - (n_cfgs - 1) / 2) * group_width
+
+            color = colors[idx % len(colors)]
+
+            # Row 1: accumulated vs local grouped bars
+            ax0 = axes[0]
+            ax0.bar(x + offset, acc_qsnrs, width,
+                    label=f"{cfg_name} (accum)", color=color, alpha=0.8)
+            ax0.bar(x + offset + width, loc_qsnrs, width,
+                    label=f"{cfg_name} (local)", color=color, alpha=0.35,
+                    hatch="//")
+
+            # Row 2: delta-QSNR
+            ax1 = axes[1]
+            deltas = [0.0]
+            for i in range(1, len(matched)):
+                deltas.append(matched[i - 1][1] - matched[i][1])
+            bars_delta = ax1.bar(x + offset + width / 2, deltas,
+                                 group_width * 0.9, color=color, alpha=0.8)
+            for bar, d in zip(bars_delta, deltas):
+                if d > 5.0:
+                    bar.set_color("#e74c3c")
+                elif d > 1.0:
+                    bar.set_color("#f39c12")
+                else:
+                    bar.set_color("#2ecc71")
+
+            # Row 3: headroom (local - accumulated)
+            ax2 = axes[2]
+            headrooms = [l - a for l, a in zip(loc_qsnrs, acc_qsnrs)]
+            bars_head = ax2.bar(x + offset + width / 2, headrooms,
+                                group_width * 0.9, color=color, alpha=0.8)
+            for bar, h in zip(bars_head, headrooms):
+                if h < 3.0:
+                    bar.set_color("#e74c3c")
+                elif h < 10.0:
+                    bar.set_color("#f39c12")
+                else:
+                    bar.set_color("#2ecc71")
+
+        # Labels
+        axes[0].set_ylabel("QSNR (dB)")
+        axes[0].set_title(f"Accumulated vs Local QSNR [{role}]")
+        axes[0].legend(fontsize=7, ncol=2)
+        axes[0].grid(True, alpha=0.3, axis="y")
+
+        axes[1].set_ylabel("Δ QSNR (dB)")
+        axes[1].set_title(
+            f"Δ-QSNR: Accumulated Drop Between Layers [{role}]  "
+            "(red > 5 dB, amber > 1 dB)"
+        )
+        axes[1].axhline(y=0, color="black", linewidth=0.5)
+        axes[1].grid(True, alpha=0.3, axis="y")
+
+        axes[2].set_ylabel("Headroom (dB)")
+        axes[2].set_xlabel("Layer")
+        axes[2].set_title(
+            f"Local Headroom = Local − Accumulated [{role}]  "
+            "(red < 3 dB = source, amber < 10 dB, green = propagated)"
+        )
+        axes[2].axhline(y=0, color="black", linewidth=0.5)
+        axes[2].grid(True, alpha=0.3, axis="y")
+
+        if all_hook_keys:
+            short_names = [_short_layer_name(k) for k in all_hook_keys]
+            for ax in axes:
+                ax.set_xticks(np.arange(len(all_hook_keys)))
+                ax.set_xticklabels(short_names, rotation=45, ha="right",
+                                   fontsize=7)
+
+        fig.suptitle("Error Propagation Analysis", fontsize=14)
+        fig.tight_layout()
+        return fig
+
+    def accumulated_vs_local(self, role: str = "output") -> plt.Figure:
+        """Scatter plot: accumulated QSNR vs local QSNR.
+
+        Points on the y=x diagonal indicate that this layer's local
+        quantization is the dominant error source. Points above the
+        diagonal mean error is propagated from earlier layers.
+
+        Args:
+            role: Tensor role to analyse (default ``"output"``).
+
+        Returns:
+            matplotlib Figure with single scatter axes.
+
+        Raises:
+            ValueError: If correlation data is not available.
+        """
+        if role not in _VALID_PLOT_ROLES:
+            raise ValueError(
+                f"Invalid role {role!r}. Must be one of "
+                f"{sorted(_VALID_PLOT_ROLES)}."
+            )
+
+        data = self._report._correlate_hook_observer(role)
+        has_any = any(
+            bool(info["matched"]) for info in data.values()
+        )
+        if not has_any:
+            raise ValueError(
+                "Accumulated vs local data not available. "
+                "Requires both true_error=True and QSNRObserver active. "
+                + _how_to("qsnr")
+            )
+
+        fig, ax = plt.subplots(figsize=(9, 8))
+        colors_cfg = plt.cm.tab10(np.linspace(0, 1, max(len(data), 1)))
+
+        all_acc, all_loc = [], []
+
+        for idx, (cfg_name, info) in enumerate(data.items()):
+            matched = info["matched"]
+            if not matched:
+                continue
+
+            xs = [m[1] for m in matched]
+            ys = [m[2] for m in matched]
+            labels = [m[0] for m in matched]
+            all_acc.extend(xs)
+            all_loc.extend(ys)
+
+            ax.scatter(xs, ys, label=cfg_name,
+                       color=colors_cfg[idx % len(colors_cfg)],
+                       alpha=0.7, s=60)
+
+            # Annotate notable points
+            for x, y, label in zip(xs, ys, labels):
+                headroom = y - x
+                if headroom > 15.0:
+                    short = _short_layer_name(label)
+                    ax.annotate(short + "↑", (x, y), fontsize=6, alpha=0.7,
+                                xytext=(4, 4), textcoords="offset points")
+                elif headroom < 3.0:
+                    short = _short_layer_name(label)
+                    ax.annotate(short + "×", (x, y), fontsize=6, alpha=0.7,
+                                xytext=(4, 4), textcoords="offset points")
+
+        # Diagonal reference
+        if all_acc:
+            lo = min(all_acc + all_loc) - 2
+            hi = max(all_acc + all_loc) + 2
+            ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.5, alpha=0.5,
+                    label="y=x (source)")
+
+        ax.set_xlabel("Accumulated QSNR (dB)")
+        ax.set_ylabel("Local QSNR (dB)")
+        ax.set_title(f"Accumulated vs Local QSNR [{role}]")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
     # ── Role distribution comparison ─────────────────────────────────────
 
     def role_distribution_comparison(self) -> plt.Figure:
@@ -673,6 +904,154 @@ class StudyPlotAccessor:
             ax.grid(True, alpha=0.3, axis="y")
 
         fig.suptitle("Distribution Feature Comparison Across Roles", fontsize=13)
+        fig.tight_layout()
+        return fig
+
+    # ── Per-layer role distribution histogram ──────────────────────────
+
+    def per_layer_role_histogram(self, k: int = 5) -> plt.Figure:
+        """Per-layer, per-role fp32 value distribution for worst-QSNR layers.
+
+        For the *k* layers with the lowest QSNR, plots the fp32 value
+        distribution histogram for each role (input / weight / output)
+        in a grid: rows = layers, cols = roles.
+
+        Uses ``HistogramObserver`` data (``fp32_hist``) from the raw
+        observer buffer. Falls back to text-only distribution summary
+        from ``DistributionObserver`` when histogram data is absent.
+
+        Args:
+            k: Number of worst-QSNR layers to show (default 5).
+
+        Returns:
+            matplotlib Figure with *k* rows × 3 columns.
+
+        Raises:
+            ValueError: If no histogram or distribution data is available.
+        """
+        import torch as _torch
+
+        roles = ("input", "weight", "output")
+
+        # Collect histogram data from raw observer buffers
+        layer_role_hists: dict = {}
+        layer_role_dist: dict = {}  # DistributionObserver fallback
+
+        for part_name, part_results in self._report._results.items():
+            for r in part_results:
+                obs = r.observers_data
+                if not obs:
+                    continue
+                for layer, roles_dict in obs.items():
+                    for role, stages in roles_dict.items():
+                        if role not in roles:
+                            continue
+                        key = (layer, role)
+                        if key in layer_role_hists or key in layer_role_dist:
+                            continue
+                        for _stage, slices in stages.items():
+                            for _slice_key, metrics in slices.items():
+                                if "fp32_hist" in metrics:
+                                    h = metrics["fp32_hist"]
+                                    if isinstance(h, _torch.Tensor):
+                                        h = h.cpu().float().numpy()
+                                    elif not isinstance(h, np.ndarray):
+                                        h = np.asarray(h)
+                                    if len(h) > 0:
+                                        layer_role_hists[key] = h
+                                if key not in layer_role_dist:
+                                    dkeys = ("mean", "std", "skewness",
+                                             "kurtosis", "min", "max")
+                                    d = {dk: metrics[dk]
+                                         for dk in dkeys if dk in metrics}
+                                    if d:
+                                        layer_role_dist[key] = d
+
+        if not layer_role_hists and not layer_role_dist:
+            raise ValueError(
+                "No histogram or distribution data available. "
+                + _how_to("histogram", "distribution")
+            )
+
+        # Rank layers by QSNR from dataframe
+        df = self._report.to_dataframe()
+        bottom_k: list = []
+        if df is not None and not df.empty and "qsnr_db" in df.columns:
+            layer_qsnr = df.groupby("layer")["qsnr_db"].mean()
+            bottom_k = layer_qsnr.nsmallest(k).index.tolist()
+        else:
+            all_layers = sorted(set(
+                l for l, r in set(layer_role_hists.keys()) | set(layer_role_dist.keys())
+            ))
+            bottom_k = all_layers[:k]
+
+        if not bottom_k:
+            raise ValueError("No layers found with distribution data.")
+
+        present_roles = [r for r in roles if any(
+            (l, r) in layer_role_hists or (l, r) in layer_role_dist
+            for l in bottom_k
+        )]
+        if not present_roles:
+            present_roles = list(roles)
+
+        n_rows = len(bottom_k)
+        n_cols = len(present_roles)
+
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                 figsize=(4.5 * n_cols, 3 * n_rows),
+                                 squeeze=False)
+
+        for row_idx, layer in enumerate(bottom_k):
+            for col_idx, role in enumerate(present_roles):
+                ax = axes[row_idx, col_idx]
+                key = (layer, role)
+
+                if key in layer_role_hists:
+                    counts = layer_role_hists[key]
+                    bin_centers = np.arange(len(counts))
+                    ax.fill_between(bin_centers, counts, alpha=0.5,
+                                    color="#3498db", step="mid")
+                    ax.plot(bin_centers, counts, color="#3498db",
+                           linewidth=0.6)
+                elif key in layer_role_dist:
+                    d = layer_role_dist[key]
+                    lines = [
+                        f"mean={d.get('mean', 0):.2g}",
+                        f"std={d.get('std', 0):.2g}",
+                        f"skew={d.get('skewness', 0):.2f}",
+                        f"kurt={d.get('kurtosis', 0):.2f}",
+                    ]
+                    ax.text(0.5, 0.5, "\n".join(lines),
+                            transform=ax.transAxes,
+                            ha="center", va="center", fontsize=8,
+                            bbox=dict(boxstyle="round", facecolor="#f0f0f0",
+                                      alpha=0.8))
+                else:
+                    ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                            ha="center", va="center", fontsize=9,
+                            color="gray")
+
+                # QSNR label per (layer, role)
+                qsnr_str = ""
+                if df is not None and not df.empty and "qsnr_db" in df.columns:
+                    sub = df[(df["layer"] == layer) & (df["role"] == role)]
+                    if not sub.empty:
+                        vals = sub["qsnr_db"].dropna()
+                        if not vals.empty:
+                            qsnr_str = f"QSNR={vals.mean():.1f}dB"
+
+                short = _short_layer_name(layer)
+                ax.set_title(f"{short}\n{role} {qsnr_str}", fontsize=7)
+                if row_idx == n_rows - 1:
+                    ax.set_xlabel("Bin", fontsize=7)
+                if col_idx == 0:
+                    ax.set_ylabel("Count", fontsize=7)
+                ax.tick_params(labelsize=6)
+                ax.grid(True, alpha=0.2)
+
+        fig.suptitle("Per-Layer fp32 Value Distribution — Worst-QSNR Layers",
+                     fontsize=12, y=1.01)
         fig.tight_layout()
         return fig
 
