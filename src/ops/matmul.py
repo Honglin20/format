@@ -37,23 +37,23 @@ class MatMulFunction(torch.autograd.Function):
 
         in1_raw, in2_raw = in1, in2
 
-        # in1: storage → compute
+        # in1: storage → compute (use in1_raw for all fp32 references)
         if cfg.storage is not None:
-            fp_in1 = in1; in1 = quantize(in1, cfg.storage)
-            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in1, in1, cfg.storage)
+            in1 = quantize(in1, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", in1_raw, in1, cfg.storage)
         in1_post_storage = in1
         if cfg.input is not None:
-            fp_in1 = in1; in1 = quantize(in1, cfg.input)
-            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_in1, in1, cfg.input)
+            in1 = quantize(in1, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", in1_raw, in1, cfg.input)
 
-        # in2: storage → compute
+        # in2: storage → compute (use in2_raw for all fp32 references)
         if cfg.storage is not None:
-            fp_in2 = in2; in2 = quantize(in2, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_in2, in2, cfg.storage)
+            in2 = quantize(in2, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", in2_raw, in2, cfg.storage)
         in2_post_storage = in2
         if cfg.weight is not None:
-            fp_in2 = in2; in2 = quantize(in2, cfg.weight)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_in2, in2, cfg.weight)
+            in2 = quantize(in2, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", in2_raw, in2, cfg.weight)
 
         # bias: storage only
         q_bias = None
@@ -78,10 +78,21 @@ class MatMulFunction(torch.autograd.Function):
         # Compute matmul
         out = _torch_matmul(in1, in2)
 
+        # Pre-compute true fp32 references for each intermediate output stage.
+        _true_matmul = None
+        _true_full = None
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                _true_matmul = _torch_matmul(in1_raw, in2_raw)
+                _true_full = _true_matmul + bias if bias is not None else _true_matmul
+            finally:
+                _exit_quantize()
+
         # Output step 1 (post-matmul): storage
         if cfg.storage is not None:
-            fp_out = out; out = quantize(out, cfg.storage)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, out, cfg.storage)
+            out = quantize(out, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_matmul, out, cfg.storage)
 
         # Add bias + output step 2 (post-bias): storage
         if q_bias is not None:
@@ -91,13 +102,19 @@ class MatMulFunction(torch.autograd.Function):
             finally:
                 _exit_quantize()
             if cfg.storage is not None:
-                fp_out = out; out = quantize(out, cfg.storage)
-                if emit_fn: emit_fn("output", 1, "output_post_quant", fp_out, out, cfg.storage)
+                out = quantize(out, cfg.storage)
+                if emit_fn: emit_fn("output", 1, "output_post_quant", _true_full, out, cfg.storage)
 
         # Output compute
         if cfg.output is not None:
-            fp_out = out; out = quantize(out, cfg.output)
-            if emit_fn: emit_fn("output", 2, "output_post_quant", fp_out, out, cfg.output)
+            out = quantize(out, cfg.output)
+            if emit_fn: emit_fn("output", 2, "output_post_quant", _true_full, out, cfg.output)
+
+        # Emit total layer error: true fp32 matmul vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 3, "layer_total", _true_full, out, _out_scheme)
 
         return out
 

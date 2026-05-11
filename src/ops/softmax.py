@@ -22,7 +22,7 @@ LN_2_BF16 = 0.69140625  # ln(2) in bfloat16 precision
 class SoftmaxFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, dim, inner_scheme, softmax_exp2=False,
-                quantize_backprop=True, name=None, emit_fn=None):
+                quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         if dim < 0:
             dim = dim + len(input.shape)
         ctx.dim = dim
@@ -30,9 +30,9 @@ class SoftmaxFunction(torch.autograd.Function):
         ctx.name = name
         ctx.emit_fn = emit_fn
 
-        fp_in = input
+        _input_ref = raw_input if raw_input is not None else input
         input = vec_quantize(input, inner_scheme)
-        if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, inner_scheme)
+        if emit_fn: emit_fn("input", 0, "input_pre_quant", _input_ref, input, inner_scheme)
 
         max_data, _ = input.max(dim, keepdim=True)
         input = vec_sub(input, max_data, inner_scheme)
@@ -44,6 +44,10 @@ class SoftmaxFunction(torch.autograd.Function):
 
         output_sum = vec_reduce_sum(output, dim, keepdim=True, scheme=inner_scheme)
         output = vec_div(output, output_sum, inner_scheme)
+
+        if emit_fn is not None:
+            true_output = _f_softmax(_input_ref.float(), dim)
+            emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         ctx.save_for_backward(output)
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
@@ -67,7 +71,7 @@ class SoftmaxFunction(torch.autograd.Function):
         if ctx.softmax_exp2:
             grad_input = vec_mul(grad_input, LN_2_BF16, scheme)
 
-        return (grad_input, None, None, None, None, None, None)
+        return (grad_input, None, None, None, None, None, None, None)
 
 
 class QuantizedSoftmax(_QuantizedModuleMixin, ObservableMixin, nn.Softmax):
@@ -80,11 +84,13 @@ class QuantizedSoftmax(_QuantizedModuleMixin, ObservableMixin, nn.Softmax):
         self.softmax_exp2 = softmax_exp2
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         emit_fn = self._emit if self._observers else None
         inner_scheme = self.cfg.input
         result = SoftmaxFunction.apply(
             input, self.dim, inner_scheme, self.softmax_exp2,
             self.cfg.grad_input is not None, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result

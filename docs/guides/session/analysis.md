@@ -93,6 +93,10 @@ print(result.qsnr_per_layer)
 # 按其他 role 提取本地 QSNR
 local_weight, _ = result.qsnr_per_role(role="weight")
 local_input, _ = result.qsnr_per_role(role="input")
+
+# 一键转 DataFrame：本地 + 累积 QSNR/MSE 并列
+df = result.layer_report()
+print(df.sort_values("accum_qsnr_db").head(10))
 ```
 
 **实现细节**：

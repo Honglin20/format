@@ -32,23 +32,23 @@ class BMMFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         in1_raw, in2_raw = in1, in2
 
-        # in1: storage → compute
+        # in1: storage → compute (use in1_raw for all fp32 references)
         if cfg.storage is not None:
-            fp_in1 = in1; in1 = quantize(in1, cfg.storage)
-            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in1, in1, cfg.storage)
+            in1 = quantize(in1, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", in1_raw, in1, cfg.storage)
         in1_post_storage = in1
         if cfg.input is not None:
-            fp_in1 = in1; in1 = quantize(in1, cfg.input)
-            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_in1, in1, cfg.input)
+            in1 = quantize(in1, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", in1_raw, in1, cfg.input)
 
-        # in2: storage → compute
+        # in2: storage → compute (use in2_raw for all fp32 references)
         if cfg.storage is not None:
-            fp_in2 = in2; in2 = quantize(in2, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_in2, in2, cfg.storage)
+            in2 = quantize(in2, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", in2_raw, in2, cfg.storage)
         in2_post_storage = in2
         if cfg.weight is not None:
-            fp_in2 = in2; in2 = quantize(in2, cfg.weight)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_in2, in2, cfg.weight)
+            in2 = quantize(in2, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", in2_raw, in2, cfg.weight)
 
         # Save for backward
         if cfg.is_training:
@@ -62,15 +62,26 @@ class BMMFunction(torch.autograd.Function):
         # Compute bmm
         out = _torch_bmm(in1, in2)
 
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            _true_ref = _torch_bmm(in1_raw, in2_raw)
+
         # Output: storage
         if cfg.storage is not None:
-            fp_out = out; out = quantize(out, cfg.storage)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, out, cfg.storage)
+            out = quantize(out, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_ref, out, cfg.storage)
 
         # Output compute
         if cfg.output is not None:
-            fp_out = out; out = quantize(out, cfg.output)
-            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_out, out, cfg.output)
+            out = quantize(out, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", _true_ref, out, cfg.output)
+
+        # Emit total layer error
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, out, _out_scheme)
 
         return out
 

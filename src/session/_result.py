@@ -280,11 +280,14 @@ class SessionResult:
         return sorted_layers[:k]
 
     def layer_report(self) -> "Any":
-        """Per-layer DataFrame with QSNR and MSE metrics.
+        """Per-layer DataFrame with local and accumulated QSNR/MSE.
+
+        Columns: ``layer``, ``qsnr_db`` (local observer QSNR), ``mse`` (local),
+        ``accum_qsnr_db`` (accumulated hook QSNR), ``accum_mse`` (accumulated).
+        Accumulated columns are omitted when no hook data is present.
 
         Returns:
-            ``pandas.DataFrame`` with columns: layer, qsnr_db, mse.
-            Returns ``None`` if pandas is not available.
+            ``pandas.DataFrame``, or ``None`` if pandas is not available.
 
         Example::
 
@@ -296,12 +299,23 @@ class SessionResult:
         except ImportError:
             return None
 
+        all_layers = (
+            set(self.qsnr_per_layer.keys())
+            | set(self.mse_per_layer.keys())
+            | set(self.accum_qsnr_per_layer.keys())
+            | set(self.accum_mse_per_layer.keys())
+        )
+        has_accum = bool(self.accum_qsnr_per_layer or self.accum_mse_per_layer)
+
         rows = []
-        all_layers = set(self.qsnr_per_layer.keys()) | set(self.mse_per_layer.keys())
         for layer in sorted(all_layers):
-            rows.append({
+            row = {
                 "layer": layer,
                 "qsnr_db": self.qsnr_per_layer.get(layer),
                 "mse": self.mse_per_layer.get(layer),
-            })
+            }
+            if has_accum:
+                row["accum_qsnr_db"] = self.accum_qsnr_per_layer.get(layer)
+                row["accum_mse"] = self.accum_mse_per_layer.get(layer)
+            rows.append(row)
         return pd.DataFrame(rows)

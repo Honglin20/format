@@ -79,22 +79,24 @@ class ConvFunction(torch.autograd.Function):
         input_raw, weight_raw = input, weight
 
         # input: storage → compute
+        # Use input_raw for ALL input observer fp32 references.
         if cfg.storage is not None:
-            fp_in = input; input = quantize(input, cfg.storage)
-            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, cfg.storage)
+            input = quantize(input, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", input_raw, input, cfg.storage)
         input_post_storage = input
         if cfg.input is not None:
-            fp_in = input; input = quantize(input, cfg.input)
-            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_in, input, cfg.input)
+            input = quantize(input, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", input_raw, input, cfg.input)
 
         # weight: storage → compute
+        # Use weight_raw for ALL weight observer fp32 references.
         if cfg.storage is not None:
-            fp_wt = weight; weight = quantize(weight, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_wt, weight, cfg.storage)
+            weight = quantize(weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
         weight_post_storage = weight
         if cfg.weight is not None:
-            fp_wt = weight; weight = quantize(weight, cfg.weight)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_wt, weight, cfg.weight)
+            weight = quantize(weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, weight, cfg.weight)
 
         # bias: storage → compute
         q_bias = bias
@@ -121,15 +123,31 @@ class ConvFunction(torch.autograd.Function):
         else:
             output = F.conv3d(input, weight, q_bias, stride, padding, dilation, groups)
 
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            if num_spatial_dims == 1:
+                _true_ref = F.conv1d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+            elif num_spatial_dims == 2:
+                _true_ref = F.conv2d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+            else:
+                _true_ref = F.conv3d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+
         # Output: storage (bias already included in conv)
         if cfg.storage is not None:
-            fp_out = output; output = quantize(output, cfg.storage)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, cfg.storage)
+            output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_ref, output, cfg.storage)
 
         # Output compute
         if cfg.output is not None:
-            fp_out = output; output = quantize(output, cfg.output)
-            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_out, output, cfg.output)
+            output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", _true_ref, output, cfg.output)
+
+        # Emit total layer error: true fp32 conv vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, output, _out_scheme)
 
         return output
 
@@ -377,23 +395,23 @@ class ConvTransposeFunction(torch.autograd.Function):
 
         input_raw, weight_raw = input, weight
 
-        # input: storage → compute
+        # input: storage → compute (use input_raw for all fp32 references)
         if cfg.storage is not None:
-            fp_in = input; input = quantize(input, cfg.storage)
-            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, cfg.storage)
+            input = quantize(input, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", input_raw, input, cfg.storage)
         input_post_storage = input
         if cfg.input is not None:
-            fp_in = input; input = quantize(input, cfg.input)
-            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_in, input, cfg.input)
+            input = quantize(input, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", input_raw, input, cfg.input)
 
-        # weight: storage → compute
+        # weight: storage → compute (use weight_raw for all fp32 references)
         if cfg.storage is not None:
-            fp_wt = weight; weight = quantize(weight, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_wt, weight, cfg.storage)
+            weight = quantize(weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
         weight_post_storage = weight
         if cfg.weight is not None:
-            fp_wt = weight; weight = quantize(weight, cfg.weight)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_wt, weight, cfg.weight)
+            weight = quantize(weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, weight, cfg.weight)
 
         # bias: storage → compute
         q_bias = bias
@@ -423,15 +441,34 @@ class ConvTransposeFunction(torch.autograd.Function):
             output = F.conv_transpose3d(input, weight, q_bias, stride, padding,
                                         output_padding, groups, dilation)
 
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            if num_spatial_dims == 1:
+                _true_ref = F.conv_transpose1d(input_raw, weight_raw, bias, stride, padding,
+                                               output_padding, groups, dilation)
+            elif num_spatial_dims == 2:
+                _true_ref = F.conv_transpose2d(input_raw, weight_raw, bias, stride, padding,
+                                               output_padding, groups, dilation)
+            else:
+                _true_ref = F.conv_transpose3d(input_raw, weight_raw, bias, stride, padding,
+                                               output_padding, groups, dilation)
+
         # Output: storage
         if cfg.storage is not None:
-            fp_out = output; output = quantize(output, cfg.storage)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, cfg.storage)
+            output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_ref, output, cfg.storage)
 
         # Output compute
         if cfg.output is not None:
-            fp_out = output; output = quantize(output, cfg.output)
-            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_out, output, cfg.output)
+            output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", _true_ref, output, cfg.output)
+
+        # Emit total layer error: true fp32 conv_transpose vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, output, _out_scheme)
 
         return output
 

@@ -27,9 +27,13 @@ def _end_index(a, b, c):
 
 class AdaptiveAvgPool2dFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, output_size, inner_scheme, quantize_backprop=True, name=None, emit_fn=None):
+    def forward(ctx, input, output_size, inner_scheme, quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         ctx.name = name
         ctx.emit_fn = emit_fn
+        _input_ref = raw_input if raw_input is not None else input
+
+        if emit_fn:
+            emit_fn("input", 0, "input_pre_quant", _input_ref, input, inner_scheme)
 
         sizeB, sizeD, isizeH, isizeW = input.size()
 
@@ -62,6 +66,10 @@ class AdaptiveAvgPool2dFunction(torch.autograd.Function):
                 input_slice = input[:, :, istartH:iendH, istartW:iendW]
                 output[:, :, oh, ow] = vec_reduce_mean(
                     input_slice, [2, 3], keepdim=False, scheme=inner_scheme)
+
+        if emit_fn is not None:
+            true_output = _f_adaptive_avg_pool2d(_input_ref, output_size)
+            emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         ctx.osizeH = osizeH
         ctx.osizeW = osizeW
@@ -107,7 +115,7 @@ class AdaptiveAvgPool2dFunction(torch.autograd.Function):
                     scheme,
                 )
 
-        return (grad_input, None, None, None, None, None)
+        return (grad_input, None, None, None, None, None, None)
 
 
 class QuantizedAdaptiveAvgPool2d(_QuantizedModuleMixin, ObservableMixin, nn.Module):
@@ -119,6 +127,7 @@ class QuantizedAdaptiveAvgPool2d(_QuantizedModuleMixin, ObservableMixin, nn.Modu
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
@@ -128,5 +137,6 @@ class QuantizedAdaptiveAvgPool2d(_QuantizedModuleMixin, ObservableMixin, nn.Modu
         result = AdaptiveAvgPool2dFunction.apply(
             input, self.output_size, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result

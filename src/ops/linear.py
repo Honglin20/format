@@ -47,22 +47,25 @@ class LinearFunction(torch.autograd.Function):
         x_raw, w_raw = x, w
 
         # input: storage → compute
+        # Use x_raw for ALL input observer fp32 references so QSNR measures
+        # total input quantization quality (raw fp32 vs fully quantized).
         if cfg.storage is not None:
-            fp_x = x; x = quantize(x, cfg.storage)
-            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_x, x, cfg.storage)
+            x = quantize(x, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", x_raw, x, cfg.storage)
         x_post_storage = x
         if cfg.input is not None:
-            fp_x = x; x = quantize(x, cfg.input)
-            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_x, x, cfg.input)
+            x = quantize(x, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", x_raw, x, cfg.input)
 
         # weight: storage → compute
+        # Use w_raw for ALL weight observer fp32 references.
         if cfg.storage is not None:
-            fp_w = w; w = quantize(w, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_w, w, cfg.storage)
+            w = quantize(w, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", w_raw, w, cfg.storage)
         w_post_storage = w
         if cfg.weight is not None:
-            fp_w = w; w = quantize(w, cfg.weight)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, w, cfg.weight)
+            w = quantize(w, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", w_raw, w, cfg.weight)
 
         # bias: storage → compute
         q_bias = b
@@ -88,17 +91,31 @@ class LinearFunction(torch.autograd.Function):
         # matmul
         y = _F_linear(x, w)
 
+        # Pre-compute true fp32 references for each intermediate output stage.
+        # Stage 0 (post-matmul, pre-bias): compare against matmul-only true output.
+        # Stages 1+ (post-bias onward): compare against full true output (incl. bias).
+        #
+        # Guard against QuantizeContext patches — torch.Tensor.__add__ is
+        # patched inside QuantizeContext, which would quantize the bias
+        # addition and corrupt the fp32 reference.
+        _true_matmul = None
+        _true_full = None
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                _true_matmul = _F_linear(x_raw, w_raw)
+                _true_full = _true_matmul + b if b is not None else _true_matmul
+            finally:
+                _exit_quantize()
+
         # output step 1 (post-matmul): storage (per-tensor, ignores scale)
         if cfg.storage is not None:
-            fp_y = y; y = quantize(y, cfg.storage)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_y, y, cfg.storage)
+            y = quantize(y, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_matmul, y, cfg.storage)
         elif emit_fn is not None:
-            # Emit output event even without storage so observers register
-            # this layer. Use the first available output/input scheme so the
-            # event is not silently dropped.
             _out_scheme = cfg.output or cfg.input or cfg.weight
             if _out_scheme is not None:
-                emit_fn("output", 0, "output_post_quant", y, y, _out_scheme)
+                emit_fn("output", 0, "output_post_quant", _true_matmul, y, _out_scheme)
 
         # bias add + output step 2 (post-bias): storage
         if q_bias is not None:
@@ -108,13 +125,19 @@ class LinearFunction(torch.autograd.Function):
             finally:
                 _exit_quantize()
             if cfg.storage is not None:
-                fp_y = y; y = quantize(y, cfg.storage)
-                if emit_fn: emit_fn("output", 1, "output_post_quant", fp_y, y, cfg.storage)
+                y = quantize(y, cfg.storage)
+                if emit_fn: emit_fn("output", 1, "output_post_quant", _true_full, y, cfg.storage)
 
         # output compute: calibrated scale applies here (per-channel / per-block)
         if cfg.output is not None:
-            fp_y = y; y = quantize(y, cfg.output, scale=output_scale)
-            if emit_fn: emit_fn("output", 2, "output_post_quant", fp_y, y, cfg.output)
+            y = quantize(y, cfg.output, scale=output_scale)
+            if emit_fn: emit_fn("output", 2, "output_post_quant", _true_full, y, cfg.output)
+
+        # Emit total layer error: true fp32 output vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 3, "layer_total", _true_full, y, _out_scheme)
 
         return y
 
