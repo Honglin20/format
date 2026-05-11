@@ -23,21 +23,26 @@ class SessionTablesAccessor:
 
     # ── Per-Layer QSNR ─────────────────────────────────────────────────
 
-    def per_layer_qsnr(self, max_layers: int = 60) -> str:
-        """Per-layer local QSNR table for a single result.
+    def per_layer_qsnr(self, max_layers: int = 60, qsnr_type: str = "local") -> str:
+        """Per-layer QSNR table for a single result.
 
         One row per layer, sorted by worst QSNR first.
 
         Args:
             max_layers: Maximum layers to display (default 60). Use 0 for
                 unlimited.
+            qsnr_type: ``"local"`` (default) reads per-op observer QSNR.
+                ``"accum"`` reads end-to-end accumulated hook QSNR.
 
         Returns:
             Formatted text table.
         """
         from src.viz.tables import _format_per_layer_qsnr_table
 
-        qsnr = self._result.qsnr_per_layer
+        qsnr = (
+            self._result.accum_qsnr_per_layer if qsnr_type == "accum"
+            else self._result.qsnr_per_layer
+        )
         if not qsnr:
             return (
                 "No QSNR per-layer data found.\n"
@@ -46,10 +51,11 @@ class SessionTablesAccessor:
             )
 
         cfg_name = self._result.name or "(unnamed)"
+        label = "accum" if qsnr_type == "accum" else "output"
         all_layers = {layer: {cfg_name: v} for layer, v in qsnr.items()}
         return _format_per_layer_qsnr_table(
             all_layers, [cfg_name], max_layers=max_layers,
-            title=f"Per-Layer QSNR (dB, output) — {cfg_name}",
+            title=f"Per-Layer QSNR (dB, {label}) — {cfg_name}",
         )
 
     # ── Error source analysis ─────────────────────────────────────────

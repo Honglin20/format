@@ -38,10 +38,37 @@ class SessionResult:
     cost: Any = None
     cost_fp32: Any = None
     sq_transforms: Optional[Dict[str, Any]] = None
+    sq_distrib_comparison: Optional[Any] = None
+    """SmoothQuant pre/post distribution comparison.
+
+    Populated when ``transform="smoothquant"`` and
+    ``"smoothquant_distrib"`` is in the analyze outputs.  Call
+    :meth:`sq_comparison` for a terminal table, or use
+    :func:`src.viz.figures.smoothquant_distrib_comparison` for a plot.
+    """
 
     # ------------------------------------------------------------------
     # Accessor properties
     # ------------------------------------------------------------------
+
+    @property
+    def sq_comparison(self) -> str:
+        """Human-readable SmoothQuant distribution comparison table.
+
+        Shortcut that delegates to
+        :meth:`SmoothQuantDistribComparison.summary_table`.
+
+        Raises:
+            RuntimeError: If ``sq_distrib_comparison`` is ``None``
+                (not collected or transform is not smoothquant).
+        """
+        if self.sq_distrib_comparison is None:
+            raise RuntimeError(
+                "sq_distrib_comparison is not available. "
+                "Run session.analyze(outputs=['smoothquant_distrib']) "
+                "with transform='smoothquant'."
+            )
+        return self.sq_distrib_comparison.summary_table()
 
     @property
     def tables(self) -> "SessionTablesAccessor":
@@ -179,8 +206,12 @@ class SessionResult:
                         )
         return qsnr_map, mse_map
 
-    def summary(self) -> str:
+    def summary(self, qsnr_type: str = "local") -> str:
         """One-line human-readable summary of the quantization result.
+
+        Args:
+            qsnr_type: ``"local"`` (default) reads per-op observer QSNR.
+                ``"accum"`` reads end-to-end accumulated hook QSNR.
 
         Example::
 
@@ -198,11 +229,13 @@ class SessionResult:
             if metric_strs:
                 parts.append(" | ".join(metric_strs))
 
-        if self.qsnr_per_layer:
-            finite = [v for v in self.qsnr_per_layer.values() if v == v and v != float('inf') and v != float('-inf')]
+        qsnr_dict = self.accum_qsnr_per_layer if qsnr_type == "accum" else self.qsnr_per_layer
+        if qsnr_dict:
+            finite = [v for v in qsnr_dict.values() if v == v and v != float('inf') and v != float('-inf')]
             if finite:
                 avg_qsnr = sum(finite) / len(finite)
-                parts.append(f"avg QSNR={avg_qsnr:.1f} dB")
+                label = "accum QSNR" if qsnr_type == "accum" else "avg QSNR"
+                parts.append(f"{label}={avg_qsnr:.1f} dB")
             else:
                 parts.append("avg QSNR=N/A")
 
@@ -248,7 +281,7 @@ class SessionResult:
 
         return "\n".join(lines)
 
-    def top_k_qsnr(self, k: int = 10, reverse: bool = False) -> List[Tuple[str, float]]:
+    def top_k_qsnr(self, k: int = 10, reverse: bool = False, qsnr_type: str = "local") -> List[Tuple[str, float]]:
         """Top-k layers by QSNR.
 
         Args:
@@ -256,6 +289,8 @@ class SessionResult:
             reverse: If False (default), returns the k layers with the **lowest**
                 QSNR (worst quality), sorted ascending. If True, returns the k
                 layers with the **highest** QSNR (best quality), sorted descending.
+            qsnr_type: ``"local"`` (default) reads per-op observer QSNR.
+                ``"accum"`` reads end-to-end accumulated hook QSNR.
 
         Returns:
             List of ``(layer_name, qsnr_db)`` tuples.
@@ -276,7 +311,8 @@ class SessionResult:
             layer4.norm: 48.3 dB
             layer3.norm: 45.7 dB
         """
-        sorted_layers = sorted(self.qsnr_per_layer.items(), key=lambda x: x[1], reverse=reverse)
+        qsnr_dict = self.accum_qsnr_per_layer if qsnr_type == "accum" else self.qsnr_per_layer
+        sorted_layers = sorted(qsnr_dict.items(), key=lambda x: x[1], reverse=reverse)
         return sorted_layers[:k]
 
     def layer_report(self) -> "Any":

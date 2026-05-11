@@ -940,6 +940,56 @@ class TestSessionResultAccessors:
         top = result.top_k_qsnr()
         assert top == []
 
+    # ── qsnr_type=accum ────────────────────────────────────────────
+
+    def test_summary_accum_qsnr(self):
+        result = self._make_result(
+            accum_qsnr_per_layer={
+                "layer.0": 10.0,
+                "layer.1": 20.0,
+                "layer.2": 15.0,
+            },
+            accum_mse_per_layer={
+                "layer.0": 0.1,
+                "layer.1": 0.01,
+                "layer.2": 0.05,
+            },
+        )
+        s = result.summary(qsnr_type="accum")
+        assert "accum QSNR" in s
+        assert "15.0" in s  # avg of [10, 20, 15] = 15.0
+
+    def test_summary_accum_without_data(self):
+        result = self._make_result()
+        s = result.summary(qsnr_type="accum")
+        # No accum data → should not mention QSNR
+        assert "QSNR" not in s
+
+    def test_top_k_qsnr_accum(self):
+        result = self._make_result(
+            accum_qsnr_per_layer={
+                "layer.0": 10.0,
+                "layer.1": 30.0,
+                "layer.2": 20.0,
+            },
+        )
+        top = result.top_k_qsnr(k=2, qsnr_type="accum")
+        assert len(top) == 2
+        assert top[0][0] == "layer.0"  # 10.0 worst
+        assert top[1][0] == "layer.2"  # 20.0
+
+    def test_top_k_qsnr_accum_reverse(self):
+        result = self._make_result(
+            accum_qsnr_per_layer={
+                "layer.0": 10.0,
+                "layer.1": 30.0,
+                "layer.2": 20.0,
+            },
+        )
+        top = result.top_k_qsnr(k=2, reverse=True, qsnr_type="accum")
+        assert top[0][0] == "layer.1"  # 30.0 best
+        assert top[1][0] == "layer.2"  # 20.0
+
     def test_layer_report_returns_dataframe(self):
         pytest.importorskip("pandas")
         result = self._make_result()

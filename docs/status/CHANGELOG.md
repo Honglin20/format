@@ -5,6 +5,34 @@
 
 ---
 
+## Report 接口统一与 QSNR 类型开关 ✅ (2026-05-11)
+
+**问题：**
+- `StudyReport.print_summary()` 逐 part 打印分隔表格，不是 DataFrame，不显示 FP32 基线
+- 接口与 `SessionResult.summary()` 不统一
+- 所有 summary/table 方法硬编码使用 local QSNR，无法查看端到端 accumulated QSNR
+
+**方案：**
+- 新增 `StudyReport.summary_dataframe()` — 所有 part 的所有 config 统一为一个 DataFrame，含 `fp32_*` / `quant_*` / `delta_*` / `avg_qsnr_db` / `avg_mse` 列
+- 重写 `print_summary()` — 使用 DataFrame 输出，含 FP32 基线，无 pandas 时优雅降级
+- 6 个核心入口方法新增 `qsnr_type="local"` 参数（`"local"` | `"accum"`）：
+  - `SessionResult.summary()` / `top_k_qsnr()`
+  - `StudyReport.print_summary()` / `summary_dataframe()`
+  - `SessionTablesAccessor.per_layer_qsnr()` / `StudyTablesAccessor.per_layer_qsnr()`
+- `_avg_qsnr_mse` 私有 helper 支持开关，所有 StudyReport 方法统一透传
+
+**改动文件：**
+- `src/report/_study_report.py` — 新增 `summary_dataframe()`，重写 `print_summary()`，更新 `_avg_qsnr_mse`
+- `src/session/_result.py` — `summary()` / `top_k_qsnr()` 加 `qsnr_type` 参数
+- `src/report/_session_tables.py` — `per_layer_qsnr()` 加 `qsnr_type`
+- `src/report/_tables.py` — `per_layer_qsnr()` 加 `qsnr_type`
+- `src/tests/test_study_report.py` — 7 个新测试 + 更新已有测试
+- `src/tests/test_session_unit.py` — 4 个新 accum QSNR 测试
+
+测试：全量 2,399 passed（fast）
+
+---
+
 ## Bug Fix — True Error 累积误差分析修复 ✅ (2026-05-10)
 
 修复 `Session.analyze(true_error=True)` 两个 bug 并简化实现：

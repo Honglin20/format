@@ -158,46 +158,140 @@ class StudyReport:
     # ── _avg_qsnr_mse ────────────────────────────────────────────────────
 
     @staticmethod
-    def _avg_qsnr_mse(r: SessionResult) -> Tuple[float, float]:
-        """Return ``(avg_qsnr, avg_mse)`` for a single session result."""
+    def _avg_qsnr_mse(r: SessionResult, qsnr_type: str = "local") -> Tuple[float, float]:
+        """Return ``(avg_qsnr, avg_mse)`` for a single session result.
+
+        Args:
+            r: SessionResult to extract metrics from.
+            qsnr_type: ``"local"`` (default) reads ``qsnr_per_layer`` /
+                ``mse_per_layer``. ``"accum"`` reads
+                ``accum_qsnr_per_layer`` / ``accum_mse_per_layer``.
+        """
+        if qsnr_type == "accum":
+            qsnr_dict = r.accum_qsnr_per_layer
+            mse_dict = r.accum_mse_per_layer
+        else:
+            qsnr_dict = r.qsnr_per_layer
+            mse_dict = r.mse_per_layer
+
         avg_qsnr = (
-            sum(r.qsnr_per_layer.values()) / len(r.qsnr_per_layer)
-            if r.qsnr_per_layer else float("nan")
+            sum(qsnr_dict.values()) / len(qsnr_dict)
+            if qsnr_dict else float("nan")
         )
         avg_mse = (
-            sum(r.mse_per_layer.values()) / len(r.mse_per_layer)
-            if r.mse_per_layer else float("nan")
+            sum(mse_dict.values()) / len(mse_dict)
+            if mse_dict else float("nan")
         )
         return avg_qsnr, avg_mse
 
+    # ── summary_dataframe ───────────────────────────────────────────────
+
+    def summary_dataframe(self, qsnr_type: str = "local"):
+        """One-row-per-config summary DataFrame across all parts.
+
+        Each row represents a single config with columns for part, config,
+        format, FP32 baseline metrics, quantized metrics, delta values, and
+        average QSNR/MSE. All parts are flattened into one unified table.
+
+        Columns are ordered: ``part``, ``config``, ``format``, then metric
+        columns grouped by category (``fp32_*``, ``quant_*``, ``delta_*``,
+        ``avg_*``).
+
+        Args:
+            qsnr_type: ``"local"`` (default) reads per-op observer QSNR.
+                ``"accum"`` reads end-to-end accumulated hook QSNR.
+
+        Returns:
+            ``pandas.DataFrame``, or ``None`` if pandas is not available.
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            return None
+
+        rows = []
+        for part_name, part_results in self._results.items():
+            for r in part_results:
+                row: dict = {
+                    "part": part_name,
+                    "config": r.name,
+                    "format": r.config.w_format if r.config else "",
+                }
+                if r.fp32_metrics:
+                    for k, v in r.fp32_metrics.items():
+                        row[f"fp32_{k}"] = v
+                if r.quant_metrics:
+                    for k, v in r.quant_metrics.items():
+                        row[f"quant_{k}"] = v
+                if r.delta:
+                    for k, v in r.delta.items():
+                        row[f"delta_{k}"] = v
+                avg_qsnr, avg_mse = self._avg_qsnr_mse(r, qsnr_type=qsnr_type)
+                row["avg_qsnr_db"] = avg_qsnr
+                row["avg_mse"] = avg_mse
+                rows.append(row)
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        leading = ["part", "config", "format"]
+        metric_cols = [c for c in df.columns if c not in leading]
+
+        def _col_sort_key(c):
+            if c.startswith("fp32_"):
+                return (0, c)
+            if c.startswith("quant_"):
+                return (1, c)
+            if c.startswith("delta_"):
+                return (2, c)
+            return (3, c)
+
+        metric_cols = sorted(metric_cols, key=_col_sort_key)
+        return df[leading + metric_cols]
+
     # ── print_summary ───────────────────────────────────────────────────
 
-    def print_summary(self):
-        """Print a terminal comparison table per part."""
-        for part_name, part_results in self._results.items():
-            print(f"\n{'=' * 70}")
-            print(f"  Part: {part_name}")
-            print(f"{'=' * 70}")
-            if not part_results:
-                print("  (no results)")
-                continue
+    def print_summary(self, qsnr_type: str = "local"):
+        """Print a unified comparison table across all parts.
 
-            hdr = f"{'Config':<24} {'Avg QSNR':<12} {'Avg MSE':<12} {'Acc Delta':<12}"
-            print(f"  {hdr}")
-            print(f"  {'-' * len(hdr)}")
+        All configs from all parts appear in a single table with FP32
+        baseline, quantized metrics, deltas, and average QSNR/MSE.
+        Uses pandas DataFrame display when available; falls back to a
+        manually formatted table otherwise.
 
-            for r in part_results:
-                avg_qsnr, avg_mse = self._avg_qsnr_mse(r)
-                delta_str = ""
-                if r.delta:
-                    vals = [f"{k}={v:+.4f}" for k, v in r.delta.items()]
-                    delta_str = ", ".join(vals)
+        Args:
+            qsnr_type: ``"local"`` (default) reads per-op observer QSNR.
+                ``"accum"`` reads end-to-end accumulated hook QSNR.
+        """
+        label = "Accum QSNR" if qsnr_type == "accum" else "Avg QSNR"
+        df = self.summary_dataframe(qsnr_type=qsnr_type)
+        if df is None:
+            # Fallback: manual formatting without pandas
+            all_results = []
+            for part_name, part_results in self._results.items():
+                for r in part_results:
+                    all_results.append((part_name, r))
+
+            if not all_results:
+                return
+
+            hdr = f"{'Part':<20} {'Config':<24} {label:<12} {'Avg MSE':<12}"
+            print(hdr)
+            print("-" * len(hdr))
+            for part_name, r in all_results:
+                avg_qsnr, avg_mse = self._avg_qsnr_mse(r, qsnr_type=qsnr_type)
                 print(
-                    f"  {r.name:<24} "
-                    f"{avg_qsnr:<12.2f} "
-                    f"{avg_mse:<12.6f} "
-                    f"{delta_str}"
+                    f"{part_name:<20} {r.name:<24} "
+                    f"{avg_qsnr:<12.2f} {avg_mse:<12.6f}"
                 )
+            return
+
+        if df.empty:
+            return
+
+        # Suppress pandas index for cleaner display
+        print(df.to_string(index=False))
 
     # ── to_serializable ─────────────────────────────────────────────────
 

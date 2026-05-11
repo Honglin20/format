@@ -23,7 +23,7 @@ class StudyTablesAccessor:
 
     # ── Per-Layer QSNR ─────────────────────────────────────────────────
 
-    def per_layer_qsnr(self, max_layers: int = 60) -> str:
+    def per_layer_qsnr(self, max_layers: int = 60, qsnr_type: str = "local") -> str:
         """Per-layer QSNR comparison table across all configs.
 
         One row per layer, one column per config. Rows sorted by worst QSNR
@@ -32,6 +32,8 @@ class StudyTablesAccessor:
         Args:
             max_layers: Maximum layers to display (default 60). Extra layers
                 are summarised at the bottom. Use 0 for unlimited.
+            qsnr_type: ``"local"`` (default) reads per-op observer QSNR.
+                ``"accum"`` reads end-to-end accumulated hook QSNR.
 
         Returns:
             Formatted text table.
@@ -46,7 +48,8 @@ class StudyTablesAccessor:
                 cfg_name = r.name or "(unnamed)"
                 if cfg_name not in configs:
                     configs.append(cfg_name)
-                for layer, qsnr in r.qsnr_per_layer.items():
+                qsnr_dict = r.accum_qsnr_per_layer if qsnr_type == "accum" else r.qsnr_per_layer
+                for layer, qsnr in qsnr_dict.items():
                     all_layers.setdefault(layer, {})[cfg_name] = qsnr
 
         if not all_layers:
@@ -57,8 +60,10 @@ class StudyTablesAccessor:
             )
 
         configs.sort()
+        label = "accum" if qsnr_type == "accum" else "output"
         return _format_per_layer_qsnr_table(
             all_layers, configs, max_layers=max_layers,
+            title=f"Per-Layer QSNR (dB, {label}) — Lower = more quantization-sensitive",
         )
 
     # ── Error source analysis ─────────────────────────────────────────
