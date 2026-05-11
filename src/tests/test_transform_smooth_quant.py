@@ -448,6 +448,72 @@ class TestSmoothQuantTransform:
         with pytest.raises(ValueError, match="out of bounds"):
             t.forward(x)
 
+    def test_quantize_device_agnostic(self):
+        """Quantize with SmoothQuant transform works when scale is on CPU and data on GPU."""
+        _, SmoothQuantTransform = _try_import()
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        scale = torch.tensor([0.5, 2.0, 1.0, 4.0])  # on CPU
+        t = SmoothQuantTransform(scale, channel_axis=-1)
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_tensor(),
+            transform=t,
+        )
+        x = torch.randn(4, 4, device="cuda:0")
+        result = quantize(x, scheme)
+        assert result.device == x.device
+        assert result.shape == x.shape
+        assert not torch.isnan(result).any()
+        assert not torch.isinf(result).any()
+
+    def test_device_agnostic_cpu_scale_gpu_input(self):
+        """Scale created on CPU works with GPU/NPU input tensors.
+
+        Regression: _broadcast_scale did not move the scale tensor to the
+        input device, causing a device mismatch when the model runs on GPU
+        but calibration happened on CPU.
+        """
+        _, SmoothQuantTransform = _try_import()
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        scale = torch.tensor([0.5, 2.0, 1.0])  # CPU
+        t = SmoothQuantTransform(scale, channel_axis=-1)
+        x = torch.randn(4, 3, device="cuda:0")
+        # forward should not raise
+        xt = t.forward(x)
+        assert xt.device == x.device
+        # inverse should not raise
+        xr = t.inverse(xt)
+        assert xr.device == x.device
+        assert torch.allclose(xr, x, atol=1e-6)
+
+    def test_device_agnostic_cpu_scale_gpu_input_conv2d(self):
+        """Conv2d-style channel_axis=1 with scale on CPU and input on GPU."""
+        _, SmoothQuantTransform = _try_import()
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        scale = torch.tensor([0.5, 2.0, 1.0, 4.0])  # CPU
+        t = SmoothQuantTransform(scale, channel_axis=1)
+        x = torch.randn(2, 4, 4, 4, device="cuda:0")
+        xt = t.forward(x)
+        assert xt.device == x.device
+        xr = t.inverse(xt)
+        assert xr.device == x.device
+        assert torch.allclose(xr, x, atol=1e-6)
+
+    def test_device_agnostic_same_device_no_op(self):
+        """When scale and input are already on the same device, .to() is a no-op."""
+        _, SmoothQuantTransform = _try_import()
+        scale = torch.tensor([0.5, 2.0, 1.0])
+        t = SmoothQuantTransform(scale)
+        x = torch.randn(4, 3)
+        xt = t.forward(x)
+        assert xt.device == x.device
+        xr = t.inverse(xt)
+        assert xr.device == x.device
+        assert torch.equal(xr, x)
+
 
 # ============================================================================
 # 3. QuantScheme integration tests
@@ -582,3 +648,22 @@ class TestSmoothQuantQuantScheme:
         x = torch.randn(4, 2)
         with pytest.raises(ValueError, match="out of bounds"):
             t.forward(x)
+
+    def test_quantize_device_agnostic(self):
+        """Quantize with SmoothQuant transform works when scale is on CPU and data on GPU."""
+        _, SmoothQuantTransform = _try_import()
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        scale = torch.tensor([0.5, 2.0, 1.0, 4.0])  # on CPU
+        t = SmoothQuantTransform(scale, channel_axis=-1)
+        scheme = QuantScheme(
+            format="int8",
+            granularity=GranularitySpec.per_tensor(),
+            transform=t,
+        )
+        x = torch.randn(4, 4, device="cuda:0")
+        result = quantize(x, scheme)
+        assert result.device == x.device
+        assert result.shape == x.shape
+        assert not torch.isnan(result).any()
+        assert not torch.isinf(result).any()

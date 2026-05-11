@@ -171,6 +171,10 @@ class SmoothQuantTransform(TransformBase):
         ``scale`` is ``[C]``, so the view is ``[1, ..., C, ..., 1]`` with
         ``C`` placed at the channel axis position.
 
+        Moves the scale tensor to ``x.device`` when they differ, so a
+        CPU-calibrated SmoothQuantTransform works correctly when the model
+        and data are on GPU/NPU.
+
         Raises:
             ValueError: If ``self._channel_axis`` is out of bounds for ``x``.
         """
@@ -179,9 +183,12 @@ class SmoothQuantTransform(TransformBase):
                 f"channel_axis={self._channel_axis} is out of bounds for "
                 f"tensor with {x.ndim} dimensions"
             )
+        s = self._scale
+        if s.device != x.device:
+            s = s.to(device=x.device)
         shape = [1] * x.ndim
         shape[self._channel_axis] = -1
-        return self._scale.view(*shape)
+        return s.view(*shape)
 
     def forward(self, x: Tensor) -> Tensor:
         """Apply SmoothQuant: ``x / scale``.
