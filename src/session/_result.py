@@ -8,6 +8,7 @@ user-facing accessor methods for display.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -15,6 +16,7 @@ from src.session._config import QuantConfig
 
 if TYPE_CHECKING:
     from src.report._session_tables import SessionTablesAccessor
+    from src.report._plot import SessionPlotAccessor
 
 
 @dataclass
@@ -32,6 +34,10 @@ class SessionResult:
     delta: Optional[Dict[str, float]] = None
     qsnr_per_layer: Dict[str, float] = field(default_factory=dict)
     mse_per_layer: Dict[str, float] = field(default_factory=dict)
+    qsnr_by_role: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    """QSNR per role per layer: ``{role: {layer: qsnr_db}}``."""
+    mse_by_role: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    """MSE per role per layer: ``{role: {layer: mse}}``."""
     accum_qsnr_per_layer: Dict[str, float] = field(default_factory=dict)
     accum_mse_per_layer: Dict[str, float] = field(default_factory=dict)
     observers_data: Dict[str, Any] = field(default_factory=dict)
@@ -92,13 +98,98 @@ class SessionResult:
 
         Example::
 
-            result.report().taxonomy.classify()
-            DistributionProfile.from_report(result.report())
-            ErrorByDistribution(result.report())
+            result.report.taxonomy.classify()
+            DistributionProfile.from_report(result.report)
+            ErrorByDistribution(result.report)
         """
         from src.analysis.report import AnalysisReport
 
         return AnalysisReport(self.observers_data)
+
+    @property
+    def characterize(self) -> "DistributionDiagnosis":
+        """Distribution-based quantisation failure diagnosis accessor.
+
+        Returns a :class:`DistributionDiagnosis` that links distribution
+        features (crest factor, outlier ratio, kurtosis, etc.) to known
+        quantisation failure modes.
+
+        Example::
+
+            print(result.characterize.profile("layer3.linear", role="weight"))
+            print(result.characterize.causal_analysis())
+        """
+        from src.analysis._distribution_diagnosis import DistributionDiagnosis
+
+        return DistributionDiagnosis(self)
+
+    @property
+    def diagnose(self) -> "ErrorProvenance":
+        """Systematic error provenance accessor.
+
+        Returns an :class:`ErrorProvenance` with per-role per-layer
+        QSNR attribution, top-K worst layers, and error source analysis.
+
+        Example::
+
+            print(result.diagnose.summary())
+            print(result.diagnose.per_role_table())
+            for name, qsnr in result.diagnose.top_k(5, role="weight"):
+                print(f"{name}: {qsnr:.1f} dB")
+        """
+        from src.analysis._error_provenance import ErrorProvenance
+
+        return ErrorProvenance(self)
+
+    @property
+    def plan(self) -> "InterventionPlanner":
+        """Intervention planner accessor.
+
+        Returns an :class:`InterventionPlanner` that generates per-layer
+        precision-boost and transform plans from QSNR data.
+
+        Example::
+
+            plan = result.plan.top_k_boost(k=5, role="weight", target_bits=8)
+            print(plan.explain())
+        """
+        from src.analysis._intervention import InterventionPlanner
+
+        return InterventionPlanner(self)
+
+    @property
+    def intervention(self) -> "InterventionAccessor":
+        """Intervention application and comparison accessor.
+
+        Returns an :class:`InterventionAccessor` that can apply an
+        InterventionPlan to a new Session and compare results.
+
+        Example::
+
+            plan = result.plan.top_k_boost(k=5)
+            comparison = result.intervention.compare(model, data, plan)
+            print(comparison.summary())
+        """
+        from src.analysis._intervention_accessor import InterventionAccessor
+
+        return InterventionAccessor(self)
+
+    @property
+    def plot(self) -> "SessionPlotAccessor":
+        """Post-hoc visualization accessor.
+
+        Returns a :class:`SessionPlotAccessor` with methods like
+        :meth:`~SessionPlotAccessor.qsnr_comparison` and
+        :meth:`~SessionPlotAccessor.error_propagation`.
+
+        Example::
+
+            result.plot.qsnr_comparison()
+            result.plot.error_propagation(role="output")
+        """
+        from src.report._plot import SessionPlotAccessor
+
+        return SessionPlotAccessor(self)
 
     # ------------------------------------------------------------------
     # Accessor methods
@@ -167,16 +258,12 @@ class SessionResult:
     def qsnr_per_role(
         self, role: str = "output"
     ) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """Extract per-layer QSNR and MSE from observers_data for a given role.
+        """Extract per-layer QSNR and MSE for a given role.
 
-        Only metrics from *role* (default ``"output"``) are considered. Input
-        and weight QSNR are excluded because they measure qualitatively
-        different things: input re-quantization of already-quantized data and
-        static weight error. Only output QSNR captures the layer's true
-        end-to-end quantization quality.
-
-        Within the selected role, the worst-case (minimum QSNR, maximum MSE)
-        across all quantization stages and slices is used.
+        Reads from pre-computed ``qsnr_by_role`` / ``mse_by_role`` dicts
+        (populated during ``Session.analyze()``).  Falls back to iterating
+        ``observers_data`` directly if the cached dicts are empty (e.g.
+        when loading from a serialized file that predates multi-role support).
 
         Args:
             role: Tensor role to extract (``"input"`` / ``"weight"`` /
@@ -185,6 +272,10 @@ class SessionResult:
         Returns:
             ``(qsnr_per_layer, mse_per_layer)`` — each is ``Dict[str, float]``.
         """
+        if self.qsnr_by_role and self.mse_by_role:
+            return self.qsnr_by_role.get(role, {}), self.mse_by_role.get(role, {})
+
+        # Fallback: iterate observers_data directly (backward compat)
         qsnr_map: Dict[str, float] = {}
         mse_map: Dict[str, float] = {}
         for layer, roles in self.observers_data.items():
@@ -195,7 +286,7 @@ class SessionResult:
                 for _slice_key, metrics in slices.items():
                     if "qsnr_db" in metrics:
                         v = metrics["qsnr_db"]
-                        if v == v:  # exclude nan
+                        if v is not None and v == v and v != float("-inf"):
                             prev = qsnr_map.get(layer)
                             if prev is None or v < prev:
                                 qsnr_map[layer] = v
@@ -231,7 +322,7 @@ class SessionResult:
 
         qsnr_dict = self.accum_qsnr_per_layer if qsnr_type == "accum" else self.qsnr_per_layer
         if qsnr_dict:
-            finite = [v for v in qsnr_dict.values() if v == v and v != float('inf') and v != float('-inf')]
+            finite = [v for v in qsnr_dict.values() if v is not None and v == v and v != float('inf') and v != float('-inf')]
             if finite:
                 avg_qsnr = sum(finite) / len(finite)
                 label = "accum QSNR" if qsnr_type == "accum" else "avg QSNR"
@@ -355,3 +446,109 @@ class SessionResult:
                 row["accum_mse"] = self.accum_mse_per_layer.get(layer)
             rows.append(row)
         return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------
+    # Serialization & save
+    # ------------------------------------------------------------------
+
+    def to_serializable(self) -> dict:
+        """Return a JSON-serializable dict of this result."""
+        entry: Dict[str, Any] = {"name": self.name}
+        if self.config:
+            entry["config"] = self.config.name
+        if self.quant_metrics is not None:
+            entry["accuracy"] = self.quant_metrics
+        if self.fp32_metrics is not None:
+            entry["fp32_accuracy"] = self.fp32_metrics
+        if self.delta is not None:
+            entry["delta"] = self.delta
+        if self.qsnr_per_layer:
+            entry["qsnr_per_layer"] = self.qsnr_per_layer
+        if self.mse_per_layer:
+            entry["mse_per_layer"] = self.mse_per_layer
+        if self.accum_qsnr_per_layer:
+            entry["accum_qsnr_per_layer"] = self.accum_qsnr_per_layer
+        if self.accum_mse_per_layer:
+            entry["accum_mse_per_layer"] = self.accum_mse_per_layer
+        return entry
+
+    def save(self, output_dir: str) -> None:
+        """Save single-config analysis to ``output_dir``.
+
+        Generates (conditionally, based on available data):
+        - ``results.json`` — full serialized result
+        - ``tables/accuracy.txt`` — FP32 vs Quant accuracy comparison
+        - ``tables/per_layer_qsnr.csv`` — per-layer QSNR
+        - ``tables/error_source.txt`` — error source diagnosis
+        - ``figures/qsnr_comparison.png`` — per-layer QSNR bar chart
+        - ``figures/error_propagation.png`` — accumulated vs local QSNR
+        - ``figures/accumulated_vs_local.png`` — scatter plot
+        """
+        import json
+
+        import matplotlib.pyplot as plt
+
+        os.makedirs(f"{output_dir}/tables", exist_ok=True)
+        os.makedirs(f"{output_dir}/figures", exist_ok=True)
+
+        # Accuracy table
+        if self.fp32_metrics:
+            txt = self.accuracy_table()
+            with open(f"{output_dir}/tables/accuracy.txt", "w") as f:
+                f.write(txt + "\n")
+            print(f"  tables/accuracy.txt: saved")
+
+        # Per-layer QSNR CSV
+        if self.qsnr_per_layer:
+            csv_path = f"{output_dir}/tables/per_layer_qsnr.csv"
+            with open(csv_path, "w") as f:
+                f.write("Layer,QSNR_dB\n")
+                for layer, qsnr in sorted(self.qsnr_per_layer.items(),
+                                          key=lambda x: x[1]):
+                    f.write(f"{layer},{qsnr:.4f}\n")
+            print(f"  per_layer_qsnr.csv: saved to {csv_path}")
+
+        # Figures — QSNR bar chart (always if qsnr data)
+        if self.qsnr_per_layer:
+            try:
+                fig = self.plot.qsnr_comparison()
+                fig.savefig(f"{output_dir}/figures/qsnr_comparison.png",
+                            dpi=300, bbox_inches="tight")
+                plt.close(fig)
+                print(f"  qsnr_comparison.png: saved")
+            except Exception as e:
+                print(f"  Warning: qsnr_comparison failed: {e}")
+
+        # Error propagation figures
+        has_accum = any(
+            v == v and v != float("inf") and v != float("-inf")
+            for v in self.accum_qsnr_per_layer.values()
+        )
+        if has_accum:
+            for fig_name, fig_method in [
+                ("error_propagation", lambda: self.plot.error_propagation()),
+                ("accumulated_vs_local", lambda: self.plot.accumulated_vs_local()),
+            ]:
+                try:
+                    fig = fig_method()
+                    fig.savefig(f"{output_dir}/figures/{fig_name}.png",
+                                dpi=300, bbox_inches="tight")
+                    plt.close(fig)
+                    print(f"  {fig_name}.png: saved")
+                except Exception as e:
+                    print(f"  Warning: {fig_name} failed: {e}")
+
+            # Error source table
+            try:
+                text = self.tables.error_source_analysis()
+                if text and "No " not in text[:30]:
+                    with open(f"{output_dir}/tables/error_source.txt", "w") as f:
+                        f.write(text)
+                    print(f"  error_source.txt: saved")
+            except Exception as e:
+                print(f"  Warning: error_source_analysis failed: {e}")
+
+        # results.json
+        with open(f"{output_dir}/results.json", "w") as f:
+            json.dump(self.to_serializable(), f, indent=2, default=str)
+        print(f"  results.json: saved to {output_dir}/results.json")

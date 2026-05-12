@@ -181,3 +181,22 @@ class SessionTablesAccessor:
                 )
 
         return "\n".join(lines)
+
+    # ── Per-Role QSNR ──────────────────────────────────────────────────
+
+    def per_role_qsnr(self, max_layers: int = 40) -> str:
+        """Per-layer table with input / weight / output QSNR columns.
+
+        Sorted by worst QSNR first.  Delegates to
+        :meth:`ErrorProvenance.per_role_table`.
+
+        Args:
+            max_layers: Maximum number of layers to display.
+
+        Returns:
+            Formatted text table.
+        """
+        from src.analysis._error_provenance import ErrorProvenance
+
+        prov = ErrorProvenance(self._result)
+        return prov.per_role_table(max_layers=max_layers)

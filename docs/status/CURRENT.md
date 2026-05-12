@@ -1,31 +1,33 @@
 # Current Task
 
-**当前任务**: ADR-009 实施 — `quantize_nonlinear` 非线性算子 operand 入口两级量化
-**下一任务**: P7 自动格式搜索
+**当前任务**: ADR-009 收尾 + P7 自动格式搜索
+**下一任务**: Calibration 增强 + QAT 验证
 **Branch**: `feature/refactor-src`
 
 ---
 
-## ADR-009 实施进度
+## ADR-010 实施 — 已完成 (2026-05-13)
 
-- [ ] `quantize_nonlinear=True` 时，非线性算子入口 operand 施加 storage + per_block compute 两级量化
-- [ ] 中间 vec_ops 和 backward 保持 storage-only（与 `False` 一致）
-- [ ] 测试：norm/activation/pool/softmax 的 quantize_nonlinear=True 行为验证
+| Phase | 内容 | 状态 |
+|-------|------|------|
+| P1 | 多 role QSNR 提取 | [x] |
+| P2 | ErrorProvenance + SessionPlotAccessor | [x] |
+| P3 | DistributionDiagnosis + 规则引擎 | [x] |
+| P4 | InterventionPlanner + overrides + 对比 | [x] |
 
-详见 `docs/architecture/009-quantize-nonlinear.md`
+E2E 回归通过 (MNIST + Transformer/AG News)。
 
 ---
 
 ## 断点续传必读文件
 
-1. `docs/architecture/009-quantize-nonlinear.md`（ADR-009：当前实施任务）
-2. `docs/architecture/005-op-quant-config.md`（OpQuantConfig 两阶段模型，ADR-009 依赖）
-3. `docs/architecture/008-session-refactor.md`（Session API 参考）
-4. `docs/workflow/phase-plan.md`（整体进度）
+1. `docs/architecture/010-systematic-error-analysis.md`（ADR-010：API 设计 + 架构决策）
+2. `docs/architecture/010-plan.md`（实施计划）
+3. `docs/status/CHANGELOG.md`（已完成任务记录）
 
 ---
 
 ## 已知测试状态
 
-`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q` → 2,496 passed
-`test_golden_equiv.py` 有 26 个预存在失败（golden data `.pt` 文件未 staging）
+`pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q -m "not slow"` → 2,420 passed
+5 个预存在失败: test_4bit_sparse_analysis (3), test_adaptive_transform (1), test_print_summary_empty (1)

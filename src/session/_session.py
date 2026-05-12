@@ -65,18 +65,51 @@ _logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def _extract_all_roles_qsnr_mse(
+    observers_data: dict,
+) -> tuple:
+    """Extract per-layer QSNR and MSE for ALL roles in a single pass.
+
+    Iterates the nested observer report dict once and collects per-layer
+    worst-case QSNR (minimum across stages/slices) and MSE (maximum across
+    stages/slices) for every role present in the data.
+
+    Args:
+        observers_data: Raw observer report dict
+            (``{layer: {role: {stage: {slice: metrics}}}}``).
+
+    Returns:
+        ``(qsnr_by_role, mse_by_role)`` — each is ``Dict[str, Dict[str, float]]``
+        mapping role name → layer name → value.
+    """
+    qsnr_by_role: Dict[str, Dict[str, float]] = {}
+    mse_by_role: Dict[str, Dict[str, float]] = {}
+
+    for _layer, roles in observers_data.items():
+        for role, stages in roles.items():
+            qsnr_map = qsnr_by_role.setdefault(role, {})
+            mse_map = mse_by_role.setdefault(role, {})
+            for _stage, slices in stages.items():
+                for _slice_key, metrics in slices.items():
+                    if "qsnr_db" in metrics:
+                        v = metrics["qsnr_db"]
+                        if v == v and v != float("-inf"):  # exclude NaN and -inf
+                            prev = qsnr_map.get(_layer)
+                            if prev is None or v < prev:
+                                qsnr_map[_layer] = v
+                    if "mse" in metrics:
+                        mse_map[_layer] = max(
+                            mse_map.get(_layer, 0.0),
+                            metrics["mse"],
+                        )
+    return qsnr_by_role, mse_by_role
+
+
 def _extract_qsnr_mse(observers_data: dict, *, role: str = "output"):
-    """Extract per-layer QSNR and MSE from a nested observer report raw dict.
+    """Extract per-layer QSNR and MSE for a single role.
 
-    Only metrics from *role* (default ``"output"``) are considered. Input and
-    weight QSNR are excluded because they measure qualitatively different
-    things: input re-quantization of already-quantized data (vanity metric
-    for all but the first layer) and static weight error (independent of
-    depth). Only output QSNR captures the layer's true end-to-end
-    quantization quality and reflects accumulated error propagation.
-
-    Within the selected role, the worst-case (minimum QSNR, maximum MSE)
-    across all quantization stages and slices is used.
+    Thin backward-compatible wrapper around :func:`_extract_all_roles_qsnr_mse`.
+    Prefer that function for new code to avoid repeated iteration.
 
     Args:
         observers_data: Raw observer report dict.
@@ -86,26 +119,8 @@ def _extract_qsnr_mse(observers_data: dict, *, role: str = "output"):
     Returns:
         ``(qsnr_per_layer, mse_per_layer)`` — each is ``Dict[str, float]``.
     """
-    qsnr_per_layer: Dict[str, float] = {}
-    mse_per_layer: Dict[str, float] = {}
-    for layer, roles in observers_data.items():
-        stages = roles.get(role)
-        if stages is None:
-            continue
-        for _stage, slices in stages.items():
-            for _slice_key, metrics in slices.items():
-                if "qsnr_db" in metrics:
-                    v = metrics["qsnr_db"]
-                    if v == v:  # exclude nan
-                        prev = qsnr_per_layer.get(layer)
-                        if prev is None or v < prev:
-                            qsnr_per_layer[layer] = v
-                if "mse" in metrics:
-                    mse_per_layer[layer] = max(
-                        mse_per_layer.get(layer, 0.0),
-                        metrics["mse"],
-                    )
-    return qsnr_per_layer, mse_per_layer
+    qsnr_by_role, mse_by_role = _extract_all_roles_qsnr_mse(observers_data)
+    return qsnr_by_role.get(role, {}), mse_by_role.get(role, {})
 
 
 # ---------------------------------------------------------------------------
@@ -474,10 +489,12 @@ class Session:
         config: QuantConfig,
         *,
         keep_fp32: bool = True,
+        overrides: Optional[Dict[str, OpQuantConfig]] = None,
     ):
         self._model = model
         self._config = config
         self._keep_fp32 = keep_fp32
+        self._overrides = overrides
 
         # Lazily initialized by .quantize()
         self._quant_session: Optional[_QuantSession] = None
@@ -488,6 +505,8 @@ class Session:
         # Collected results (populated by each step)
         self._qsnr_per_layer: Dict[str, float] = {}
         self._mse_per_layer: Dict[str, float] = {}
+        self._qsnr_by_role: Dict[str, Dict[str, float]] = {}
+        self._mse_by_role: Dict[str, Dict[str, float]] = {}
         self._accum_qsnr_per_layer: Dict[str, float] = {}
         self._accum_mse_per_layer: Dict[str, float] = {}
         self._observers_data: Dict[str, Any] = {}
@@ -535,6 +554,8 @@ class Session:
             delta=self._delta,
             qsnr_per_layer=self._qsnr_per_layer,
             mse_per_layer=self._mse_per_layer,
+            qsnr_by_role=self._qsnr_by_role,
+            mse_by_role=self._mse_by_role,
             accum_qsnr_per_layer=self._accum_qsnr_per_layer,
             accum_mse_per_layer=self._accum_mse_per_layer,
             observers_data=self._observers_data,
@@ -588,8 +609,11 @@ class Session:
             model = self._model
             self._sq_transforms = None
 
-        # ---- Build OpQuantConfig ----
+        # ---- Build OpQuantConfig (per-layer dict when overrides exist) ----
         op_cfg = self._config.to_op_config()
+        if self._overrides:
+            # "*" pattern matches any module name not explicitly overridden
+            op_cfg = {"*": op_cfg, **self._overrides}
 
         # ---- Create _QuantSession ----
         calibrator = _make_calibrator(self._config.calibrator)
@@ -780,6 +804,10 @@ class Session:
             if k in _OBSERVER_MAP
         ] if observer_keys_set else []
 
+        _obs_names = [type(o).__name__ for o in observers]
+        if _obs_names:
+            print(f"    observers: {_obs_names}, hook_path={can_hook}")
+
         # ── Hook + observer path (combined) ──────────────────────────
         if can_hook:
             qmodel = self._quant_session.qmodel
@@ -801,6 +829,10 @@ class Session:
                 and isinstance(calib_data, (list, tuple))
             )
             batches = list(calib_data) if multi_batch else [calib_data]
+            n_batches = len(batches)
+
+            if multi_batch and n_batches > 1:
+                print(f"    analyze: {n_batches} batches (hook+observer path)")
 
             accum_signal: dict = defaultdict(float)
             accum_error: dict = defaultdict(float)
@@ -816,7 +848,10 @@ class Session:
                 obs_ctx.__enter__()
 
             try:
-                for batch in batches:
+                for batch_idx, batch in enumerate(batches):
+                    if multi_batch and n_batches > 1:
+                        print(f"      batch {batch_idx + 1}/{n_batches}")
+
                     # -- fp32 reference forward -----------------------
                     fp32_refs: Dict[str, torch.Tensor] = {}
                     fp32_hooks = []
@@ -889,23 +924,35 @@ class Session:
                     )
                 self._accum_mse_per_layer[name] = mean_error
 
-            # Local QSNR / MSE from observer data
+            # Local QSNR / MSE from observer data (all roles in one pass)
             if self._observers_data:
-                self._qsnr_per_layer, self._mse_per_layer = _extract_qsnr_mse(
+                qsnr_by_role, mse_by_role = _extract_all_roles_qsnr_mse(
                     self._observers_data
                 )
+                self._qsnr_by_role = qsnr_by_role
+                self._mse_by_role = mse_by_role
+                # Backward-compat: populate single-role fields from "output"
+                self._qsnr_per_layer = qsnr_by_role.get("output", {})
+                self._mse_per_layer = mse_by_role.get("output", {})
             else:
+                self._qsnr_by_role = {}
+                self._mse_by_role = {}
                 self._qsnr_per_layer = {}
                 self._mse_per_layer = {}
         else:
             # ── Observer-only path ───────────────────────────────────
             if observers:
+                print(f"    analyze: observer-only path, {len(observers)} observer(s)")
                 with self._quant_session.analyze(observers=observers) as ctx:
                     _run_model(self._quant_session, calib_data, eval_fn)
                 self._observers_data = ctx.report()._raw
-                self._qsnr_per_layer, self._mse_per_layer = _extract_qsnr_mse(
+                qsnr_by_role, mse_by_role = _extract_all_roles_qsnr_mse(
                     self._observers_data
                 )
+                self._qsnr_by_role = qsnr_by_role
+                self._mse_by_role = mse_by_role
+                self._qsnr_per_layer = qsnr_by_role.get("output", {})
+                self._mse_per_layer = mse_by_role.get("output", {})
 
         # SmoothQuant distribution comparison (auto-triggered, no-op
         # when transform is not "smoothquant" — the user asked for the
@@ -1120,13 +1167,22 @@ class Session:
         and accumulated QSNR (hook path, comparing quant vs fp32 output) are
         collected and stored in separate fields on the result.
         """
+        import time as _time
         from src.report._spec import resolve_outputs as _resolve_outputs, PRESETS
 
         observer_keys, needs_eval, needs_cost = _resolve_outputs(outputs)
 
+        _t0 = _time.perf_counter()
         self.quantize(calib_data=calib_data, eval_fn=eval_fn)
+        print(f"    quantize: {_time.perf_counter() - _t0:.1f}s")
+
+        _t0 = _time.perf_counter()
         self.calibrate(calib_data, eval_fn=eval_fn)
+        print(f"    calibrate: {_time.perf_counter() - _t0:.1f}s")
+
+        _t0 = _time.perf_counter()
         self.analyze(calib_data, outputs=outputs, eval_fn=eval_fn)
+        print(f"    analyze: {_time.perf_counter() - _t0:.1f}s")
 
         if needs_eval and eval_fn is not None:
             if eval_data is None:
@@ -1137,12 +1193,16 @@ class Session:
                     "Pass eval_data=<your test loader> to Study.run() or "
                     "Session.run() to get accuracy results."
                 )
+            _t0 = _time.perf_counter()
             self.evaluate(
                 eval_data if eval_data is not None else calib_data,
                 eval_fn,
             )
+            print(f"    evaluate: {_time.perf_counter() - _t0:.1f}s")
 
         if needs_cost:
+            _t0 = _time.perf_counter()
             self.cost()
+            print(f"    cost: {_time.perf_counter() - _t0:.1f}s")
 
         return self.result

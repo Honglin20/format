@@ -5,6 +5,29 @@
 
 ---
 
+## ADR-010: 系统化误差分析闭环 ✅ (2026-05-13)
+
+**实现内容 (4 阶段, 9 新文件, 3 修改文件):**
+
+| Phase | 内容 | 文件 |
+|-------|------|------|
+| P1 | 多 role QSNR/MSE 提取 (`_extract_all_roles_qsnr_mse`) | `_session.py`, `_result.py` |
+| P2 | ErrorProvenance + per-role 绘图 + error source tables | `_error_provenance.py`, `_per_role.py`, `_propagation.py`, `_plot.py`, `_session_tables.py` |
+| P3 | DistributionDiagnosis + 6-规则退化分类引擎 | `_distribution_diagnosis.py` |
+| P4 | InterventionPlan/Planner + Session overrides + InterventionAccessor/Comparison | `_intervention.py`, `_intervention_accessor.py`, `_session.py`, `_result.py` |
+
+**核心 API (全部通过 `SessionResult` 属性访问):**
+- `result.diagnose` → `ErrorProvenance` — per-role per-layer QSNR, top-K, error source analysis
+- `result.characterize` → `DistributionDiagnosis` — 分布退化分类 + 因果分析
+- `result.plan` → `InterventionPlanner` — top_k_boost / recommend / transform_ranking
+- `result.intervention` → `InterventionAccessor` — compare(基线 vs 干预)
+- `result.plot` → `SessionPlotAccessor` — 12+ 图表方法 (qsnr_comparison, error_propagation, per_role bars, histograms, channel_heterogeneity 等)
+
+**E2E 回归**: MNIST + Transformer/AG News 通过所有合理性判据。
+**测试**: 2,420 passed, 5 预存在失败 (无回归)。
+
+---
+
 ## Report 接口统一与 QSNR 类型开关 ✅ (2026-05-11)
 
 **问题：**
