@@ -98,7 +98,15 @@ class _QuantSession:
         keep_fp32: bool = True,
         op_cfgs: Optional[Dict[str, OpQuantConfig]] = None,
         quantize_nonlinear: bool = True,
+        fp32_ref: Optional[nn.Module] = None,
     ):
+        """Args:
+            model: Model to quantize (may already have weight transforms fused).
+            fp32_ref: If provided, used as the fp32 reference model instead of
+                deepcopying ``model``.  Use when ``model`` has been modified by
+                a transform (e.g. SmoothQuant weight fusion) and the original
+                unmodified model should serve as the FP32 baseline.
+        """
         self.cfg = cfg
         self.calibrator = calibrator if calibrator is not None else MaxScaleStrategy()
         self.observers = observers if observers is not None else [QSNRObserver()]
@@ -107,7 +115,7 @@ class _QuantSession:
         self._last_input: Any = None
 
         if keep_fp32:
-            self.fp32_model = copy.deepcopy(model)
+            self.fp32_model = copy.deepcopy(fp32_ref if fp32_ref is not None else model)
         else:
             self.fp32_model = None
 

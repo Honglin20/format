@@ -330,5 +330,172 @@ def generate_comparison_table():
     print("  Positive diff means observer overestimates QSNR (missing error sources).")
 
 
+# ---------------------------------------------------------------------------
+# Deep multi-operator model: per-layer local vs accum QSNR
+# ---------------------------------------------------------------------------
+
+class DeepMixedModel(nn.Module):
+    """10-layer model mixing conv, norm, activation, linear, and pooling.
+
+    Layer order:
+      0. conv   — Conv2d(3→8, k3p1)
+      1. bn     — BatchNorm2d(8)
+      2. relu   — ReLU
+      3. pool   — AdaptiveAvgPool2d(→4×4)
+      4. fc1    — Linear(128→64)
+      5. ln     — LayerNorm(64)
+      6. relu2  — ReLU
+      7. fc2    — Linear(64→32)
+      8. relu3  — ReLU
+      9. fc3    — Linear(32→10)
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(3, 8, 3, padding=1)
+        self.bn = nn.BatchNorm2d(8)
+        self.relu = nn.ReLU()
+        self.pool = nn.AdaptiveAvgPool2d((4, 4))
+        self.fc1 = nn.Linear(128, 64)
+        self.ln = nn.LayerNorm(64)
+        self.relu2 = nn.ReLU()
+        self.fc2 = nn.Linear(64, 32)
+        self.relu3 = nn.ReLU()
+        self.fc3 = nn.Linear(32, 10)
+
+    def forward(self, x):
+        x = self.conv(x)       # 0: Conv2d
+        x = self.bn(x)         # 1: BatchNorm2d
+        x = self.relu(x)       # 2: ReLU
+        x = self.pool(x)       # 3: AdaptiveAvgPool2d
+        x = x.flatten(1)
+        x = self.fc1(x)        # 4: Linear
+        x = self.ln(x)         # 5: LayerNorm
+        x = self.relu2(x)      # 6: ReLU
+        x = self.fc2(x)        # 7: Linear
+        x = self.relu3(x)      # 8: ReLU
+        x = self.fc3(x)        # 9: Linear
+        return x
+
+
+def generate_deep_model_table():
+    """Run deep mixed model and print per-layer accum vs local QSNR table.
+
+    Usage::
+
+        python -c "from src.tests.test_qsnr_local_vs_accum import generate_deep_model_table; generate_deep_model_table()"
+    """
+    torch.manual_seed(42)
+    model = DeepMixedModel()
+    cfg = QuantConfig(
+        w_format="int8", w_granularity="per_tensor",
+        a_format="int8", a_granularity="per_tensor",
+    )
+    input_tensor = torch.randn(2, 3, 8, 8)
+
+    session = Session(model, cfg)
+    result = session.run([input_tensor], outputs=["qsnr"])
+
+    accum = dict(result.accum_qsnr_per_layer)
+    local_out = dict(result.qsnr_per_layer)
+    local_all = _extract_qsnr_all_roles(result.observers_data)
+
+    all_layers = sorted(set(accum.keys()) | set(local_out.keys()))
+    if not all_layers:
+        print("No layer data found.")
+        return
+
+    op_tags = {
+        "conv": "Conv2d",
+        "bn": "BatchNorm2d",
+        "relu": "ReLU",
+        "pool": "AvgPool2d",
+        "fc1": "Linear",
+        "fc2": "Linear",
+        "fc3": "Linear",
+        "ln": "LayerNorm",
+        "relu2": "ReLU",
+        "relu3": "ReLU",
+    }
+
+    print(f"\n{'='*105}")
+    print(f"  Deep Mixed Model — Per-Layer accum QSNR vs local QSNR")
+    print(f"  Model: Conv→BN→ReLU→Pool→Linear→LN→ReLU→Linear→ReLU→Linear")
+    print(f"  Config: int8 per_tensor (quantize_nonlinear=True)")
+    print(f"{'='*105}")
+    print(f"{'#':<3} {'Layer':<16} {'Type':<14} {'Accum':>10} {'Local':>10} "
+          f"{'Diff':>10} {'ΔAccum':>10} {'Note'}")
+    print("-" * 105)
+
+    prev_accum = None
+    for i, layer in enumerate(all_layers):
+        tag = op_tags.get(layer, "?")
+        accum_val = accum.get(layer, float('nan'))
+        local_val = local_out.get(layer, float('nan'))
+        local_all_val = local_all.get(layer, float('nan'))
+
+        def _fv(v):
+            if v is None or (isinstance(v, float) and v != v):
+                return "N/A"
+            return f"{v:.2f}"
+
+        diff = None
+        note = ""
+        if not isnan_str(accum_val) and not isnan_str(local_val):
+            diff = local_val - accum_val
+            if abs(diff) < 2.0:
+                note = "✓ consistent"
+            elif local_val > 100:
+                note = "pass-through (no entry quant)"
+            elif diff > 10:
+                note = "upstream error propagation"
+            else:
+                note = "minor discrepancy"
+
+        delta_accum = (accum_val - prev_accum) if (prev_accum is not None and not isnan_str(accum_val)) else None
+        prev_accum = accum_val if not isnan_str(accum_val) else prev_accum
+
+        print(
+            f"{i:<3} {layer:<16} {tag:<14} "
+            f"{_fv(accum_val):>10} {_fv(local_val):>10} "
+            f"{_fv(diff):>10} {_fv(delta_accum):>10} "
+            f"{note}"
+        )
+
+    print("-" * 105)
+    print("  Local = observer (op's own quantization error)")
+    print("  Accum = hook   (total error incl. upstream propagation)")
+    print("  ΔAccum = accum[i] - accum[i-1] (≤0 → error accumulates)")
+    print("  Diff > 0 for deep layers = expected ✓ (local excludes upstream error)")
+    print()
+
+    # Summary stats
+    diffs = []
+    for layer in all_layers:
+        av = accum.get(layer)
+        lv = local_out.get(layer)
+        if not isnan_str(av) and not isnan_str(lv) and lv < 100:
+            diffs.append((layer, lv - av, av, lv))
+
+    if diffs:
+        diffs.sort(key=lambda x: x[1])
+        print(f"  Layers with meaningful local QSNR (< 100 dB):")
+        for layer, diff, av, lv in diffs:
+            print(f"    {layer:<16} accum={av:.2f}  local={lv:.2f}  diff={diff:+.2f} dB")
+        avg_diff = sum(d[1] for d in diffs) / len(diffs)
+        print(f"  Average diff (meaningful layers): {avg_diff:+.2f} dB")
+        print(f"  → local QSNR exceeds accum by ~{avg_diff:.1f} dB on average")
+        print(f"  → this is the per-layer quantization overhead (upstream error excluded)")
+
+
+def isnan_str(v):
+    """Check if value is NaN (works for float('nan') and numpy nan)."""
+    if v is None:
+        return True
+    if isinstance(v, float):
+        return v != v  # NaN check
+    return False
+
+
 if __name__ == "__main__":
     generate_comparison_table()

@@ -58,7 +58,7 @@ report.print_summary(qsnr_type="accum")   # 切换为端到端累积 QSNR
 | [误差分析](docs/guides/session/analysis.md) | 5 种 Observer、分布分析、LayerSensitivity、累积 vs 本地误差传播 |
 | [格式选择](docs/guides/formats.md) | int8/fp8/nf4 等格式对比 & 自定义格式注册 |
 | [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block 选择 |
-| [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive |
+| [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive · smoothquant_distrib 分布对比 |
 | [校准策略](docs/guides/calibration.md) | mse / max / percentile / kl 对比 |
 | [多配置对比 (Study)](docs/guides/session/study.md) | Study → StudyReport → 对比表 + 图表导出 |
 | [ONNX 导出](docs/guides/onnx-export.md) | 标准 QDQ + MX 自定义算子 |

@@ -13,6 +13,7 @@ from src.observer.mixin import ObservableMixin
 from src.ops._mixin import _QuantizedModuleMixin
 from src.ops.vec_ops import vec_add, vec_reduce_mean
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 
 _f_adaptive_avg_pool2d = F.adaptive_avg_pool2d
 
@@ -68,7 +69,11 @@ class AdaptiveAvgPool2dFunction(torch.autograd.Function):
                     input_slice, [2, 3], keepdim=False, scheme=inner_scheme)
 
         if emit_fn is not None:
-            true_output = _f_adaptive_avg_pool2d(_input_ref, output_size)
+            _enter_quantize()
+            try:
+                true_output = _f_adaptive_avg_pool2d(_input_ref, output_size)
+            finally:
+                _exit_quantize()
             emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         ctx.osizeH = osizeH

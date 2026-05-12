@@ -10,6 +10,7 @@ from src.viz.figures import (
     error_vs_distribution,
     layer_type_qsnr,
     per_layer_role_histogram,
+    smoothquant_distrib_comparison,
     _get_acc_val,
 )
 from src.viz.figures import save_figure
@@ -38,6 +39,7 @@ __all__ = [
     "error_vs_distribution",
     "layer_type_qsnr",
     "per_layer_role_histogram",
+    "smoothquant_distrib_comparison",
     "_compute_best_transform_per_layer",
     "_get_acc_val",
 ]

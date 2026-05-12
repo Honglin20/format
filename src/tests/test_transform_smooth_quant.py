@@ -231,8 +231,8 @@ class TestComputeSmoothQuantScale:
 
 class TestSmoothQuantTransform:
 
-    def test_roundtrip(self):
-        """SmoothQuantTransform.forward then .inverse recovers original exactly."""
+    def test_inverse_is_identity_after_forward(self):
+        """inverse(forward(x)) == forward(x) — inverse is identity."""
         _, SmoothQuantTransform = _try_import()
         torch.manual_seed(42)
         scale = torch.tensor([0.5, 2.0, 1.0])
@@ -241,27 +241,21 @@ class TestSmoothQuantTransform:
         xt = t.forward(x)
         xr = t.inverse(xt)
         assert xr.shape == x.shape, f"Shape mismatch: {xr.shape} != {x.shape}"
-        assert torch.equal(xr, x), \
-            f"Roundtrip failed: max diff = {(xr - x).abs().max()}"
+        assert torch.equal(xr, xt), \
+            f"Inverse should be identity, max diff = {(xr - xt).abs().max()}"
 
-    def test_roundtrip_higher_rank(self):
-        """Roundtrip works for 3D and 4D tensors.
-
-        Uses only power-of-2 scale values so that division and multiplication
-        are exact (no floating-point rounding for normal-range values).
-        """
+    def test_forward_higher_rank(self):
+        """Forward works for 3D and 4D tensors."""
         _, SmoothQuantTransform = _try_import()
         torch.manual_seed(42)
         scale = torch.tensor([0.5, 2.0, 1.0, 4.0])
         t = SmoothQuantTransform(scale)
-        # 3D: [batch, seq, channels]
         x3 = torch.randn(2, 4, 4)
-        xr3 = t.inverse(t.forward(x3))
-        assert torch.equal(xr3, x3), "3D roundtrip failed"
-        # 4D: [batch, seq_left, seq_right, channels]
+        xf3 = t.forward(x3)
+        assert xf3.shape == x3.shape, "3D forward shape mismatch"
         x4 = torch.randn(2, 3, 4, 4)
-        xr4 = t.inverse(t.forward(x4))
-        assert torch.equal(xr4, x4), "4D roundtrip failed"
+        xf4 = t.forward(x4)
+        assert xf4.shape == x4.shape, "4D forward shape mismatch"
 
     def test_forward_applies_division(self):
         """forward(x) = x / scale, verified numerically."""
@@ -277,25 +271,22 @@ class TestSmoothQuantTransform:
         result = t.forward(x)
         assert torch.equal(result, expected), f"Forward mismatch: {result} != {expected}"
 
-    def test_inverse_applies_multiplication(self):
-        """inverse(x_q) = x_q * scale, verified numerically."""
+    def test_inverse_is_identity(self):
+        """inverse(x_q) = x_q — identity, weight fusion compensates."""
         _, SmoothQuantTransform = _try_import()
         scale = torch.tensor([2.0, 4.0])
         t = SmoothQuantTransform(scale)
         x_q = torch.tensor([[5.0, 5.0],
                             [15.0, 10.0],
                             [25.0, 15.0]])
-        expected = torch.tensor([[10.0, 20.0],
-                                 [30.0, 40.0],
-                                 [50.0, 60.0]])
         result = t.inverse(x_q)
-        assert torch.equal(result, expected), f"Inverse mismatch: {result} != {expected}"
+        assert torch.equal(result, x_q), f"Inverse should be identity, got {result}"
 
     def test_invertible_flag(self):
-        """SmoothQuantTransform.invertible is True."""
+        """SmoothQuantTransform.invertible is False — inverse is identity."""
         _, SmoothQuantTransform = _try_import()
         t = SmoothQuantTransform(torch.tensor([1.0, 2.0]))
-        assert t.invertible is True
+        assert t.invertible is False
 
     def test_is_transform_base(self):
         """SmoothQuantTransform is a TransformBase subclass."""
@@ -304,17 +295,15 @@ class TestSmoothQuantTransform:
         assert issubclass(SmoothQuantTransform, TransformBase)
 
     def test_scale_stored_as_clone(self):
-        """Scale is stored as a clone; modifying original doesn't affect transform.
-
-        Uses power-of-2 scale values so that the roundtrip is bit-exact.
-        """
+        """Scale is stored as a clone; modifying original doesn't affect forward."""
         _, SmoothQuantTransform = _try_import()
         original = torch.tensor([1.0, 2.0, 4.0])
         t = SmoothQuantTransform(original)
         original[0] = 999.0  # Modify original
-        x = torch.randn(4, 3)
-        xr = t.inverse(t.forward(x))
-        assert torch.equal(xr, x), "Scale was not cloned properly"
+        x = torch.tensor([[2.0, 4.0, 8.0]])
+        expected_forward = x / torch.tensor([1.0, 2.0, 4.0])
+        result = t.forward(x)
+        assert torch.equal(result, expected_forward), "Scale was not cloned properly"
 
     def test_scale_positive(self):
         """All scale values are strictly positive."""
@@ -332,12 +321,13 @@ class TestSmoothQuantTransform:
         W = torch.randn(8, 16)
         t = SmoothQuantTransform.from_calibration(X, W, alpha=0.5)
         assert isinstance(t, SmoothQuantTransform)
-        assert t.invertible is True
-        # Roundtrip should recover original (scale is not power-of-2, so use allclose)
+        assert t.invertible is False
+        # inverse is identity, forward applies smoothing
         x = torch.randn(4, 16)
-        xr = t.inverse(t.forward(x))
-        assert torch.allclose(xr, x, atol=1e-6), \
-            f"from_calibration roundtrip failed: max diff = {(xr - x).abs().max()}"
+        xt = t.forward(x)
+        assert not torch.allclose(xt, x, atol=1e-6), "Forward should change the input"
+        xr = t.inverse(xt)
+        assert torch.equal(xr, xt), "Inverse should be identity"
 
     def test_from_calibration_default_alpha(self):
         """from_calibration uses default alpha=0.5."""
@@ -414,14 +404,15 @@ class TestSmoothQuantTransform:
         t2 = SmoothQuantTransform(torch.tensor([2.0, 4.0]), channel_axis=-1)
         assert t1 == t2
 
-    def test_channel_axis_roundtrip_conv2d(self):
-        """Roundtrip with channel_axis=1 recovers original (Conv2d layout)."""
+    def test_channel_axis_conv2d_inverse_is_identity(self):
+        """inverse with channel_axis=1 is identity (Conv2d layout)."""
         _, SmoothQuantTransform = _try_import()
         scale = torch.tensor([0.5, 2.0, 1.0, 4.0])
         t = SmoothQuantTransform(scale, channel_axis=1)
         x = torch.randn(2, 4, 4, 4)  # (N=2, C=4, H=4, W=4)
-        xr = t.inverse(t.forward(x))
-        assert torch.equal(xr, x), f"Roundtrip failed with channel_axis=1"
+        xt = t.forward(x)
+        xr = t.inverse(xt)
+        assert torch.equal(xr, xt), "Inverse should be identity"
 
     def test_eq_different_channel_axis(self):
         """Transforms with same scale but different channel_axis are not equal."""
@@ -500,10 +491,11 @@ class TestSmoothQuantTransform:
         assert xt.device == x.device
         xr = t.inverse(xt)
         assert xr.device == x.device
-        assert torch.allclose(xr, x, atol=1e-6)
+        # inverse is identity — returns same tensor
+        assert torch.equal(xr, xt)
 
     def test_device_agnostic_same_device_no_op(self):
-        """When scale and input are already on the same device, .to() is a no-op."""
+        """When scale and input are on same device, inverse returns same tensor."""
         _, SmoothQuantTransform = _try_import()
         scale = torch.tensor([0.5, 2.0, 1.0])
         t = SmoothQuantTransform(scale)
@@ -512,7 +504,8 @@ class TestSmoothQuantTransform:
         assert xt.device == x.device
         xr = t.inverse(xt)
         assert xr.device == x.device
-        assert torch.equal(xr, x)
+        # inverse is identity
+        assert torch.equal(xr, xt)
 
 
 # ============================================================================
@@ -615,14 +608,15 @@ class TestSmoothQuantQuantScheme:
         t2 = SmoothQuantTransform(torch.tensor([2.0, 4.0]), channel_axis=-1)
         assert t1 == t2
 
-    def test_channel_axis_roundtrip_conv2d(self):
-        """Roundtrip with channel_axis=1 recovers original (Conv2d layout)."""
+    def test_channel_axis_conv2d_inverse_is_identity(self):
+        """inverse with channel_axis=1 is identity (Conv2d layout)."""
         _, SmoothQuantTransform = _try_import()
         scale = torch.tensor([0.5, 2.0, 1.0, 4.0])
         t = SmoothQuantTransform(scale, channel_axis=1)
         x = torch.randn(2, 4, 4, 4)  # (N=2, C=4, H=4, W=4)
-        xr = t.inverse(t.forward(x))
-        assert torch.equal(xr, x), f"Roundtrip failed with channel_axis=1"
+        xt = t.forward(x)
+        xr = t.inverse(xt)
+        assert torch.equal(xr, xt), "Inverse should be identity"
 
     def test_eq_different_channel_axis(self):
         """Transforms with same scale but different channel_axis are not equal."""

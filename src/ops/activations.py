@@ -20,6 +20,7 @@ from src.ops.vec_ops import (
     vec_exp, vec_recip, vec_tanh,
 )
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 
 _torch_relu = torch.relu
 _torch_relu_ = torch.relu_
@@ -48,7 +49,11 @@ class SigmoidFunction(torch.autograd.Function):
         output = vec_recip(exp_nx_plus_1, inner_scheme)
 
         if emit_fn is not None:
-            true_output = torch.sigmoid(_input_ref)
+            _enter_quantize()
+            try:
+                true_output = torch.sigmoid(_input_ref)
+            finally:
+                _exit_quantize()
             emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         ctx.save_for_backward(output)
@@ -107,7 +112,11 @@ class TanhFunction(torch.autograd.Function):
         output = vec_tanh(input, inner_scheme)
 
         if emit_fn is not None:
-            true_output = torch.tanh(_input_ref)
+            _enter_quantize()
+            try:
+                true_output = torch.tanh(_input_ref)
+            finally:
+                _exit_quantize()
             emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         ctx.save_for_backward(output)
@@ -164,17 +173,26 @@ class ReLUFunction(torch.autograd.Function):
         if emit_fn:
             emit_fn("input", 0, "input_pre_quant", _input_ref, input, inner_scheme)
 
+        # Pre-compute fp32 reference for observer
+        _true_out = None
+        if emit_fn:
+            _enter_quantize()
+            try:
+                _true_out = _torch_relu(_input_ref)
+            finally:
+                _exit_quantize()
+
         if inplace:
             ctx.mark_dirty(input)
             input = _torch_relu_(input)
             output = vec_quantize(input, inner_scheme)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", _torch_relu(_input_ref), output, inner_scheme)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_out, output, inner_scheme)
             input.copy_(output)
             output = input
         else:
             fp_out = _torch_relu(input)
             output = vec_quantize(fp_out, inner_scheme)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", _torch_relu(_input_ref), output, inner_scheme)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_out, output, inner_scheme)
 
         mask = output > 0
         ctx.save_for_backward(mask)
@@ -231,17 +249,26 @@ class ReLU6Function(torch.autograd.Function):
         if emit_fn:
             emit_fn("input", 0, "input_pre_quant", _input_ref, input, inner_scheme)
 
+        # Pre-compute fp32 reference for observer
+        _true_out = None
+        if emit_fn:
+            _enter_quantize()
+            try:
+                _true_out = _f_relu6(_input_ref)
+            finally:
+                _exit_quantize()
+
         if inplace:
             ctx.mark_dirty(input)
             input = _f_relu6(input, inplace=True)
             output = vec_quantize(input, inner_scheme)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", _f_relu6(_input_ref), output, inner_scheme)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_out, output, inner_scheme)
             input.copy_(output)
             output = input
         else:
             fp_out = _f_relu6(input)
             output = vec_quantize(fp_out, inner_scheme)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", _f_relu6(_input_ref), output, inner_scheme)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_out, output, inner_scheme)
 
         mask = torch.logical_and(output > 0, output < 6)
         ctx.save_for_backward(mask)
@@ -303,7 +330,11 @@ class LeakyReLUFunction(torch.autograd.Function):
         output = vec_quantize(output, inner_scheme)
 
         if emit_fn is not None:
-            true_output = _f_leaky_relu(_input_ref, negative_slope=negative_slope)
+            _enter_quantize()
+            try:
+                true_output = _f_leaky_relu(_input_ref, negative_slope=negative_slope)
+            finally:
+                _exit_quantize()
             emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         if inplace:
@@ -372,7 +403,11 @@ class SiLUFunction(torch.autograd.Function):
         output = vec_mul(q_in, sig_x, inner_scheme)
 
         if emit_fn is not None:
-            true_output = _f_silu(_input_ref)
+            _enter_quantize()
+            try:
+                true_output = _f_silu(_input_ref)
+            finally:
+                _exit_quantize()
             emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         if inplace:
@@ -454,10 +489,14 @@ class GELUFunction(torch.autograd.Function):
         output = vec_mul(q_in, phi, inner_scheme)
 
         if emit_fn is not None:
-            if first_order_gelu:
-                true_output = _input_ref * torch.sigmoid(1.703125 * _input_ref)
-            else:
-                true_output = _input_ref * torch.sigmoid(1.59375 * (_input_ref + 0.044677734 * _input_ref**3))
+            _enter_quantize()
+            try:
+                if first_order_gelu:
+                    true_output = _input_ref * torch.sigmoid(1.703125 * _input_ref)
+                else:
+                    true_output = _input_ref * torch.sigmoid(1.59375 * (_input_ref + 0.044677734 * _input_ref**3))
+            finally:
+                _exit_quantize()
             emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         if quantize_backprop:

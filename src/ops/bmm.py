@@ -13,6 +13,7 @@ from src.scheme.op_config import OpQuantConfig
 
 _torch_bmm = torch.bmm
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 
 
 class BMMFunction(torch.autograd.Function):
@@ -65,7 +66,11 @@ class BMMFunction(torch.autograd.Function):
         # Pre-compute true fp32 output for ALL observer output stages.
         _true_ref = None
         if emit_fn is not None:
-            _true_ref = _torch_bmm(in1_raw, in2_raw)
+            _enter_quantize()
+            try:
+                _true_ref = _torch_bmm(in1_raw, in2_raw)
+            finally:
+                _exit_quantize()
 
         # Output: storage
         if cfg.storage is not None:

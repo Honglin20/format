@@ -27,6 +27,19 @@
 4. 测试先于实现：写失败测试 → 实现 → 通过 → commit → review agent
 5. CURRENT.md 只记录当前进行中的任务（≤30 行）。子任务完成后立即将已完成条目移到 `docs/status/CHANGELOG.md`，不在 CURRENT.md 中积累历史
 6. README 只放项目简介 + 一个 example + 文档链接。不放架构设计、API 参考表、多步骤教程。详细内容写到 `docs/` 对应模块文档
+7. **E2E 回归门**：任何修改 transform / format / quantize / session 的 commit 必须通过下面两个 E2E Study 脚本，并审视结果合理性：
+
+| 项目 | 脚本 | 模型 | 数据集 |
+|------|------|------|--------|
+| MNIST | `scripts/mnist_hadamard_study.py` | 3-layer MLP (784→512→128→10) | MNIST 手写数字 |
+| Transformer | `scripts/transformer_agnews_study.py` | 2-layer Transformer (d=128, nhead=4) | AG News 4 分类 |
+
+- 预训练权重在 `scripts/weights/` 下，可用 `*_eval.py` 脚本加载跳过训练直接跑 Study
+- 合理性判据（基于当前 baseline，2026-05-11）：
+  - MNIST / AG News: FP32 accuracy 不得为 0（回归检测）
+  - int8-pc: |quant - fp32| < 0.02
+  - int4-pb32: |quant - fp32| < 0.05
+  - Hadamard 和 SmoothQuant 在 MNIST/Transformer 上退化均在 ~1% 以内（2026-05-12 修复后）
 
 ---
 
@@ -99,6 +112,7 @@ x_q = quantize(x, scheme)
 | 新增可视化/表格 | `docs/standards/role-aware-visualization.md` — role 区分规范 |
 | 新增公共 API | `docs/standards/api-design.md` |
 | 子任务做完了，准备收尾 | `docs/principles/review-gate.md` → `docs/workflow/subtask-lifecycle.md` |
+| 修改了 transform/format/quantize | `scripts/mnist_hadamard_study.py` + `scripts/transformer_agnews_study.py` → 跑两个 E2E Study，审视结果
 | 提交代码 | `docs/workflow/branching-commits.md` |
 | 排查历史缺陷 | `docs/reviews/INDEX.md` |
 | 查公式定义 | `docs/reference/INDEX.md` |
@@ -114,6 +128,9 @@ x_q = quantize(x, scheme)
 - **测试门（快速）**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q -m "not slow"`（1,857 passed）
 - **全量测试**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`（含 slow，2,070 passed）
 - **E2E 全算子**: `pytest src/tests/test_e2e_all_ops.py -q`（21 模块 + 10 inline op，49 parametrized）
+- **E2E 回归 (MNIST)**: `PYTHONPATH=. python scripts/mnist_hadamard_study.py`（MLP + int4/int8 + hadamard/sq）
+- **E2E 回归 (Transformer)**: `PYTHONPATH=. python scripts/transformer_agnews_study.py`（Transformer + AG News + int4/int8 + hadamard/sq）
+- **E2E 回归 (eval only)**: `PYTHONPATH=. python scripts/transformer_agnews_eval.py`（跳过训练，加载预训练权重直接跑 Study）
 
 ---
 

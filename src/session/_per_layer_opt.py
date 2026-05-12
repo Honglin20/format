@@ -210,10 +210,12 @@ def per_layer_optimal(
     # ------------------------------------------------------------------
     # 6. Fuse SQ weights
     # ------------------------------------------------------------------
+    sq_fp32_ref: Optional[nn.Module] = None
     if sq_winning_layers and sq_transforms:
         model = fuse_smoothquant_weights(
             fp32_model, sq_transforms, layer_names=sq_winning_layers,
         )
+        sq_fp32_ref = fp32_model  # original unmodified model as FP32 baseline
     else:
         model = copy.deepcopy(fp32_model)
 
@@ -247,6 +249,7 @@ def per_layer_optimal(
         per_layer_cfgs,
         calibrator=calibrator,
         keep_fp32=True,
+        fp32_ref=sq_fp32_ref,
     )
 
     # ------------------------------------------------------------------

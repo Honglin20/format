@@ -163,6 +163,46 @@ IoC 模式：单回调驱动 calibrate/analyze/evaluate 三阶段。
 
 ## Bug 修复日志
 
+### 2026-05-12 — SmoothQuant & Hadamard 三大 Bug 修复
+
+**SmoothQuant 根因分析 → 两个独立 bug：**
+
+**Bug 1 — SmoothQuant FP32 基线使用融合后模型**
+
+- 现象：MNIST 上 SmoothQuant 配置 FP32 准确率显示 0.9643（应为 0.9789）；Transformer 上 FP32 困惑度从 7.95 爆炸到 2.78 亿
+- 根因：`Session.quantize()` 调用 `fuse_smoothquant_weights()` 创建融合模型（`W ← W * s`），然后传给 `_QuantSession`。`_QuantSession.__init__` 用 `copy.deepcopy(model)` 存储 `fp32_model`，导致 FP32 基线也是融合后模型
+- 修复：`_QuantSession.__init__` 新增 `fp32_ref` 参数。当 SmoothQuant 活跃时，`Session.quantize()` 传递原始 `self._model` 作为 `fp32_ref`；`_per_layer_opt.py` 同理
+- 改动：`src/session/_quant.py`、`src/session/_session.py`、`src/session/_per_layer_opt.py`
+
+**Bug 2 — SmoothQuant double-scaling（inverse = x * s）**
+
+- 现象：修复 Bug 1 后 FP32 基线正确，但量化后 MNIST 下降 -1.87%、Transformer 困惑度 1.98 亿
+- 根因：`SmoothQuantTransform.inverse(x_q) = x_q * s`，导致 `quantize()` 返回 `Q(x/s) * s`。但权重融合已做 `W * s`。Matmul 结果：`(Q(x/s)*s) @ Q(W*s)^T ≈ (x*s) @ W^T ≠ x @ W^T`。s 因子沿 input-channel 维度无法从求和号中因子化出来，输出被 channel-wise scale 污染
+- 修复：`inverse` 改为 identity（return x_q）。激活值保持在平滑域 `Q(x/s)`，matmul `Q(x/s) @ Q(W*s)^T ≈ x @ W^T` 正确。`invertible = False`
+- 效果：MNIST int4-pb32-sq -0.26%（原 -1.87%），Transformer int4-pb32-sq +4.4%（原灾难性）
+- 改动：`src/transform/smooth_quant.py` + `src/tests/test_transform_smooth_quant.py`
+
+**Bug 3 — Hadamard 非 2 的幂维度截断**
+
+- 现象：MNIST Hadamard -21.2%、Transformer Hadamard +100% 困惑度，QSNR 6.9 dB
+- 根因：旧实现对非 2 的幂维度 padding 到下一个 2 的幂 → Hadamard → 截断。截断是 lossy 操作：forward 丢弃的 padding 区域包含信息，inverse 时补零是错误的 Hilbert 空间基。d=192（pad to 256）时 roundtrip 矩阵对角仅 0.75、跨元素串扰 25%
+- 修复：将任意维度分解为 2 的幂 chunks（如 192=128+64），每个 chunk 独立 Hadamard（block-diagonal orthogonal）。`hadamard(hadamard(x)) == x` 对所有维度精确成立（max error ~7e-7）
+- 效果：MNIST Hadamard -0.26%（原 -21.2%），Transformer Hadamard +5.9%（原 +100%），QSNR 6.9→18.8 dB
+- 改动：`src/transform/hadamard.py`
+
+**最终 Transformer 排名（FP32=7.95）：**
+
+| Config | Quant PPL | Δ | QSNR |
+|--------|-----------|---|------|
+| nf4-pc | 8.16 | +0.21 | 26.8 dB |
+| int4-pb32-sq | 8.30 | +0.35 | 1.8 dB |
+| int4-pb32-had | 8.42 | +0.47 | 18.8 dB |
+| int4-pb32 | 8.43 | +0.48 | 19.0 dB |
+
+测试：全量 174 passed（session + SQ + Hadamard + per_layer_opt）
+
+---
+
 ### 2026-05-08
 
 - **quantize_backprop 修正 — Transformer 全量 backward bit-exact 验证通过**。根因：`_make_ln/gn/bn/rms_norm` 传入 `quantize_backprop=cfg.is_training` 但 `cfg` 为原始 config（backward fields 均为 None），导致 norm backward 中 vec_ops 以 fp32 执行而非 bf16 量化。修正：传入 `_non_matmul_cfg(cfg).is_training`。同时修复了 activations/softmax/pooling 模块多余的 pre/post quantization（在 autograd Function 外部调用导致梯度断裂）。Transformer 验证 6 配置全部 PASS。

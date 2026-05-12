@@ -10,6 +10,7 @@ from src.scheme.op_config import OpQuantConfig
 from src.observer.mixin import ObservableMixin
 from src.ops._mixin import _QuantizedModuleMixin
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 from src.ops.vec_ops import (
     vec_quantize, vec_sub, vec_mul, vec_div,
     vec_exp, vec_exp2, vec_reduce_sum,
@@ -46,7 +47,11 @@ class SoftmaxFunction(torch.autograd.Function):
         output = vec_div(output, output_sum, inner_scheme)
 
         if emit_fn is not None:
-            true_output = _f_softmax(_input_ref.float(), dim)
+            _enter_quantize()
+            try:
+                true_output = _f_softmax(_input_ref.float(), dim)
+            finally:
+                _exit_quantize()
             emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         ctx.save_for_backward(output)

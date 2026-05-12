@@ -15,6 +15,7 @@ from torch.nn import grad as nn_grad
 
 from src.scheme.op_config import OpQuantConfig
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 from src.observer.mixin import ObservableMixin
 
 
@@ -126,12 +127,16 @@ class ConvFunction(torch.autograd.Function):
         # Pre-compute true fp32 output for ALL observer output stages.
         _true_ref = None
         if emit_fn is not None:
-            if num_spatial_dims == 1:
-                _true_ref = F.conv1d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
-            elif num_spatial_dims == 2:
-                _true_ref = F.conv2d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
-            else:
-                _true_ref = F.conv3d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+            _enter_quantize()
+            try:
+                if num_spatial_dims == 1:
+                    _true_ref = F.conv1d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+                elif num_spatial_dims == 2:
+                    _true_ref = F.conv2d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+                else:
+                    _true_ref = F.conv3d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+            finally:
+                _exit_quantize()
 
         # Output: storage (bias already included in conv)
         if cfg.storage is not None:
@@ -444,15 +449,19 @@ class ConvTransposeFunction(torch.autograd.Function):
         # Pre-compute true fp32 output for ALL observer output stages.
         _true_ref = None
         if emit_fn is not None:
-            if num_spatial_dims == 1:
-                _true_ref = F.conv_transpose1d(input_raw, weight_raw, bias, stride, padding,
-                                               output_padding, groups, dilation)
-            elif num_spatial_dims == 2:
-                _true_ref = F.conv_transpose2d(input_raw, weight_raw, bias, stride, padding,
-                                               output_padding, groups, dilation)
-            else:
-                _true_ref = F.conv_transpose3d(input_raw, weight_raw, bias, stride, padding,
-                                               output_padding, groups, dilation)
+            _enter_quantize()
+            try:
+                if num_spatial_dims == 1:
+                    _true_ref = F.conv_transpose1d(input_raw, weight_raw, bias, stride, padding,
+                                                   output_padding, groups, dilation)
+                elif num_spatial_dims == 2:
+                    _true_ref = F.conv_transpose2d(input_raw, weight_raw, bias, stride, padding,
+                                                   output_padding, groups, dilation)
+                else:
+                    _true_ref = F.conv_transpose3d(input_raw, weight_raw, bias, stride, padding,
+                                                   output_padding, groups, dilation)
+            finally:
+                _exit_quantize()
 
         # Output: storage
         if cfg.storage is not None:

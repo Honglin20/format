@@ -168,6 +168,12 @@ class QuantConfig:
     storage_format: Optional[str] = None    # Explicit format name: "fp8_e4m3", "fp4_e2m1", etc.
                                             # Takes precedence over storage_bits/storage_kind.
 
+    # ---- GPTQ (Hessian-based weight-only quantization) ----
+    gptq: bool = False
+    gptq_block_size: int = 128
+    gptq_damp: float = 0.01
+    gptq_act_order: bool = False
+
     # ---- Mode ----
     weight_only: bool = False
     quantize_nonlinear: bool = True         # False = skip quantizing nonlinear ops (norm/activation/pool)
@@ -202,6 +208,15 @@ class QuantConfig:
                 f"Invalid scale_storage {self.scale_storage!r}. "
                 f"Must be one of {sorted(_VALID_SCALE_STORAGES)}"
             )
+        if self.gptq:
+            if self.gptq_block_size < 1:
+                raise ValueError(
+                    f"gptq_block_size must be >= 1, got {self.gptq_block_size}"
+                )
+            if self.gptq_damp <= 0 or self.gptq_damp > 1:
+                raise ValueError(
+                    f"gptq_damp must be in (0, 1], got {self.gptq_damp}"
+                )
         if self.lsq_steps < 0:
             raise ValueError(
                 f"lsq_steps must be >= 0, got {self.lsq_steps}"
@@ -376,6 +391,11 @@ class QuantConfig:
                 "'act_format' cannot be used with 'weight_only=True'"
             )
 
+        gptq = desc.get("gptq", False)
+        gptq_block_size = desc.get("gptq_block_size", 128)
+        gptq_damp = desc.get("gptq_damp", 0.01)
+        gptq_act_order = desc.get("gptq_act_order", False)
+
         lsq_steps = desc.get("lsq_steps", 0)
         lsq_lr = desc.get("lsq_lr", 1e-3)
         prescale_init = desc.get("pre_scale_init", "ones")
@@ -426,6 +446,10 @@ class QuantConfig:
             storage_kind=_skind,
             storage_format=_sfmt,
             weight_only=weight_only,
+            gptq=gptq,
+            gptq_block_size=gptq_block_size,
+            gptq_damp=gptq_damp,
+            gptq_act_order=gptq_act_order,
             lsq_steps=lsq_steps,
             lsq_lr=lsq_lr,
             prescale_init=prescale_init,

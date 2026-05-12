@@ -52,6 +52,8 @@ _OUTPUT_SPEC: Dict[str, dict] = {
     # ── Error analysis ──────────────────────────────────────────────────────
     "error_propagation": {"observers": ["qsnr"], "needs_eval": False},
     "error_source":      {"observers": ["qsnr"], "needs_eval": False},
+    # ── SmoothQuant ──────────────────────────────────────────────────────
+    "smoothquant_distrib": {"observers": [],          "needs_eval": False},
     # ── Other ───────────────────────────────────────────────────────────
     "cost":             {"observers": [],              "needs_eval": False, "needs_cost": True},
 }

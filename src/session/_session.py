@@ -496,6 +496,7 @@ class Session:
         self._delta: Optional[Dict[str, float]] = None
         self._cost: Any = None
         self._cost_fp32: Any = None
+        self._sq_distrib_comparison: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -540,6 +541,7 @@ class Session:
             cost=self._cost,
             cost_fp32=self._cost_fp32,
             sq_transforms=self._sq_transforms,
+            sq_distrib_comparison=self._sq_distrib_comparison,
         )
 
     # ------------------------------------------------------------------
@@ -568,6 +570,7 @@ class Session:
         self._adaptive_selection: Optional[Dict[str, int]] = None
 
         # ---- SmoothQuant: compute per-channel scales + fuse weights ----
+        fp32_ref: Optional[nn.Module] = None
         if self._config.transform == "smoothquant":
             if calib_data is None:
                 raise ValueError(
@@ -580,6 +583,7 @@ class Session:
                 eval_fn=eval_fn,
             )
             model = fuse_smoothquant_weights(self._model, self._sq_transforms)
+            fp32_ref = self._model  # original, unmodified model as FP32 baseline
         else:
             model = self._model
             self._sq_transforms = None
@@ -596,6 +600,7 @@ class Session:
             observers=[],
             keep_fp32=self._keep_fp32,
             quantize_nonlinear=self._config.quantize_nonlinear,
+            fp32_ref=fp32_ref,
         )
 
         # ---- Patch per-layer SmoothQuant transforms into module configs ----
@@ -619,6 +624,23 @@ class Session:
                     else:
                         new_kwargs[f_name] = scheme
                 module.cfg = OpQuantConfig(**new_kwargs)
+
+        # ---- GPTQ: Hessian-based weight-only quantization ----
+        if self._config.gptq:
+            if calib_data is None:
+                raise ValueError("calib_data is required for GPTQ")
+            from src.calibration.gptq_optimizer import GPTQOptimizer
+
+            gptq_opt = GPTQOptimizer(
+                block_size=self._config.gptq_block_size,
+                damp_percent=self._config.gptq_damp,
+                act_order=self._config.gptq_act_order,
+            )
+            gptq_opt.optimize(
+                self._quant_session.qmodel,
+                calib_data,
+                eval_fn=eval_fn,
+            )
 
         # ---- Prescale: init pre_scales + optional LSQ ----
         if self._config.transform == "prescale":
@@ -730,10 +752,19 @@ class Session:
         import math
         from collections import defaultdict
 
-        from src.report._spec import resolve_outputs as _resolve_outputs
+        from src.report._spec import resolve_outputs as _resolve_outputs, PRESETS
 
         observer_keys, _needs_eval, _needs_cost = _resolve_outputs(outputs)
         observer_keys_set = set(observer_keys)
+        # Resolve the original output spec keys (not observer keys) to check
+        # for pseudo-outputs like "smoothquant_distrib" that have no observers.
+        if outputs == "default":
+            _output_keys = set(PRESETS["default"])
+        elif outputs == "all":
+            _output_keys = set(PRESETS["all"])
+        else:
+            _output_keys = set(outputs)
+        _wants_sq_distrib = "smoothquant_distrib" in _output_keys
 
         can_hook = (
             "qsnr" in observer_keys_set
@@ -741,10 +772,13 @@ class Session:
             and self._quant_session.fp32_model is not None
         )
 
-        if not observer_keys_set and not can_hook:
+        if not observer_keys_set and not can_hook and not _wants_sq_distrib:
             return self
 
-        observers = [_OBSERVER_MAP[k]() for k in sorted(observer_keys_set)] if observer_keys_set else []
+        observers = [
+            _OBSERVER_MAP[k]() for k in sorted(observer_keys_set)
+            if k in _OBSERVER_MAP
+        ] if observer_keys_set else []
 
         # ── Hook + observer path (combined) ──────────────────────────
         if can_hook:
@@ -873,6 +907,74 @@ class Session:
                     self._observers_data
                 )
 
+        # SmoothQuant distribution comparison (auto-triggered, no-op
+        # when transform is not "smoothquant" — the user asked for the
+        # output but this config doesn't support it).
+        if _wants_sq_distrib and self._config.transform == "smoothquant":
+            self.compare_smoothquant_distributions(
+                calib_data,
+                eval_fn=eval_fn,
+            )
+
+        return self
+
+    # ------------------------------------------------------------------
+    # Step 3b: SmoothQuant distribution comparison
+    # ------------------------------------------------------------------
+
+    def compare_smoothquant_distributions(
+        self,
+        calib_data,
+        *,
+        eval_fn: Optional[Callable] = None,
+        layers: Optional[List[str]] = None,
+    ) -> "Session":
+        """Compare activation/weight distributions before and after SmoothQuant.
+
+        Runs ONE forward pass on the fused model (with hooks) to capture raw
+        activations, then computes smoothed distributions as ``X / scale``
+        using the per-layer SmoothQuant scales cached during ``.quantize()``.
+
+        Only meaningful when ``transform="smoothquant"``.  Must be called
+        after ``.quantize()``.  Stores the result in
+        ``result.sq_distrib_comparison``.
+
+        Args:
+            calib_data: Calibration data (single tensor or batch list).
+            eval_fn: Optional ``(model, data) -> Any``.  When provided,
+                invoked once per forward pass — does NOT iterate over
+                batch dimensions.
+            layers: If given, only compare these layers.
+
+        Raises:
+            RuntimeError: If ``.quantize()`` has not been called or
+                the config transform is not ``"smoothquant"``.
+
+        Returns:
+            Self for chaining.
+        """
+        if self._quant_session is None:
+            raise RuntimeError("Call .quantize() first")
+        if self._config.transform != "smoothquant":
+            raise RuntimeError(
+                "compare_smoothquant_distributions() requires "
+                "transform='smoothquant'"
+            )
+        if self._sq_transforms is None or not self._sq_transforms:
+            return self
+
+        from src.analysis._smoothquant_distrib import (
+            compare_smoothquant_distributions as _compare,
+        )
+
+        self._sq_distrib_comparison = _compare(
+            fp32_model=self._model,
+            fused_model=self._quant_session.qmodel,
+            sq_transforms=self._sq_transforms,
+            calib_data=calib_data,
+            eval_fn=eval_fn,
+            layers=layers,
+        )
         return self
 
     # ------------------------------------------------------------------
@@ -1018,7 +1120,7 @@ class Session:
         and accumulated QSNR (hook path, comparing quant vs fp32 output) are
         collected and stored in separate fields on the result.
         """
-        from src.report._spec import resolve_outputs as _resolve_outputs
+        from src.report._spec import resolve_outputs as _resolve_outputs, PRESETS
 
         observer_keys, needs_eval, needs_cost = _resolve_outputs(outputs)
 
@@ -1027,6 +1129,14 @@ class Session:
         self.analyze(calib_data, outputs=outputs, eval_fn=eval_fn)
 
         if needs_eval and eval_fn is not None:
+            if eval_data is None:
+                _logger.warning(
+                    "eval_data not provided — falling back to calib_data for "
+                    "evaluation. This often produces empty accuracy metrics "
+                    "because calib_data is typically a list of tensors. "
+                    "Pass eval_data=<your test loader> to Study.run() or "
+                    "Session.run() to get accuracy results."
+                )
             self.evaluate(
                 eval_data if eval_data is not None else calib_data,
                 eval_fn,

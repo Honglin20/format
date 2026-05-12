@@ -43,6 +43,54 @@ session.quantize(calib_data=calib_data)
 - 更接近 0：更多平滑压力给激活
 - 更接近 1：更多平滑压力给权重
 
+### SmoothQuant 分布前后对比
+
+`analyze(outputs=["smoothquant_distrib"])` 自动对比 SmoothQuant 前后每层
+activation 和 weight 的分布变化，输出 per-layer 对比表和关键指标变化：
+
+```python
+session = Session(model, cfg)
+session.quantize(calib_data=calib_data)
+session.analyze(calib_data, outputs=["smoothquant_distrib"])
+print(session.result.sq_comparison)
+```
+
+输出示例：
+
+```
+Layer                            DR raw  DR smooth    Δ DR  Outlier raw  Outlier smooth
+-----------------------------------------------------------------------
+0                                  8.63       8.09    0.54      0.0000        0.0000
+2                                  5.83      22.19  -16.35      0.0410        0.0059
+-----------------------------------------------------------------------
+Mean DR reduction: -7.91 bits
+Mean outlier reduction: 0.0176
+```
+
+也可以手动调用：
+
+```python
+session.compare_smoothquant_distributions(calib_data, eval_fn=my_eval)
+```
+
+对比指标包括：
+- `dynamic_range_bits`：动态范围（bits），SmoothQuant 应压缩首层
+- `outlier_ratio`：outlier 比例，核心卖点
+- `crest_factor`：峰值/RMS 比
+- `skewness`：偏度
+- 自动按 DR 压缩幅度排名 `improved_layers`
+
+可视化：
+
+```python
+from src.viz import smoothquant_distrib_comparison
+
+fig = smoothquant_distrib_comparison(result.sq_distrib_comparison, k=5,
+                                     output_dir="./output")
+```
+
+见 [绘图 & 可视化](plotting.md)。
+
 ## Prescale + LSQ
 
 ```python

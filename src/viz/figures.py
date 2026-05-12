@@ -1494,6 +1494,118 @@ def per_layer_role_histogram(
 
 
 # ---------------------------------------------------------------------------
+# Figure 19 — SmoothQuant pre/post distribution comparison
+# ---------------------------------------------------------------------------
+
+def smoothquant_distrib_comparison(
+    sq_comparison,
+    *,
+    k: int = 5,
+    output_dir: str,
+) -> plt.Figure:
+    """Before/after SmoothQuant distribution comparison for top-k improved layers.
+
+    Two-panel per row: left = key metric grouped bars (DR bits, outlier
+    ratio, crest factor, skewness), right = activation histogram overlay
+    (raw vs smoothed).
+
+    Args:
+        sq_comparison: :class:`SmoothQuantDistribComparison` result.
+        k: Number of top-improved layers to show (default 5).
+        output_dir: Output root directory.
+
+    Returns:
+        matplotlib Figure.
+
+    Raises:
+        ValueError: If *sq_comparison* has no per-layer data.
+    """
+    per_layer = sq_comparison.per_layer
+    improved = sq_comparison.improved_layers
+
+    if not per_layer:
+        raise ValueError(
+            "No SmoothQuant distribution comparison data. "
+            "Run session.analyze(outputs=['smoothquant_distrib']) "
+            "with transform='smoothquant'."
+        )
+
+    top_layers = improved[:k]
+    if not top_layers:
+        top_layers = list(per_layer.keys())[:k]
+
+    n_rows = len(top_layers)
+    raw_color = "#0072B2"   # blue
+    smooth_color = "#D55E00"  # orange
+
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 3.2 * n_rows),
+                             squeeze=False)
+
+    metric_keys = ("dynamic_range_bits", "outlier_ratio",
+                   "crest_factor", "skewness")
+    metric_labels = ("DR bits", "Outlier %", "Crest", "Skew")
+
+    for row_idx, layer_name in enumerate(top_layers):
+        ax_metric = axes[row_idx, 0]
+        ax_hist = axes[row_idx, 1]
+
+        layer_data = per_layer.get(layer_name, {})
+        act_data = layer_data.get("activation", {})
+        raw_stats = act_data.get("raw", {})
+        smooth_stats = act_data.get("smoothed", {})
+
+        # -- Left: metric grouped bars --
+        x = np.arange(len(metric_keys))
+        width = 0.35
+        raw_vals = []
+        smooth_vals = []
+        for mk in metric_keys:
+            raw_vals.append(raw_stats.get(mk, float("nan")))
+            smooth_vals.append(smooth_stats.get(mk, float("nan")))
+
+        ax_metric.bar(x - width / 2, raw_vals, width, label="Raw",
+                      color=raw_color, alpha=0.7)
+        ax_metric.bar(x + width / 2, smooth_vals, width, label="SmoothQuant",
+                      color=smooth_color, alpha=0.7)
+        ax_metric.set_xticks(x)
+        ax_metric.set_xticklabels(metric_labels, fontsize=8)
+        short = layer_name.split(".")[-1] if "." in layer_name else layer_name
+        ax_metric.set_title(f"{short[:25]} — Activation", fontsize=9)
+        ax_metric.legend(fontsize=7, loc="upper right")
+        ax_metric.grid(True, alpha=0.3, axis="y")
+        ax_metric.tick_params(labelsize=7)
+
+        # -- Right: histogram overlay --
+        raw_hist = raw_stats.get("_hist")
+        smooth_hist = smooth_stats.get("_hist")
+        if raw_hist is not None and smooth_hist is not None:
+            if isinstance(raw_hist, torch.Tensor):
+                raw_hist = raw_hist.cpu().numpy()
+            if isinstance(smooth_hist, torch.Tensor):
+                smooth_hist = smooth_hist.cpu().numpy()
+            bins = np.arange(len(raw_hist))
+            ax_hist.fill_between(bins, raw_hist, alpha=0.35,
+                                 color=raw_color, label="Raw", step="mid")
+            ax_hist.plot(bins, raw_hist, color=raw_color, linewidth=0.8)
+            ax_hist.fill_between(bins, smooth_hist, alpha=0.35,
+                                 color=smooth_color, label="SmoothQuant",
+                                 step="mid")
+            ax_hist.plot(bins, smooth_hist, color=smooth_color, linewidth=0.8)
+            ax_hist.legend(fontsize=7, loc="upper right")
+
+        ax_hist.set_xlabel("Bin", fontsize=7)
+        ax_hist.set_ylabel("Count", fontsize=7)
+        ax_hist.tick_params(labelsize=6)
+        ax_hist.grid(True, alpha=0.3)
+
+    fig.suptitle("SmoothQuant Distribution Impact — Top Improved Layers",
+                 fontsize=13)
+    fig.tight_layout()
+    save_figure(fig, output_dir, "smoothquant_distrib_comparison")
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

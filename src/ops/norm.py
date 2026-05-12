@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 from src.observer.mixin import ObservableMixin
 from src.ops.vec_ops import (
     vec_quantize, vec_add, vec_sub, vec_mul, vec_div,
@@ -336,15 +337,19 @@ class BatchNormFunction(torch.autograd.Function):
         # Pre-compute true fp32 output for ALL observer output stages.
         _true_ref = None
         if emit_fn is not None:
-            _true_ref = F.batch_norm(
-                x_raw,
-                running_mean if not is_training or running_mean is not None else None,
-                running_var if not is_training or running_var is not None else None,
-                weight_raw, bias_raw,
-                training=is_training,
-                momentum=momentum,
-                eps=eps,
-            )
+            _enter_quantize()
+            try:
+                _true_ref = F.batch_norm(
+                    x_raw,
+                    running_mean if not is_training or running_mean is not None else None,
+                    running_var if not is_training or running_var is not None else None,
+                    weight_raw, bias_raw,
+                    training=is_training,
+                    momentum=momentum,
+                    eps=eps,
+                )
+            finally:
+                _exit_quantize()
 
         # Output quantization
         if cfg.storage is not None:
@@ -591,9 +596,13 @@ class LayerNormFunction(torch.autograd.Function):
         # Pre-compute true fp32 output for ALL observer output stages.
         _true_ref = None
         if emit_fn is not None:
-            _true_ref = F.layer_norm(
-                x_raw, x_raw.shape[-1:], weight_raw, bias_raw, eps=eps,
-            )
+            _enter_quantize()
+            try:
+                _true_ref = F.layer_norm(
+                    x_raw, x_raw.shape[-1:], weight_raw, bias_raw, eps=eps,
+                )
+            finally:
+                _exit_quantize()
 
         output = _quantize_norm_output(output, cfg, emit_fn, output_raw=_true_ref)
 
@@ -722,9 +731,13 @@ class GroupNormFunction(torch.autograd.Function):
         # Pre-compute true fp32 output for ALL observer output stages.
         _true_ref = None
         if emit_fn is not None:
-            _true_ref = F.group_norm(
-                x_raw, num_groups, weight_raw, bias_raw, eps=eps,
-            )
+            _enter_quantize()
+            try:
+                _true_ref = F.group_norm(
+                    x_raw, num_groups, weight_raw, bias_raw, eps=eps,
+                )
+            finally:
+                _exit_quantize()
 
         output = _quantize_norm_output(output, cfg, emit_fn, output_raw=_true_ref)
 
@@ -860,12 +873,16 @@ class RMSNormFunction(torch.autograd.Function):
         # Pre-compute true fp32 output for ALL observer output stages.
         _true_ref = None
         if emit_fn is not None:
-            rms = torch.sqrt(x_raw.pow(2).mean(-1, keepdim=True) + eps)
-            _true_ref = x_raw / rms
-            if weight_raw is not None:
-                _true_ref = _true_ref * weight_raw
-            if bias_raw is not None:
-                _true_ref = _true_ref + bias_raw
+            _enter_quantize()
+            try:
+                rms = torch.sqrt(x_raw.pow(2).mean(-1, keepdim=True) + eps)
+                _true_ref = x_raw / rms
+                if weight_raw is not None:
+                    _true_ref = _true_ref * weight_raw
+                if bias_raw is not None:
+                    _true_ref = _true_ref + bias_raw
+            finally:
+                _exit_quantize()
 
         output = _quantize_norm_output(output, cfg, emit_fn, output_raw=_true_ref)
 
