@@ -203,6 +203,38 @@ IoC 模式：单回调驱动 calibrate/analyze/evaluate 三阶段。
 
 ---
 
+### 2026-05-12 — Per-Channel / Int Per-Tensor GELU NaN 修复
+
+**问题：**
+- Transformer 上 int4-pc / int4-pt / int8-pc 三种 config 的 quant_perplexity 均为 NaN
+- MNIST 上同样 config 也产生 NaN accuracy
+
+**根因：**
+- `_activation_cfg()` 对 per_channel 和 integer per_tensor compat-style configs 返回 cfg 本身，导致激活函数（GELU/SiLU/Softmax）的每个中间步骤都用相同的 scheme 量化
+- GELU detailed 路径中间产生 exp(48) ≈ 7e20，同一 channel 内 small values（~1.0）归一化后被 crush 为 0
+- `vec_recip(0) → inf`，后续 `inf * 0 → NaN`
+- Float per_tensor（bf16/bf10, ebits>0）不受影响 — `_quantize_per_tensor` 对 float 格式直接 elemwise，不做 amax 归一化
+
+**方案：**
+- 新增 `_scheme_normalizes_by_amax()` — 判断 scheme 是否会做 amax 归一化（per_channel 总是归一化；integer per_tensor ebits=0 也归一化）
+- `_activation_cfg()` 对这类 scheme 返回空 OpQuantConfig，激活函数中间步骤在 fp32 运行
+- Float per_tensor 保持 pass-through（直接 elemwise，安全）
+- 激活输入已由前一层 Linear/Conv 量化，中间无需重复量化
+
+**改动文件：**
+- `src/session/_model.py` — 新增 `_scheme_normalizes_by_amax()` + 更新 `_activation_cfg()`
+- `src/tests/test_session_unit.py` — 更新原有测试 + 新增 2 个测试（int per_tensor、per_channel）
+
+**Transformer 修复后（FP32=0.8224）：**
+| Config | Quant Acc | Δ | QSNR |
+|--------|----------|---|------|
+| int4-pc | 0.8004 | -2.2% | 25.7 dB |
+| int8-pc | 0.8234 | +0.1% | 48.9 dB |
+
+测试：全量 2,421 passed（fast）
+
+---
+
 ### 2026-05-08
 
 - **quantize_backprop 修正 — Transformer 全量 backward bit-exact 验证通过**。根因：`_make_ln/gn/bn/rms_norm` 传入 `quantize_backprop=cfg.is_training` 但 `cfg` 为原始 config（backward fields 均为 None），导致 norm backward 中 vec_ops 以 fp32 执行而非 bf16 量化。修正：传入 `_non_matmul_cfg(cfg).is_training`。同时修复了 activations/softmax/pooling 模块多余的 pre/post quantization（在 autograd Function 外部调用导致梯度断裂）。Transformer 验证 6 配置全部 PASS。

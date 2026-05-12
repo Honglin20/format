@@ -2030,15 +2030,52 @@ class TestNonMatmulCfg:
         assert result.is_training is False
 
     def test_activation_cfg_compat_per_tensor(self):
-        """Case 3: compat-style config with per_tensor input → pass through."""
+        """Case 3: compat-style bf16 per_tensor → pass through (safe, no normalization).
+
+        Float per_tensor schemes (ebits > 0) do direct elemwise quantization
+        without amax normalization, so activation intermediates are safe.
+        """
         from src.session._model import _activation_cfg
 
-        per_tensor = self._make_per_tensor_elemwise()
+        per_tensor = self._make_per_tensor_elemwise()  # BFloat16Format, ebits=8
         cfg = OpQuantConfig(input=per_tensor, storage=None)
 
         result = _activation_cfg(cfg)
 
-        assert result is cfg  # pass through unchanged
+        assert result is cfg  # pass through unchanged (float per_tensor is safe)
+
+    def test_activation_cfg_compat_int_per_tensor(self):
+        """Case 4: compat-style int4 per_tensor → empty (normalizes by amax → unsafe).
+
+        Integer per_tensor schemes normalize by amax before elemwise quantization.
+        Extreme dynamic range in activation intermediates (exp(48) ≈ 7e20) causes
+        the amax to crush small values to zero, triggering NaN via 1/0.
+        """
+        from src.session._model import _activation_cfg
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.int_formats import IntFormat
+
+        int4 = QuantScheme(format=IntFormat(4), granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(input=int4, storage=None)
+
+        result = _activation_cfg(cfg)
+
+        assert result == OpQuantConfig()  # stripped — integer per_tensor normalizes
+
+    def test_activation_cfg_compat_per_channel(self):
+        """Case 5: per_channel compat-style → empty (always normalizes by amax)."""
+        from src.session._model import _activation_cfg
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec
+        from src.formats.int_formats import IntFormat
+
+        int4_pc = QuantScheme(format=IntFormat(4), granularity=GranularitySpec.per_channel(axis=-1))
+        cfg = OpQuantConfig(input=int4_pc, storage=None)
+
+        result = _activation_cfg(cfg)
+
+        assert result == OpQuantConfig()  # stripped — per_channel always normalizes
 
     # ---- _norm_inner_scheme ----
 

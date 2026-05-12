@@ -386,10 +386,10 @@ class _QuantSession:
             # Compute initial pre-scale
             if init == "ones":
                 if granularity == "per_channel":
-                    out_channels = self._infer_out_channels(module)
-                    if out_channels is None:
+                    in_channels = self._infer_in_channels(module)
+                    if in_channels is None:
                         continue
-                    init_scale = torch.ones(out_channels, device=device)
+                    init_scale = torch.ones(in_channels, device=device)
                 else:
                     init_scale = torch.ones(1, device=device)
             else:  # "amax" or "pot_amax"
@@ -462,6 +462,15 @@ class _QuantSession:
             return module.out_channels
         if hasattr(module, "num_features"):
             return module.num_features
+        return None
+
+    @staticmethod
+    def _infer_in_channels(module) -> int:
+        """Infer input channel count for a module (used for activation-side transforms)."""
+        if hasattr(module, "in_features"):
+            return module.in_features
+        if hasattr(module, "in_channels"):
+            return module.in_channels
         return None
 
     @staticmethod

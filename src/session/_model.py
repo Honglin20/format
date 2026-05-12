@@ -58,6 +58,29 @@ def _is_mx_compute(scheme) -> bool:
     return scheme.granularity.mode.name == "PER_BLOCK"
 
 
+def _scheme_normalizes_by_amax(scheme) -> bool:
+    """True if the scheme normalizes by amax before elemwise quantization.
+
+    Normalization divides the tensor by a per-channel or per-tensor amax,
+    which can crush small values to zero when the dynamic range is extreme
+    (e.g. exp(48) ≈ 7e20 alongside 1.0 in activation intermediates).
+
+    Affected schemes:
+    - PER_CHANNEL: always normalizes by per-channel amax
+    - Integer PER_TENSOR (ebits==0): normalizes by scalar amax
+    - Float PER_TENSOR (ebits>0): direct elemwise, no normalization — safe
+    """
+    if scheme is None:
+        return False
+    from src.scheme.granularity import GranularityMode
+    if scheme.granularity.mode == GranularityMode.PER_CHANNEL:
+        return True
+    if (scheme.granularity.mode == GranularityMode.PER_TENSOR
+            and scheme.format.ebits == 0):
+        return True
+    return False
+
+
 def _non_matmul_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
     """Derive an OpQuantConfig for norm ops — strip MX compute, keep elemwise.
 
@@ -83,9 +106,20 @@ def _non_matmul_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
 
 
 def _activation_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
-    """Derive an OpQuantConfig for activation/softmax/pool ops — strip MX compute.
+    """Derive an OpQuantConfig for activation/softmax/pool ops — strip MX compute
+    and schemes that normalize by amax.
 
-    Three cases (same discrimination as ``_non_matmul_cfg``).
+    Activation intermediate steps (vec_mul, vec_add, vec_exp, vec_recip) can
+    have extreme dynamic range (e.g. exp(48) ≈ 7e20 alongside near-zero values).
+    Per-channel quantization and integer per-tensor quantization normalize by
+    amax, which is dominated by the largest absolute value — small values are
+    normalised to zero, triggering NaN via 1/0 in vec_recip.
+
+    Float per-tensor schemes (bf16/bf10, ebits > 0) use direct elemwise
+    quantization without amax normalization and are safe for intermediates.
+
+    Only per-block MX compute and true elemwise (storage / float per-tensor)
+    schemes are safe for intermediate activation steps.
     """
     if cfg.storage is not None:
         return OpQuantConfig(
@@ -95,7 +129,11 @@ def _activation_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
         )
     if _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
         return OpQuantConfig()  # MX bfloat=0 — no quantization for activation/softmax
-    return cfg  # compat-style: input carries per_tensor elemwise scheme
+    # Compat-style: skip inner quantization when scheme normalizes by amax.
+    # Float per_tensor schemes (bf16/bf10) are safe — keep them.
+    if _scheme_normalizes_by_amax(cfg.input):
+        return OpQuantConfig()
+    return cfg
 
 
 def _nonlinear_true_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
