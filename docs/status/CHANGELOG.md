@@ -5,6 +5,25 @@
 
 ---
 
+## Sparse (outlier_ratio) 泛化 ✅ (2026-05-13)
+
+**实现内容**: 将 `outlier_ratio` 从仅 PER_BLOCK 扩展到所有 granularity 模式。
+
+| 文件 | 变更 |
+|------|------|
+| `docs/architecture/011-sparse-generalization.md` | 设计决策：不开第四轴，保留在 GranularitySpec |
+| `docs/verification/018-sparse-per-tensor.md` | per_tensor + sparse 数学推导 + 期望值 |
+| `docs/verification/019-sparse-per-channel.md` | per_channel + sparse 数学推导 + 期望值 |
+| `src/scheme/granularity.py` | 解除 `outlier_ratio > 0` 的 PER_BLOCK 专属校验 |
+| `src/formats/base.py` | 新增 `_quantize_per_tensor_sparse`、`_quantize_per_channel_sparse` |
+| `src/session/_config.py` | `QuantConfig` 加 `outlier_ratio` 字段，透传至 GranularitySpec |
+| `src/tests/test_sparse_generalization.py` | 28 个测试用例（构造/bitexact/形状/Session集成） |
+| `src/tests/test_granularity_outlier_bank.py` | 更新旧测试反映新行为 |
+
+**TDD**: RED(23 fail) → GREEN(28 pass) | **全量**: 2449 passed | **E2E**: MNIST + Transformer 回归通过
+
+---
+
 ## ADR-010: 系统化误差分析闭环 ✅ (2026-05-13)
 
 **实现内容 (4 阶段, 9 新文件, 3 修改文件):**

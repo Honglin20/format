@@ -7,6 +7,8 @@ and verifies the output graph with onnx.checker.
 import torch
 import torch.nn as nn
 
+from src.session._context import _onnx_export_active
+
 
 def export_quantized_model(
     model: nn.Module,
@@ -40,14 +42,22 @@ def export_quantized_model(
         args = tuple(dummy_input)
     else:
         args = (dummy_input,)
-    torch.onnx.export(
-        model,
-        args,
-        output_path,
-        opset_version=opset_version,
-        custom_opsets={"com.microxscaling": 1},
-        do_constant_folding=False,
-    )
+
+    # Signal that we are inside ONNX export so per-block quantization can be
+    # skipped during tracing (both TorchScript and Dynamo paths).  The
+    # Function.symbolic() methods emit the equivalent ONNX nodes.
+    _token = _onnx_export_active.set(True)
+    try:
+        torch.onnx.export(
+            model,
+            args,
+            output_path,
+            opset_version=opset_version,
+            custom_opsets={"com.microxscaling": 1},
+            do_constant_folding=False,
+        )
+    finally:
+        _onnx_export_active.reset(_token)
     _verify_onnx_graph(output_path)
 
 

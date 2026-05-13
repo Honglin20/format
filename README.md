@@ -64,6 +64,11 @@ report.print_summary(qsnr_type="accum")   # 切换为端到端累积 QSNR
 
 → [Session 文档索引](docs/guides/session/INDEX.md)
 
+### 完整示例
+
+→ [系统化误差分析示例 — Transformer + AG News + int4](docs/guides/example/transformer_analysis.md)
+  ADR-010 四阶段闭环全流程演示：Diagnose → Characterize → Plan → Intervene → Verify
+
 ### 参考手册
 
 | 文档 | 内容 |

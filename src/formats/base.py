@@ -132,9 +132,25 @@ class FormatBase(ABC):
         from src.scheme.granularity import GranularityMode
         mode = granularity.mode
         if mode == GranularityMode.PER_TENSOR:
+            if granularity.outlier_ratio > 0.0:
+                if scale is not None:
+                    raise NotImplementedError(
+                        "Static scale with sparse (outlier_ratio > 0) is not yet supported. "
+                        "Use scale=None (dynamic) or outlier_ratio=0."
+                    )
+                return self._quantize_per_tensor_sparse(
+                    x, granularity, round_mode, allow_denorm, scale_storage=scale_storage)
             return self._quantize_per_tensor(x, round_mode, allow_denorm, scale=scale,
                                               scale_storage=scale_storage)
         elif mode == GranularityMode.PER_CHANNEL:
+            if granularity.outlier_ratio > 0.0:
+                if scale is not None:
+                    raise NotImplementedError(
+                        "Static scale with sparse (outlier_ratio > 0) is not yet supported. "
+                        "Use scale=None (dynamic) or outlier_ratio=0."
+                    )
+                return self._quantize_per_channel_sparse(
+                    x, granularity, round_mode, allow_denorm, scale_storage=scale_storage)
             return self._quantize_per_channel(x, granularity, round_mode, allow_denorm,
                                               scale=scale, scale_storage=scale_storage)
         elif mode == GranularityMode.PER_BLOCK:
@@ -238,10 +254,14 @@ class FormatBase(ABC):
         MX shared exponents are inherently power-of-two; ``scale_storage``
         has no effect in this path.
 
-        During JIT tracing (ONNX export), return x unchanged — the
-        Function's symbolic() method handles quantization in the ONNX graph.
+        During ONNX export (both TorchScript and Dynamo-based), return x
+        unchanged — the Function's symbolic() method handles quantization
+        in the ONNX graph.
         """
         if torch.jit.is_tracing():
+            return x
+        from src.session._context import _onnx_export_active
+        if _onnx_export_active.get():
             return x
 
         if granularity.outlier_ratio > 0.0:
@@ -297,6 +317,147 @@ class FormatBase(ABC):
         A = _undo_reshape_to_blocks(A, padded_shape, orig_shape, axes)
 
         return A
+
+    def _quantize_per_tensor_sparse(self, x, granularity, round_mode,
+                                     allow_denorm=True, scale_storage="pot"):
+        """Per-tensor quantization with outlier/normal split.
+
+        Splits the tensor into top-k outliers (by magnitude) and normals.
+        Each group gets its own per-tensor amax.  Degenerates to standard
+        per_tensor when k >= numel.
+        """
+        # Float formats: sparse normalization is redundant with the format's
+        # native dynamic range; delegate to non-sparse direct elemwise path.
+        if self.ebits > 0:
+            return self._quantize_per_tensor(x, round_mode, allow_denorm=allow_denorm,
+                                              scale_storage=scale_storage)
+
+        N = x.numel()
+        k = max(1, int(N * granularity.outlier_ratio))
+        if k >= N:
+            return self._quantize_per_tensor(x, round_mode, allow_denorm=allow_denorm,
+                                              scale_storage=scale_storage)
+
+        # Top-k by magnitude
+        _, top_indices = torch.topk(torch.abs(x).flatten(), k)
+        mask_flat = torch.zeros(N, dtype=torch.bool, device=x.device)
+        mask_flat.scatter_(0, top_indices, True)
+        mask = mask_flat.reshape(x.shape)
+
+        # Per-group amax
+        amax_o = torch.amax(torch.abs(x * mask.float()))
+        amax_n = torch.amax(torch.abs(x * (~mask).float()))
+
+        amax_o = amax_o.clamp(min=1e-12)
+        amax_n = amax_n.clamp(min=1e-12)
+
+        if scale_storage == "pot":
+            amax_o = 2 ** torch.round(torch.log2(amax_o))
+            amax_n = 2 ** torch.round(torch.log2(amax_n))
+
+        # Quantize each group separately
+        x_q = torch.zeros_like(x)
+
+        # Outlier group
+        x_o = x * mask.float()
+        x_o_norm = x_o / amax_o
+        x_q_o = self.quantize_elemwise(
+            x_o_norm, round_mode=round_mode, allow_denorm=allow_denorm)
+        x_q = x_q + x_q_o * amax_o * mask.float()
+
+        # Normal group
+        x_n = x * (~mask).float()
+        x_n_norm = x_n / amax_n
+        x_q_n = self.quantize_elemwise(
+            x_n_norm, round_mode=round_mode, allow_denorm=allow_denorm)
+        x_q = x_q + x_q_n * amax_n * (~mask).float()
+
+        # Preserve special values
+        x_q[x == float("Inf")] = float("Inf")
+        x_q[x == -float("Inf")] = -float("Inf")
+        x_q[x == float("NaN")] = float("NaN")
+
+        return x_q
+
+    def _quantize_per_channel_sparse(self, x, granularity, round_mode,
+                                      allow_denorm=True, scale_storage="pot"):
+        """Per-channel quantization with per-channel outlier/normal split.
+
+        Within each channel, the top-k elements by magnitude (outliers) and
+        the remaining elements (normals) each get their own per-channel amax.
+        Degenerates to standard per_channel when k >= elements_per_channel.
+        """
+        axis = granularity.channel_axis
+        if axis < 0:
+            axis = x.ndim + axis
+
+        # Float formats: sparse normalization is redundant with the format's
+        # native dynamic range; delegate to non-sparse path.
+        if self.ebits > 0:
+            return self._quantize_per_channel(x, granularity, round_mode,
+                                               allow_denorm=allow_denorm,
+                                               scale_storage=scale_storage)
+
+        C = x.shape[axis]
+
+        # Transpose channel to dim 0 for per-channel iteration
+        x_t = x.transpose(0, axis)
+        shape_0 = x_t.shape  # (C, ...)
+        N_per_channel = x_t[0].numel()
+        k = max(1, int(N_per_channel * granularity.outlier_ratio))
+        if k >= N_per_channel:
+            return self._quantize_per_channel(x, granularity, round_mode,
+                                               allow_denorm=allow_denorm,
+                                               scale_storage=scale_storage)
+
+        # Flatten non-channel dims
+        x_flat = x_t.reshape(C, N_per_channel)
+
+        # Per-channel top-k
+        _, top_indices = torch.topk(torch.abs(x_flat), k, dim=1)
+        mask_flat = torch.zeros(C, N_per_channel, dtype=torch.bool, device=x.device)
+        mask_flat.scatter_(1, top_indices, True)
+
+        # Per-channel per-group amax
+        x_masked_o = x_flat * mask_flat.float()
+        x_masked_n = x_flat * (~mask_flat).float()
+
+        amax_o = torch.amax(torch.abs(x_masked_o), dim=1)  # (C,)
+        amax_n = torch.amax(torch.abs(x_masked_n), dim=1)  # (C,)
+        amax_o = amax_o.clamp(min=1e-12)
+        amax_n = amax_n.clamp(min=1e-12)
+
+        if scale_storage == "pot":
+            amax_o = 2 ** torch.round(torch.log2(amax_o))
+            amax_n = 2 ** torch.round(torch.log2(amax_n))
+
+        # Reshape amax for broadcasting: (C,) → (C, 1, 1, ...)
+        broadcast_shape = (C,) + (1,) * (x_t.ndim - 1)
+        amax_o = amax_o.reshape(broadcast_shape)
+        amax_n = amax_n.reshape(broadcast_shape)
+        mask = mask_flat.reshape(shape_0)
+
+        # Quantize each group
+        x_t_q = torch.zeros_like(x_t)
+
+        x_t_o = x_t * mask.float()
+        x_t_n = x_t * (~mask).float()
+
+        x_t_q_o = self.quantize_elemwise(
+            x_t_o / amax_o, round_mode=round_mode, allow_denorm=allow_denorm)
+        x_t_q = x_t_q_o * amax_o * mask.float()
+
+        x_t_q_n = self.quantize_elemwise(
+            x_t_n / amax_n, round_mode=round_mode, allow_denorm=allow_denorm)
+        x_t_q = x_t_q + x_t_q_n * amax_n * (~mask).float()
+
+        # Preserve special values
+        x_t_q[x_t == float("Inf")] = float("Inf")
+        x_t_q[x_t == -float("Inf")] = -float("Inf")
+        x_t_q[x_t == float("NaN")] = float("NaN")
+
+        # Undo transpose
+        return x_t_q.transpose(0, axis)
 
     def export_onnx(self, g, x, scheme):
         """Emit ONNX nodes for this format's quantize step.

@@ -29,16 +29,21 @@ def _resolve_granularity(
     granularity: str,
     block_size: Optional[int] = None,
     axis: int = -1,
+    outlier_ratio: float = 0.0,
 ) -> GranularitySpec:
     """Convert string granularity + optional block_size to GranularitySpec."""
     if granularity == "per_tensor":
-        return GranularitySpec.per_tensor()
+        return GranularitySpec(mode=GranularitySpec.per_tensor().mode,
+                               outlier_ratio=outlier_ratio)
     elif granularity == "per_channel":
-        return GranularitySpec.per_channel(axis=axis)
+        return GranularitySpec(mode=GranularitySpec.per_channel(axis=axis).mode,
+                               channel_axis=axis, outlier_ratio=outlier_ratio)
     elif granularity == "per_block":
         if block_size is None:
             raise ValueError("per_block granularity requires block_size")
-        return GranularitySpec.per_block(size=block_size, axis=axis)
+        return GranularitySpec(mode=GranularitySpec.per_block(size=block_size, axis=axis).mode,
+                               block_size=block_size, block_axis=axis,
+                               outlier_ratio=outlier_ratio)
     else:
         raise ValueError(f"Unknown granularity: {granularity}")
 
@@ -174,6 +179,9 @@ class QuantConfig:
     gptq_damp: float = 0.01
     gptq_act_order: bool = False
 
+    # ---- Sparse (outlier bank) ----
+    outlier_ratio: float = 0.0              # ∈ [0, 1). >0: split each granularity group into outliers + normals
+
     # ---- Mode ----
     weight_only: bool = False
     quantize_nonlinear: bool = True         # False = skip quantizing nonlinear ops (norm/activation/pool)
@@ -264,6 +272,10 @@ class QuantConfig:
                     "storage_bits cannot be set together with storage_format. "
                     "Use storage_format alone for explicit format names."
                 )
+        if self.outlier_ratio < 0.0 or self.outlier_ratio > 1.0:
+            raise ValueError(
+                f"outlier_ratio must be in [0, 1], got {self.outlier_ratio}"
+            )
 
     def to_op_config(self) -> OpQuantConfig:
         """Convert this user-facing config to internal :class:`OpQuantConfig`.
@@ -281,8 +293,10 @@ class QuantConfig:
         a_fmt = FormatBase.from_str(self.a_format) if self.a_format is not None else w_fmt
 
         # ---- Granularity ----
-        w_gran = _resolve_granularity(self.w_granularity, self.w_block_size, axis=self.w_axis)
-        a_gran = _resolve_granularity(self.a_granularity, self.a_block_size, axis=self.a_axis)
+        w_gran = _resolve_granularity(self.w_granularity, self.w_block_size, axis=self.w_axis,
+                                       outlier_ratio=self.outlier_ratio)
+        a_gran = _resolve_granularity(self.a_granularity, self.a_block_size, axis=self.a_axis,
+                                       outlier_ratio=self.outlier_ratio)
 
         # ---- Transform (per-role, see rule table in `_make_*` helpers) ----
         w_tx = _make_weight_transform(self.transform)
@@ -402,6 +416,8 @@ class QuantConfig:
         prescale_init = desc.get("pre_scale_init", "ones")
         prescale_pot = desc.get("pre_scale_pot", False)
 
+        outlier_ratio = desc.get("outlier_ratio", 0.0)
+
         # Storage: support legacy keys "bfloat"/"fp" for backward compat
         _sbits = desc.get("storage_bits", 0)
         _skind = desc.get("storage_kind", "bfloat")
@@ -422,11 +438,13 @@ class QuantConfig:
             gran or "per_tensor",
             block_size=block_size if isinstance(block_size, int) else None,
             axis=axis,
+            outlier_ratio=outlier_ratio,
         )
         a_gran = _resolve_granularity(
             gran or "per_tensor",
             block_size=block_size if isinstance(block_size, int) else None,
             axis=axis,
+            outlier_ratio=outlier_ratio,
         )
 
         return cls(
@@ -455,6 +473,7 @@ class QuantConfig:
             lsq_lr=lsq_lr,
             prescale_init=prescale_init,
             prescale_pot=prescale_pot,
+            outlier_ratio=outlier_ratio,
         )
 
 

@@ -87,6 +87,15 @@ _onnx_current_scale_var: contextvars.ContextVar[Optional[torch.Tensor]] = (
     contextvars.ContextVar("quant_onnx_current_scale", default=None)
 )
 
+# ContextVar that signals we are inside an ONNX export (either TorchScript-based
+# or Dynamo-based).  During export tracing, per-block quantization is skipped in
+# the forward pass — the Function.symbolic() methods emit the equivalent ONNX
+# nodes instead.  This extends the torch.jit.is_tracing() guard (which only
+# covers the old TorchScript path) to the Dynamo-based torch.export path.
+_onnx_export_active: contextvars.ContextVar[bool] = (
+    contextvars.ContextVar("quant_onnx_export_active", default=False)
+)
+
 
 def get_layer_name() -> str:
     stack = _module_stack.get()
