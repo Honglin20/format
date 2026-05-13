@@ -618,3 +618,275 @@ class TestSessionE2EExport:
         onnx.checker.check_model(loaded)
         # Should have QDQ nodes from int8
         assert _has_op(loaded, "QuantizeLinear"), "Session export should have QDQ"
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Multi-input model ONNX export (x1, x2, x3, list, dict positional)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiInputModels:
+    """Session → ONNX export for models with multiple inputs, list input, dict input."""
+
+    # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _int8_cfg():
+        fmt = FormatBase.from_str("int8")
+        gran = GranularitySpec.per_tensor()
+        s = QuantScheme(format=fmt, granularity=gran, scale_storage="fp32")
+        return OpQuantConfig(input=s, weight=s)
+
+    # -- multi-arg (x1, x2, x3) -------------------------------------------
+
+    def test_multi_arg_auto_record_export(self, tmp_path):
+        """session(x1, x2, x3) → export without dummy_input works."""
+        from src.session._quant import _QuantSession
+
+        class MultiArgModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                cfg = self._cfg = TestMultiInputModels._int8_cfg()
+                self.fc1 = QuantizedLinear(10, 20, cfg=cfg)
+                self.fc2 = QuantizedLinear(10, 20, cfg=cfg)
+                self.fc3 = QuantizedLinear(10, 20, cfg=cfg)
+
+            def forward(self, x1, x2, x3):
+                return self.fc1(x1) + self.fc2(x2) + self.fc3(x3)
+
+        model = MultiArgModel()
+        session = _QuantSession(model, model._cfg)
+        x1, x2, x3 = torch.randn(2, 10), torch.randn(2, 10), torch.randn(2, 10)
+        session(x1, x2, x3)
+        out = str(tmp_path / "multi_arg.onnx")
+        session.export_onnx(out)
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+        # Multiple graph inputs for x1, x2, x3
+        assert len(loaded.graph.input) >= 3
+
+    def test_multi_arg_explicit_tuple_export(self, tmp_path):
+        """Explicit dummy_input=(x1, x2, x3) works."""
+        from src.session._quant import _QuantSession
+
+        class MultiArgModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                cfg = self._cfg = TestMultiInputModels._int8_cfg()
+                self.fc1 = QuantizedLinear(10, 20, cfg=cfg)
+                self.fc2 = QuantizedLinear(10, 20, cfg=cfg)
+                self.fc3 = QuantizedLinear(10, 20, cfg=cfg)
+
+            def forward(self, x1, x2, x3):
+                return self.fc1(x1) + self.fc2(x2) + self.fc3(x3)
+
+        model = MultiArgModel()
+        session = _QuantSession(model, model._cfg)
+        x1, x2, x3 = torch.randn(2, 10), torch.randn(2, 10), torch.randn(2, 10)
+        out = str(tmp_path / "multi_arg_explicit.onnx")
+        session.export_onnx(out, dummy_input=(x1, x2, x3))
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+        assert len(loaded.graph.input) >= 3
+
+    # -- list input (forward takes list) -----------------------------------
+
+    def test_list_input_auto_record_export(self, tmp_path):
+        """session([t1, t2]) → forward(list_arg) → export works.
+
+        Because _QuantSession.__call__ records the full args tuple
+        (([t1, t2],) → a tuple), export_quantized_model passes the
+        tuple through as-is, resulting in model([t1, t2]).
+        """
+        from src.session._quant import _QuantSession
+
+        class ListInputModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                cfg = self._cfg = TestMultiInputModels._int8_cfg()
+                self.fc1 = QuantizedLinear(10, 20, cfg=cfg)
+                self.fc2 = QuantizedLinear(20, 5, cfg=cfg)
+
+            def forward(self, xs):
+                x = xs[0] + xs[1]
+                x = self.fc1(x)
+                x = self.fc2(x)
+                return x
+
+        model = ListInputModel()
+        session = _QuantSession(model, model._cfg)
+        session([torch.randn(2, 10), torch.randn(2, 10)])
+        out = str(tmp_path / "list_input.onnx")
+        session.export_onnx(out)
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+    def test_list_input_explicit_tuple_wrap_export(self, tmp_path):
+        """Explicit dummy_input=([t1, t2],) for list-input model."""
+        from src.session._quant import _QuantSession
+
+        class ListInputModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                cfg = self._cfg = TestMultiInputModels._int8_cfg()
+                self.fc1 = QuantizedLinear(10, 20, cfg=cfg)
+                self.fc2 = QuantizedLinear(20, 5, cfg=cfg)
+
+            def forward(self, xs):
+                x = xs[0] + xs[1]
+                x = self.fc1(x)
+                x = self.fc2(x)
+                return x
+
+        model = ListInputModel()
+        session = _QuantSession(model, model._cfg)
+        out = str(tmp_path / "list_input_explicit.onnx")
+        session.export_onnx(
+            out,
+            dummy_input=([torch.randn(2, 10), torch.randn(2, 10)],),
+        )
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+    # -- dict as kwargs (forward(x, y) + dict {"x": x, "y": y}) -----------
+
+    def test_dict_kwargs_explicit_export(self, tmp_path):
+        """Explicit dummy_input={"x": x, "y": y} maps to forward(x, y) as kwargs."""
+        from src.session._quant import _QuantSession
+
+        class KwargsModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                cfg = self._cfg = TestMultiInputModels._int8_cfg()
+                self.fc1 = QuantizedLinear(10, 20, cfg=cfg)
+
+            def forward(self, x, y):
+                return self.fc1(x + y)
+
+        model = KwargsModel()
+        session = _QuantSession(model, model._cfg)
+        x, y = torch.randn(2, 10), torch.randn(2, 10)
+        out = str(tmp_path / "kwargs.onnx")
+        session.export_onnx(out, dummy_input={"x": x, "y": y})
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+    # -- Full Session (quantize_model + patched forward) multi-input ------
+
+    def test_full_session_multi_arg_export(self, tmp_path):
+        """Full Session pipeline with multi-arg model: quantize → export."""
+        from src.session._session import Session
+        from src.session._config import QuantConfig
+
+        class MultiArgModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = torch.nn.Linear(10, 20)
+                self.fc2 = torch.nn.Linear(10, 20)
+                self.fc3 = torch.nn.Linear(10, 20)
+
+            def forward(self, x1, x2, x3):
+                return self.fc1(x1) + self.fc2(x2) + self.fc3(x3)
+
+        model = MultiArgModel().eval()
+        cfg = QuantConfig(
+            name="test", w_format="int8", w_granularity="per_tensor",
+            a_format="int8", a_granularity="per_tensor", calibrator="max",
+        )
+        session = Session(model, cfg)
+        session.quantize()
+        x1, x2, x3 = torch.randn(2, 10), torch.randn(2, 10), torch.randn(2, 10)
+        session(x1, x2, x3)  # record multi-arg
+        out = str(tmp_path / "full_multi_arg.onnx")
+        session.export_onnx(out)
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+        assert len(loaded.graph.input) >= 3
+
+    def test_full_session_list_input_export(self, tmp_path):
+        """Full Session pipeline with list-input model."""
+        from src.session._session import Session
+        from src.session._config import QuantConfig
+
+        class ListInputModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = torch.nn.Linear(10, 20)
+                self.fc2 = torch.nn.Linear(20, 5)
+
+            def forward(self, xs):
+                x = xs[0] + xs[1]
+                x = self.fc1(x)
+                x = self.fc2(x)
+                return x
+
+        model = ListInputModel().eval()
+        cfg = QuantConfig(
+            name="test", w_format="int8", w_granularity="per_tensor",
+            a_format="int8", a_granularity="per_tensor", calibrator="max",
+        )
+        session = Session(model, cfg)
+        session.quantize()
+        session([torch.randn(2, 10), torch.randn(2, 10)])  # record list as arg
+        out = str(tmp_path / "full_list.onnx")
+        session.export_onnx(out)
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+    def test_full_session_kwargs_export(self, tmp_path):
+        """Full Session pipeline with dict kwargs export."""
+        from src.session._session import Session
+        from src.session._config import QuantConfig
+
+        class KwargsModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = torch.nn.Linear(10, 20)
+
+            def forward(self, x, y):
+                return self.fc1(x + y)
+
+        model = KwargsModel().eval()
+        cfg = QuantConfig(
+            name="test", w_format="int8", w_granularity="per_tensor",
+            a_format="int8", a_granularity="per_tensor", calibrator="max",
+        )
+        session = Session(model, cfg)
+        session.quantize()
+        x, y = torch.randn(2, 10), torch.randn(2, 10)
+        out = str(tmp_path / "full_kwargs.onnx")
+        session.export_onnx(out, dummy_input={"x": x, "y": y})
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+
+    def test_full_session_mx_per_block_multi_input(self, tmp_path):
+        """Full Session + MX per_block config + multi-input export."""
+        from src.session._session import Session
+        from src.session._config import QuantConfig
+
+        class MultiArgModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = torch.nn.Linear(10, 20)
+                self.fc2 = torch.nn.Linear(10, 20)
+                self.fc3 = torch.nn.Linear(10, 20)
+
+            def forward(self, x1, x2, x3):
+                return self.fc1(x1) + self.fc2(x2) + self.fc3(x3)
+
+        model = MultiArgModel().eval()
+        cfg = QuantConfig(
+            name="mxint4", w_format="int4", w_granularity="per_block",
+            w_block_size=32, a_format="int4", a_granularity="per_block",
+            a_block_size=32, storage_bits=16, storage_kind="bfloat",
+            quantize_nonlinear=False,
+        )
+        session = Session(model, cfg, keep_fp32=True)
+        session.quantize()
+        x1, x2, x3 = torch.randn(2, 10), torch.randn(2, 10), torch.randn(2, 10)
+        session(x1, x2, x3)
+        out = str(tmp_path / "mx_multi_arg.onnx")
+        session.export_onnx(out)
+        loaded = onnx.load(out)
+        onnx.checker.check_model(loaded)
+        assert len(loaded.graph.input) >= 3

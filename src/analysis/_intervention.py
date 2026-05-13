@@ -113,11 +113,21 @@ class InterventionPlanner:
                 metadata={"description": "No QSNR data — empty plan"},
             )
 
+        # Determine which roles are boostable (have non-None schemes in base cfg)
+        base_cfg = self._result.config.to_op_config() if self._result.config else None
+        boostable_roles = set()
+        if base_cfg is not None:
+            for r in _DIAG_ROLES:
+                if getattr(base_cfg, r, None) is not None:
+                    boostable_roles.add(r)
+
         # Build candidate list: (layer, role, qsnr)
+        # Skip roles that can't be boosted (None scheme in base config).
         candidates = []
-        for r in (role,) if role != "auto" else _DIAG_ROLES:
-            role_map = qsnr_by_role.get(r, {})
-            for layer, qsnr in role_map.items():
+        for r in (role,) if role != "auto" else tuple(boostable_roles):
+            if r not in qsnr_by_role:
+                continue
+            for layer, qsnr in qsnr_by_role[r].items():
                 if qsnr is not None and qsnr == qsnr:
                     candidates.append((layer, r, qsnr))
 
@@ -162,30 +172,26 @@ class InterventionPlanner:
         changes = {}
 
         for layer, role, qsnr in selected:
-            # Determine target format name
-            w_fmt = self._result.config.w_format if self._result.config else "int8"
-            a_fmt = self._result.config.a_format or w_fmt if self._result.config else "int8"
-            current_fmt = w_fmt if role == "weight" else a_fmt
-
-            try:
-                current_bits = FormatBase.from_str(current_fmt).total_bits
-            except (ValueError, AttributeError):
-                current_bits = None
-
-            target_fmt = f"int{target_bits}"
-
             # Build overrides for all roles of this layer (base from result config)
             base_cfg = self._result.config.to_op_config() if self._result.config else None
-
             if base_cfg is None:
                 continue
+
+            # Skip roles whose scheme is None in the base config — boosting
+            # them would be a no-op (e.g. output / bias are typically None).
+            current_scheme = getattr(base_cfg, role, None)
+            if current_scheme is None:
+                continue
+
+            target_fmt = f"int{target_bits}"
+            fmt = current_scheme.format
+            current_bits = fmt.mbits if fmt.ebits == 0 else 1 + fmt.ebits + fmt.mbits
 
             new_cfg_dict = {}
             for field_name in base_cfg.__dataclass_fields__:
                 scheme = getattr(base_cfg, field_name)
                 if scheme is not None and field_name in ("input", "weight", "output"):
                     if field_name == role:
-                        # Replace with boosted scheme
                         new_fmt = FormatBase.from_str(target_fmt)
                         new_cfg_dict[field_name] = QuantScheme(
                             format=new_fmt,
@@ -201,7 +207,7 @@ class InterventionPlanner:
 
             overrides[layer] = OpQuantConfig(**new_cfg_dict)
 
-            bits_from = f"{current_bits}bit" if current_bits else current_fmt
+            bits_from = f"{current_bits}bit" if current_bits else str(current_scheme.format)
             changes[layer] = {
                 "what": f"{role}: {bits_from} → {target_bits}bit",
                 "why": f"QSNR={qsnr:.1f} dB (worst {role})",

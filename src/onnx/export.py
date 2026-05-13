@@ -35,11 +35,14 @@ def export_quantized_model(
     Scale values in QDQ nodes reflect calibration results when available;
     otherwise they default to 1.0 (valid for visualization only).
     """
-    # Handle multi-input types: torch.onnx.export expects a tuple of positional
-    # arguments; single Tensor gets wrapped, tuple/list are used as-is (list
-    # converted for safety), dict is passed as a single arg.
+    # Handle multi-input types: torch.onnx.export expects:
+    # - tensor: wrapped in tuple → model(tensor)
+    # - tuple / list: converted to tuple → model(*args)
+    # - dict: kept as-is → model(**kwargs)
     if isinstance(dummy_input, (tuple, list)):
         args = tuple(dummy_input)
+    elif isinstance(dummy_input, dict):
+        args = dummy_input
     else:
         args = (dummy_input,)
 

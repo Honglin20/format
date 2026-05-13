@@ -3,6 +3,8 @@
 All functions are PURE: receive data, return formatted text.
 File I/O is self-contained (each function creates its own CSV).
 """
+from __future__ import annotations
+
 import math
 import os
 from collections import defaultdict

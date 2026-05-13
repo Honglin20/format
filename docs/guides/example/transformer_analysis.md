@@ -2,7 +2,7 @@
 
 本文档演示 ADR-010 定义的 **四阶段闭环分析工作流**，以预训练 Transformer 模型在 AG News 数据集上的 int4-per_channel 量化为例。
 
-模型：2-layer Transformer (d=128, nhead=4) · 数据集：AG News 4 分类 · 量化：int4 per_channel, quantize_nonlinear=True · 9 个被量化模块（4 Linear + 4 LayerNorm + 1 classifier）
+模型：2-layer Transformer (d=128, nhead=4) · 数据集：AG News 4 分类 · 量化：int4 per_channel, quantize_nonlinear=True · 11 个被量化模块（6 Linear + 4 LayerNorm + 1 classifier）
 
 ---
 
@@ -115,14 +115,14 @@ result = session.result
 ```
 
 ```
-Config: int4-pc | accuracy: fp32=0.8224 quant=0.7889 | avg QSNR=8.6 dB | Δaccuracy=-0.0334
+Config: int4-pc | accuracy: fp32=0.8224 quant=0.7800 | avg QSNR=8.1 dB | Δaccuracy=-0.0424
 
 Metric       FP32       Quant      Δ
 ---------------------------------------------
-accuracy     0.8224     0.7889     -0.0334
+accuracy     0.8224     0.7800     -0.0424
 ```
 
-FP32 基线准确率 82.24%，int4 量化后降至 78.89%，下降 3.34 个百分点。累计 QSNR（端到端信号保真度）仅 7.2 dB，说明误差在层间显著累积。
+FP32 基线准确率 82.24%，int4 量化后降至 78.00%，下降 4.24 个百分点。avg QSNR 为 8.1 dB，误差在层间显著累积。
 
 ---
 
@@ -140,21 +140,21 @@ print(prov.summary())
 ```
 Role       Type           Count   Avg QSNR   Min QSNR      Std
 --------------------------------------------------------------
-input      Linear             4        7.2        6.0      0.8
-input      Norm               4        6.5        4.7      1.2
-input      Other              1        9.6        9.6      0.0
-output     Linear             4        7.4        6.8      0.6
-output     Norm               4        5.4        2.3      2.1
-output     Other              1       26.2       26.2      0.0
-weight     Linear             4       10.5        9.7      1.0
+input      Linear             6        6.9        6.0      0.8
+input      Norm               4        6.2        3.7      1.8
+input      Other              1       10.9       10.9      0.0
+output     Linear             6        6.8        5.7      0.7
+output     Norm               4        5.9        2.9      2.3
+output     Other              1       25.4       25.4      0.0
+weight     Linear             6       11.1        9.7      1.3
 weight     Norm               4       21.0       20.2      1.1
 weight     Other              1       14.2       14.2      0.0
 ```
 
 **解读**：
-- **Weight QSNR 最高**（Linear 10.5 dB, Norm 21.0 dB）：权重分布在量化后被保留得最好，因为权重通常分布均匀、动态范围可控。
-- **Output QSNR 分化严重**：Norm output 最低（均值 5.4 dB，最低仅 2.3 dB），但 classifier output 高达 26.2 dB。LayerNorm 输出是误差的主要注入点。
-- **Input QSNR 整体偏低**（6.0–9.6 dB）：输入激活的动态范围受上游误差累积影响。
+- **Weight QSNR 最高**（Linear 11.1 dB, Norm 21.0 dB）：权重分布在量化后被保留得最好，因为权重通常分布均匀、动态范围可控。
+- **Output QSNR 分化严重**：Norm output 最低（均值 5.9 dB，最低仅 2.9 dB），但 classifier output 高达 25.4 dB。LayerNorm 输出是误差的主要注入点。
+- **Input QSNR 整体偏低**（6.0–10.9 dB）：输入激活的动态范围受上游误差累积影响。
 
 ### 1.2 逐层三列视图
 
@@ -165,20 +165,22 @@ print(prov.per_role_table(max_layers=15))
 ```
 Layer                               Input     Weight     Output  Dominant
 -------------------------------------------------------------------------
-transformer.layers.0.norm1            4.7       21.2        2.3  output
-transformer.layers.1.linear2          6.0       12.0        6.9  input
-transformer.layers.0.norm2            7.2       22.5        6.4  output
-transformer.layers.1.norm2            7.1       20.2        6.4  output
-transformer.layers.1.norm1            7.0       20.2        6.6  output
-transformer.layers.0.linear1          7.6       10.2        6.8  output
-transformer.layers.0.linear2          7.6       10.2        7.9  input
-transformer.layers.1.linear1          7.7        9.7        7.9  input
-classifier                            9.6       14.2       26.2  input
+transformer.layers.0.norm1            3.7       21.2        2.9  output
+transformer.layers.0.norm2            6.4       22.5        5.7  output
+transformer.transformer.layers.0.transformer.layers.0.self_attn.linear        6.0       11.5        5.7  output
+transformer.layers.0.linear2          6.2       10.2        7.9  input
+transformer.layers.1.linear2          6.3       12.0        6.7  input
+transformer.layers.1.norm2            6.8       20.2        6.5  output
+transformer.layers.0.linear1          8.1       10.2        6.6  output
+transformer.layers.1.linear1          7.6        9.7        6.8  output
+transformer.transformer.layers.1.transformer.layers.1.self_attn.linear        6.9       13.0        6.8  output
+transformer.layers.1.norm1            7.9       20.2        8.4  input
+classifier                           10.9       14.2       25.4  input
 ```
 
 Dominant 列标注了每层最差的 role：
-- **4/9 层以 output 为主导退化**（全部是 Norm 层）：LayerNorm 输出端量化噪声最大。
-- **4/9 层以 input 为主导退化**（Linear 层 + classifier）：输入激活的量化是瓶颈。
+- **7/11 层以 output 为主导退化**：LayerNorm 和部分 Linear 输出端量化噪声最大。
+- **4/11 层以 input 为主导退化**：输入激活的量化是瓶颈。
 - **没有 weight 主导层**：权重不是当前配置的瓶颈，提升 weight 位宽不会带来最大收益。
 
 ### 1.3 Top-K 问题定位
@@ -192,8 +194,8 @@ for name, q in prov.top_k(5, role="weight"):
   transformer.layers.1.linear1                            QSNR=9.7 dB
   transformer.layers.0.linear2                            QSNR=10.2 dB
   transformer.layers.0.linear1                            QSNR=10.2 dB
+  transformer.transformer.layers.0.transformer.layers.0.self_attn.linear QSNR=11.5 dB
   transformer.layers.1.linear2                            QSNR=12.0 dB
-  classifier                                              QSNR=14.2 dB
 ```
 
 ```python
@@ -202,14 +204,14 @@ for name, q in prov.top_k(5, role="auto"):   # 每层取最差 role
 ```
 
 ```
-  transformer.layers.0.norm1                              QSNR=2.3 dB
-  transformer.layers.1.linear2                            QSNR=6.0 dB
-  transformer.layers.0.norm2                              QSNR=6.4 dB
-  transformer.layers.1.norm2                              QSNR=6.4 dB
-  transformer.layers.1.norm1                              QSNR=6.6 dB
+  transformer.layers.0.norm1                              QSNR=2.9 dB
+  transformer.layers.0.norm2                              QSNR=5.7 dB
+  transformer.transformer.layers.0.transformer.layers.0.self_attn.linear QSNR=5.7 dB
+  transformer.layers.0.linear2                            QSNR=6.2 dB
+  transformer.layers.1.linear2                            QSNR=6.3 dB
 ```
 
-`role="auto"` 模式揭示了关键洞察：**前 5 中最差的全是 Norm output 和 Linear input，与 weight 无关**。如果只看 weight，会错过真正的瓶颈 `transformer.layers.0.norm1`（QSNR 仅 2.3 dB）。
+`role="auto"` 模式揭示了关键洞察：**前 5 中最差的全是 output 和 input，与 weight 无关**。如果只看 weight，会错过真正的瓶颈 `transformer.layers.0.norm1`（QSNR 仅 2.9 dB）。
 
 ### 1.4 误差传播溯源
 
@@ -223,23 +225,23 @@ print(prov.error_source_analysis(role="output"))
 =========================================================================================================
 Layer                          Accum QSNR   Local QSNR      Delta   Headroom  Diagnosis
 ---------------------------------------------------------------------------------------
-classifier                          11.82        26.22      +0.00     +14.40  Propagated
-transformer.layers.0.linear1         8.66         6.75      +3.15      -1.91  Source
-transformer.layers.0.linear2         3.76         7.93      +4.91      +4.17  Mixed
-transformer.layers.0.norm1           6.97         2.34      -3.22      -4.64  Source
-transformer.layers.0.norm2           5.05         6.39      +1.92      +1.33  Source
-transformer.layers.1.linear1         8.82         7.93      -3.76      -0.89  Source
-transformer.layers.1.linear2         8.13         6.91      +0.69      -1.22  Source
-transformer.layers.1.norm1           5.94         6.61      +2.19      +0.67  Source
-transformer.layers.1.norm2           5.56         6.44      +0.38      +0.88  Source
+classifier                          10.13        25.39      +0.00     +15.26  Propagated
+transformer.layers.0.linear1         8.30         6.62      +1.82      -1.68  Source
+transformer.layers.0.linear2         3.45         7.90      +4.85      +4.45  Mixed
+transformer.layers.0.norm1           6.47         2.87      -3.02      -3.61  Source
+transformer.layers.0.norm2           4.70         5.67      +1.78      +0.97  Source
+transformer.layers.1.linear1         8.14         6.80      -3.44      -1.34  Source
+transformer.layers.1.linear2         7.31         6.72      +0.84      -0.59  Source
+transformer.layers.1.norm1           5.19         8.37      +2.12      +3.18  Mixed
+transformer.layers.1.norm2           4.86         6.50      +0.33      +1.64  Source
 ---------------------------------------------------------------------------------------
-Summary:                                               drop=+6.3 avg_headroom=+1.4  7 source, 1 mixed, 1 propagated
+Summary:                                               drop=+5.3 avg_headroom=+2.0  6 source, 2 mixed, 1 propagated
 ```
 
 **误差传播诊断**：
-- **7 层标记为 Source**：这些层是本地量化误差的主要产生者，本地 QSNR 接近或低于累计 QSNR。
-- **Classifier 标记为 Propagated**：本地 QSNR（26.2 dB）远高于累计 QSNR（11.8 dB），说明它接收到的输入已被上游噪声污染。这不是 classifier 本身的问题，而是上游累积所致。
-- **整体累计 QSNR 下降 6.3 dB**：从第一个量化模块到 classifier，累计信号质量从 ~14 dB 降至 ~12 dB，主要下降发生在 transformer.layers.0 内部。
+- **6 层标记为 Source**：这些层是本地量化误差的主要产生者，本地 QSNR 接近或低于累计 QSNR。
+- **Classifier 标记为 Propagated**：本地 QSNR（25.4 dB）远高于累计 QSNR（10.1 dB），说明它接收到的输入已被上游噪声污染。这不是 classifier 本身的问题，而是上游累积所致。
+- **整体累计 QSNR 下降 5.3 dB**：从第一个量化模块到 classifier，主要下降发生在 transformer.layers.0 内部。
 
 ---
 
@@ -298,7 +300,7 @@ transformer.layers.0.linear1 (weight)
   Suggested: Consider per_channel granularity or hadamard transform.
 ```
 
-**洞察**：两个 Linear weight 层被诊断为 `high_dynamic_range`——动态范围超过 13 bits，4-bit 量化只能覆盖 16 个级别，大量空范围被浪费。已经使用 `per_channel` 粒度，下一步应尝试 Hadamard transform 进一步压缩动态范围。
+**洞察**：两个 Linear weight 层被诊断为 `high_dynamic_range`——动态范围超过 10 bits，4-bit 量化只能覆盖 16 个级别，大量空范围被浪费。已经使用 `per_channel` 粒度，下一步应尝试 Hadamard transform 进一步压缩动态范围。
 
 ### 2.2 全局因果矩阵
 
@@ -311,19 +313,23 @@ print(diag.causal_analysis())
 ```
 Layer                          Role           QSNR   Crest     OL%     DR  Classification
 -----------------------------------------------------------------------------------------
-transformer.layers.0.linear2   input           7.6    14.6    2.9%    9.4  outlier_dominated
-transformer.layers.1.linear2   input           6.0     8.0    4.2%    6.9  heavy_tailed
-transformer.layers.0.norm2     output          6.4     3.0    0.0%   14.7  high_dynamic_range
-transformer.layers.1.norm1     output          6.6     2.7    0.0%   16.6  high_dynamic_range
-transformer.layers.0.norm1     output          2.3     3.0    0.0%    6.5  benign
+transformer.layers.0.norm1     output          2.9     2.9    0.0%    7.1  benign
+transformer.layers.0.norm2     output          5.7     3.1    0.0%   13.8  high_dynamic_range
+transformer.layers.0.linear2   input           6.2    10.6    3.2%    9.0  outlier_dominated
+transformer.layers.1.linear2   input           6.3     8.4    4.2%    6.9  heavy_tailed
+transformer.layers.0.linear1   output          6.6     2.7    4.1%   11.6  benign
+transformer.layers.1.linear1   output          6.8     3.6    0.8%   13.4  high_dynamic_range
+transformer.layers.1.norm1     output          8.4     2.9    0.0%   16.9  high_dynamic_range
+transformer.layers.1.linear1   weight          9.7     2.4    0.0%   10.2  high_dynamic_range
+transformer.layers.0.linear2   weight         10.2     2.1    0.0%    6.5  benign
 transformer.layers.1.norm2     weight         20.2     1.0  100.0%    0.0  low_entropy
 ```
 
 **因果模式**：
-1. **Linear input → outlier_dominated / heavy_tailed**：激活张量中 2.9%–4.2% 的值超过 3σ，导致量化器将大范围分配给少数离群值。宜用 SmoothQuant 或 per_channel 缓解。
-2. **Norm output → high_dynamic_range**：动态范围 14.7–16.6 bits，远超 4-bit 的 16 级别，是输出误差的主要来源。
-3. **Norm weight → low_entropy**：所有 LayerNorm 权重的归一化熵 < 0.33，且 100% 的值为 0（3σ 阈值下）。这是因为 LayerNorm 权重向量通常接近均匀分布，量化非常友好——QSNR 高达 20–22 dB 证明了这一点。
-4. **`transformer.layers.0.norm1` output 为 benign**：尽管 output QSNR 仅 2.3 dB（全模型最差），分布分类却是 benign。这说明退化不是数据分布导致的，而是**结构性因素**（如该层恰好处于残差连接后，上游噪声和自身量化叠加）。
+1. **Linear input → outlier_dominated / heavy_tailed**：激活张量中 3.2%–4.2% 的值超过 3σ，导致量化器将大范围分配给少数离群值。宜用 SmoothQuant 或 per_channel 缓解。
+2. **Norm output → high_dynamic_range**：动态范围 13.8–16.9 bits，远超 4-bit 的 16 级别，是输出误差的主要来源。
+3. **Norm weight → low_entropy**：所有 LayerNorm 权重的归一化熵 < 0.33，且 100% 的值为 0（3σ 阈值下）。量化非常友好——QSNR 高达 20–22 dB 证明了这一点。
+4. **`transformer.layers.0.norm1` output 为 benign**：尽管 output QSNR 仅 2.9 dB（全模型最差），分布分类却是 benign。这说明退化不是数据分布导致的，而是**结构性因素**（如该层恰好处于残差连接后，上游噪声和自身量化叠加）。
 
 ### 2.3 退化分类
 
@@ -354,35 +360,49 @@ plan_auto = planner.top_k_boost(k=3, role="auto", target_bits=8)
 ```
 Layer                          Change                                   Reason
 ----------------------------------------------------------------------------------------------------
-transformer.layers.0.linear1   weight: int4 → 8bit                      QSNR=10.2 dB (worst weight)
-transformer.layers.0.linear2   weight: int4 → 8bit                      QSNR=10.2 dB (worst weight)
-transformer.layers.1.linear1   weight: int4 → 8bit                      QSNR=9.7 dB (worst weight)
+transformer.layers.0.linear1   weight: 4bit → 8bit                      QSNR=10.2 dB (worst weight)
+transformer.layers.0.linear2   weight: 4bit → 8bit                      QSNR=10.2 dB (worst weight)
+transformer.layers.1.linear1   weight: 4bit → 8bit                      QSNR=9.7 dB (worst weight)
 ```
 
-**role="auto" → 每层最差 role 提升**：
+**role="auto" → 每层最差 boostable role 提升**：
 
 ```
 Layer                          Change                                   Reason
 ----------------------------------------------------------------------------------------------------
-transformer.layers.0.norm1     output: int4 → 8bit                      QSNR=2.3 dB (worst output)
-transformer.layers.0.norm2     output: int4 → 8bit                      QSNR=6.4 dB (worst output)
-transformer.layers.1.linear2   input: int4 → 8bit                       QSNR=6.0 dB (worst input)
+transformer.layers.0.linear2   input: 4bit → 8bit                       QSNR=6.2 dB (worst input)
+transformer.layers.0.norm1     input: 4bit → 8bit                       QSNR=3.7 dB (worst input)
+transformer.transformer.layers.0.transformer.layers.0.self_attn.linear input: 4bit → 8bit                       QSNR=6.0 dB (worst input)
 ```
 
-两种方案截然不同：weight 方案提升 Linear 权重，auto 方案优先修复最差的 Norm output（2.3 dB）。
+两种方案截然不同：weight 方案提升 Linear 权重，auto 方案优先修复最差的 Linear/Norm input。注意 auto 模式会自动跳过不可提升的 role（如 output，因为 `QuantConfig.to_op_config()` 不为 output 设置 scheme）。
 
 ### 3.2 策略推荐
 
 ```python
 print(planner.recommend(strategy="conservative").explain())
-# → 2 layers: transformer.layers.0.norm1 (output), transformer.layers.1.linear2 (input)
+# → 6 layers: 基于 QSNR 阈值自动选取最差的 6 层 input role 提升至 8-bit
 
 print(planner.recommend(strategy="aggressive").explain())
-# → 9 layers: 所有层的 worst role 全部提升
+# → 11 layers: 所有层的 worst boostable role 全部提升
 ```
 
-- **Conservative**：只改 QSNR < 10 dB 的层（2 层），最小修改量。
-- **Aggressive**：改全部 9 层，追求最大精度恢复但存储开销大。
+- **Conservative**：QSNR 分布下 15% 阈值（6 层），最小修改量。
+- **Aggressive**：QSNR 分布下 35% 阈值（11 层），追求最大精度恢复但存储开销大。
+
+### 3.3 不可提升 Role 的处理
+
+```python
+plan_out = planner.top_k_boost(k=3, role="output", target_bits=8)
+print(plan_out.explain())
+```
+
+```
+(Empty plan — no overrides.)
+  (output role has no scheme in OpQuantConfig → no-override plan)
+```
+
+`role="output"` 返回空方案，因为 `QuantConfig.to_op_config()` 不生成 output scheme（output 量化由 input/weight 量化间接决定，其 QSNR 测量的是误差传播而非显式量化）。`InterventionPlanner` 检测到 output scheme 为 None 后跳过该 role，避免创建无效的无操作 override。这是 Bug 1 修复的核心——之前会误导性地报告 `output: int4 → 8bit` 而实际未做任何改变。
 
 ---
 
@@ -407,41 +427,41 @@ Intervention Comparison
 
   Metric       FP32         Baseline     Intervention Change
   ------------------------------------------------------------
-  accuracy     0.8224       0.7889       0.8166       +0.0276
+  accuracy     0.8224       0.7800       0.7813       +0.0013
 
-  Avg QSNR: baseline=8.6 dB → intervention=8.6 dB (Δ=-0.0 dB)
+  Avg QSNR: baseline=8.1 dB → intervention=9.9 dB (Δ=+1.8 dB)
 
   Layer                          Role        QSNR Before   QSNR After          Δ
   ------------------------------------------------------------------------------
-  transformer.layers.0.norm1     output: int4 → 8bit          2.3          5.7       +3.4
-  transformer.layers.0.norm2     output: int4 → 8bit          6.4          7.9       +1.5
-  transformer.layers.1.linear2   input: int4 → 8bit          6.9          8.3       +1.4
+  transformer.layers.0.linear2   input: 4bit → 8bit          7.9          9.8       +1.9
+  transformer.layers.0.norm1     input: 4bit → 8bit          2.9         21.1      +18.2
+  transformer.transformer.layers.0.transformer.layers.0.self_attn.linear input: 4bit → 8bit          5.7          5.7       +0.0
 ```
 
-**结果**：只改动 3 层（2 个 Norm output + 1 个 Linear input），准确率从 78.89% 恢复到 81.66%，回收了 **83% 的量化损失**（-0.0334 → -0.0057）。
+**结果**：改动 3 层 input role（2 Linear + 1 Norm），准确率从 78.00% 提升到 78.13%（+0.0013）。
 
 各层 QSNR 改善：
-- `transformer.layers.0.norm1` output: 2.3 → 5.7 dB（+3.4 dB）
-- `transformer.layers.0.norm2` output: 6.4 → 7.9 dB（+1.5 dB）
-- `transformer.layers.1.linear2` input: 6.9 → 8.3 dB（+1.4 dB）
+- `transformer.layers.0.norm1` input: 2.9 → 21.1 dB（+18.2 dB）——大幅改善
+- `transformer.layers.0.linear2` input: 7.9 → 9.8 dB（+1.9 dB）
+- `transformer.transformer.layers.0.transformer.layers.0.self_attn.linear` input: 5.7 dB（无变化，因 self_attn 内部通过 fused path 运行，observer 未捕获介入后的改善）
 
-### 4.2 Conservative 方案
+**重要说明**：`plan_auto` 仅提升 **input** 和 **weight** role——`output` role 不可提升，因为 `QuantConfig.to_op_config()` 不为其生成 scheme。InterventionPlanner 在 `top_k_boost` 中检测 boostable roles（base config 中 scheme 不为 None 的 role），自动跳过 output。这也是为什么 avg QSNR 从 8.1 dB 升至 9.9 dB（+1.8 dB），但准确率提升有限（+0.13%）。
 
-```
-  Plan: Top-2 auto boost to 8-bit
-  Layers modified: 2
+### 4.2 干预效果分析
 
-  Metric       FP32         Baseline     Intervention Change
-  ------------------------------------------------------------
-  accuracy     0.8224       0.7889       0.8166       +0.0276
+plan_auto 仅提升了 input role 的 3 层，准确率微升 +0.0013。各层 QSNR 改善差异很大：
+- `transformer.layers.0.norm1` input QSNR 暴增 18.2 dB（3.7→21.1 dB），但这对最终准确率贡献有限——因为该层的 output QSNR（2.9 dB）才是真正的瓶颈，而 output 无法直接提升。
+- `transformer.transformer.layers.0.self_attn.linear` input QSNR 无变化（5.7 dB），因其内部通过 PyTorch fused fast path 运行，observer 未捕获到介入效果。
 
-  Layer                          Role        QSNR Before   QSNR After          Δ
-  ------------------------------------------------------------------------------
-  transformer.layers.0.norm1     output: int4 → 8bit          2.3          5.7       +3.4
-  transformer.layers.1.linear2   input: int4 → 8bit          6.9          8.3       +1.4
-```
+这展示了 ADR-010 闭环分析的关键洞察：**如果瓶颈在 output，只提升 input 或 weight 位宽是低效的。output 的高误差来自上游传播 + 自身量化叠加，正确的干预策略是减少上游误差注入（如对上游层应用 Hadamard/SmoothQuant transform），而非直接提升 output 位宽（框架不支持）**。
 
-仅 2 层达到与 3 层相同的准确率提升（0.8166），说明第三层 `transformer.layers.0.norm2` 的提升（1.5 dB）对最终准确率贡献为零。这验证了 ADR-010 的"最差 K 层优先"策略是有效的。
+### 4.3 内联操作量化一致性（Bug 2 修复）
+
+在引入 Bug 2 修复之前，向 `Session` 传递 `overrides` 参数（即使是空 dict）会改变内联操作（如 residual add）的量化行为。原因在于 `_resolve_context_cfg` 对 singleton `OpQuantConfig` 和 `Dict[str, OpQuantConfig]` 的分支处理不一致：
+- **Singleton 路径**：兼容式 per_channel config 直接透传，内联操作量化正常工作
+- **Dict 路径**：仅检查 storage/PET_TENSOR input，per_channel config 被忽略，返回空 `OpQuantConfig()`，导致内联操作完全不量化
+
+修复后，dict 路径复用 singleton 路径的解析逻辑，确保无论是否传递 overrides，内联操作的量化行为一致。这保证了 `intervention.compare()` 报告的精度变化仅来自实际介入层，不被内联操作不一致性污染。
 
 ---
 
@@ -509,15 +529,17 @@ print(result.tables.per_role_qsnr())
 ```
 Layer                               Input     Weight     Output  Dominant
 -------------------------------------------------------------------------
-transformer.layers.0.norm1            4.7       21.2        2.3  output
-transformer.layers.1.linear2          6.0       12.0        6.9  input
-transformer.layers.0.norm2            7.2       22.5        6.4  output
-transformer.layers.1.norm2            7.1       20.2        6.4  output
-transformer.layers.1.norm1            7.0       20.2        6.6  output
-transformer.layers.0.linear1          7.6       10.2        6.8  output
-transformer.layers.0.linear2          7.6       10.2        7.9  input
-transformer.layers.1.linear1          7.7        9.7        7.9  input
-classifier                            9.6       14.2       26.2  input
+transformer.layers.0.norm1            3.7       21.2        2.9  output
+transformer.layers.0.norm2            6.4       22.5        5.7  output
+transformer.transformer.layers.0.transformer.layers.0.self_attn.linear        6.0       11.5        5.7  output
+transformer.layers.0.linear2          6.2       10.2        7.9  input
+transformer.layers.1.linear2          6.3       12.0        6.7  input
+transformer.layers.1.norm2            6.8       20.2        6.5  output
+transformer.layers.0.linear1          8.1       10.2        6.6  output
+transformer.layers.1.linear1          7.6        9.7        6.8  output
+transformer.transformer.layers.1.transformer.layers.1.self_attn.linear        6.9       13.0        6.8  output
+transformer.layers.1.norm1            7.9       20.2        8.4  input
+classifier                           10.9       14.2       25.4  input
 ```
 
 ---
@@ -544,17 +566,17 @@ cmp.summary()                           # → dict，含 baseline + intervention
 
 | 维度 | 发现 |
 |------|------|
-| **主要瓶颈** | LayerNorm output（QSNR 2.3–6.6 dB）和 Linear input（6.0–7.7 dB），不是 weight |
+| **主要瓶颈** | LayerNorm output（QSNR 2.9–8.4 dB）和 Linear input（6.0–8.1 dB），不是 weight |
 | **退化机制** | Norm output → `high_dynamic_range`（14–17 bits）；Linear input → `outlier_dominated` / `heavy_tailed` |
-| **最差单层** | `transformer.layers.0.norm1` output，QSNR 仅 2.3 dB |
-| **最佳干预** | 2 层 auto 提升（1 Norm output + 1 Linear input → 8-bit）回收 83% 量化损失 |
+| **最差单层** | `transformer.layers.0.norm1` output，QSNR 仅 2.9 dB |
+| **最佳干预** | 提升 output 瓶颈不可行（框架不支持 output scheme）——应通过 transform（Hadamard/SmoothQuant）解决上游噪声传播 |
 
 ### 量化友好度排名
 
 ```
-Weight:  Norm (21.0 dB) > Other (14.2 dB) > Linear (10.5 dB)
-Output:  Other (26.2 dB) > Linear (7.4 dB) > Norm (5.4 dB)
-Input:   Other (9.6 dB)  > Linear (7.2 dB) > Norm (6.5 dB)
+Weight:  Norm (21.0 dB) > Other (14.2 dB) > Linear (11.1 dB)
+Output:  Other (25.4 dB) > Linear (6.8 dB) > Norm (5.9 dB)
+Input:   Other (10.9 dB) > Linear (6.9 dB)  > Norm (6.2 dB)
 ```
 
 LayerNorm 权重量化极友好（低熵、均匀分布），但其输出量化极差（高动态范围 + 残差连接导致误差叠加）。
@@ -564,7 +586,8 @@ LayerNorm 权重量化极友好（低熵、均匀分布），但其输出量化�
 1. **对 LayerNorm output 应用 Hadamard transform**：旋转空间以减少动态范围，预期提升 > 2 dB
 2. **对 Linear input 应用 SmoothQuant**：将激活离群值平滑迁移到权重，预期提升 > 1.5 dB
 3. **对 `transformer.layers.0.norm1`**：考虑保留 fp32 output（residual 连接处的误差放大效应）
-4. **整体采用混合精度**：Norm weight 可保持 int4（QSNR 21 dB 已足够），Linear weight 和 Norm output 提升至 int8
+4. **整体采用混合精度**：Norm weight 可保持 int4（QSNR 21 dB 已足够），Linear weight 提升至 int8
+5. **注意 output role 限制**：`InterventionPlanner.top_k_boost` 自动跳过不可提升的 role（output/bias——QuantConfig 不为它们生成 scheme），干预重点应放在 input/weight role 或 transform 优化上
 
 ---
 

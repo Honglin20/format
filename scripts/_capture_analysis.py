@@ -65,12 +65,8 @@ class SlowTransformerEncoderLayer(nn.TransformerEncoderLayer):
     """
     def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
         x = src
-        if self.norm_first:
-            x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
-            x = x + self._ff_block(self.norm2(x))
-        else:
-            x = self.norm1(x + self._sa_block(x, src_mask, src_key_padding_mask, is_causal=is_causal))
-            x = self.norm2(x + self._ff_block(x))
+        x = self.norm1(x + self._sa_block(x, src_mask, src_key_padding_mask))
+        x = self.norm2(x + self._ff_block(x))
         return x
 
 class TransformerClassifier(nn.Module):
@@ -81,11 +77,15 @@ class TransformerClassifier(nn.Module):
         self.pos_encoder = PositionalEncoding(d_model, max_len)
         encoder_layer = SlowTransformerEncoderLayer(
             d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-            dropout=dropout, batch_first=True)
+            dropout=dropout)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.classifier = nn.Linear(d_model, num_classes)
     def forward(self, x):
-        x = self.embedding(x); x = self.pos_encoder(x); x = self.transformer(x); x = x.mean(dim=1)
+        x = self.embedding(x); x = self.pos_encoder(x)
+        x = x.transpose(0, 1)  # (batch, seq, d) → (seq, batch, d) for PT 1.7 compat
+        x = self.transformer(x)
+        x = x.transpose(0, 1)  # (seq, batch, d) → (batch, seq, d)
+        x = x.mean(dim=1)
         return self.classifier(x)
 
 def eval_fn(model, data):
@@ -227,6 +227,11 @@ print(plan_cons.explain())
 print("\n--- planner.recommend(strategy='aggressive') ---")
 plan_agg = planner.recommend(strategy="aggressive")
 print(plan_agg.explain())
+
+print("\n--- planner.top_k_boost(k=3, role='output', target_bits=8) ---")
+plan_out = planner.top_k_boost(k=3, role="output", target_bits=8)
+print(plan_out.explain())
+print("  (output role has no scheme in OpQuantConfig → no-override plan)")
 
 # ════════════════════════════════════════════════════════════════════════════
 # STEP 4: INTERVENE

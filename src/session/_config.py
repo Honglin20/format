@@ -190,7 +190,12 @@ class QuantConfig:
     def __post_init__(self):
         # prescale_granularity only matters when transform='prescale'
         if self.transform == "prescale" and self.prescale_granularity is None:
-            self.prescale_granularity = self.a_granularity
+            # Pre-scale cannot operate at per_block: it is a per-channel or
+            # per-tensor scaling factor.  Map per_block → per_channel.
+            if self.a_granularity == "per_block":
+                self.prescale_granularity = "per_channel"
+            else:
+                self.prescale_granularity = self.a_granularity
 
         if self.w_granularity not in _VALID_GRANULARITIES:
             raise ValueError(
@@ -216,6 +221,12 @@ class QuantConfig:
             raise ValueError(
                 f"Invalid scale_storage {self.scale_storage!r}. "
                 f"Must be one of {sorted(_VALID_SCALE_STORAGES)}"
+            )
+        if self.transform == "prescale" and self.prescale_granularity not in ("per_tensor", "per_channel"):
+            raise ValueError(
+                f"prescale_granularity must be 'per_tensor' or 'per_channel', "
+                f"got {self.prescale_granularity!r}. per_block is not supported "
+                f"for pre-scale (use 'per_channel' instead)."
             )
         if self.gptq:
             if self.gptq_block_size < 1:

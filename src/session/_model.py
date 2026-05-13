@@ -427,22 +427,21 @@ def _resolve_context_cfg(
         if cfg.storage is not None or _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
             return _non_matmul_cfg(cfg)
         return cfg
-    # cfg is a dict — extract storage (or per_tensor input) for inline-op defaults
-    storage = None
+    # cfg is a dict — apply the same resolution logic as the singleton path
+    # to the first representative config.  Without this, inline ops
+    # (torch.add in residuals, etc.) would be left unquantized whenever
+    # per-layer overrides are used, even when the overrides are no-ops.
     if cfg:
         for c in cfg.values():
             if not isinstance(c, OpQuantConfig):
                 continue
-            if c.storage is not None:
-                storage = c.storage
-                break
-            # Fallback: compat-style configs store the elemwise scheme in `input`
-            if (c.input is not None
-                    and c.input.granularity is not None
-                    and c.input.granularity.mode.name == "PER_TENSOR"):
-                storage = c.input
-                break
-    return OpQuantConfig(storage=storage)
+            if c.storage is not None or _is_mx_compute(c.input) or _is_mx_compute(c.weight):
+                return _non_matmul_cfg(c)
+            # Compat-style (per_tensor / per_channel without storage):
+            # pass through unchanged — same as the singleton branch above.
+            if c.input is not None or c.weight is not None:
+                return c
+    return OpQuantConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +531,23 @@ def _patch_forward(
     def _export_onnx(self, dummy_input, output_path: str, opset_version: int = 17):
         from src.onnx.export import export_quantized_model
         from src.session._context import _export_scales_var, _collect_export_scales
+        import inspect
+
+        # Convert dict kwargs to positional args for the tracer.
+        # _wrapped_forward(*args, **kwargs) has no named parameters,
+        # so the ONNX tracer loses dict inputs.  Use the original
+        # forward's signature to map dict keys back to positional args.
+        if isinstance(dummy_input, dict):
+            sig = inspect.signature(original_forward)
+            param_names = [
+                n for n in sig.parameters
+                if n != "self" and sig.parameters[n].kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            # Only include keys present in the forward signature (ignore extras)
+            dummy_input = tuple(dummy_input[n] for n in param_names if n in dummy_input)
 
         # Collect real scales from calibrated modules before export.
         # The patched forward wraps in QuantizeContext during tracing,

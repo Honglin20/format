@@ -157,14 +157,16 @@ class _QuantSession:
     def __call__(self, *args, **kwargs):
         """Forward pass through the active model (fp32 or quantized).
 
-        In quantized mode, records the first positional argument as
-        ``_last_input`` for automatic ONNX export.
+        In quantized mode, records the positional arguments as
+        ``_last_input`` for automatic ONNX export.  The full *args*
+        tuple is kept so multi-input models (tuple/list/dict) can be
+        re-exported without losing argument structure.
         """
         if self._mode == "fp32":
             return self.fp32_model(*args, **kwargs)
 
         if args and self._last_input is None:
-            self._last_input = args[0] if len(args) == 1 else args
+            self._last_input = args
         return self.qmodel(*args, **kwargs)
 
     # ------------------------------------------------------------------
