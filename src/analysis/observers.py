@@ -15,6 +15,10 @@ class DistributionObserver(SliceAwareObserver):
         self.outlier_sigma = outlier_sigma
         self.hist_bins = hist_bins
 
+    # ------------------------------------------------------------------
+    # Per-slice (PER_TENSOR)
+    # ------------------------------------------------------------------
+
     def _measure(self, key, fp32, quant):
         f = fp32
         f_abs = f.abs()
@@ -64,6 +68,115 @@ class DistributionObserver(SliceAwareObserver):
             "dynamic_range_bits": (torch.log2(f_abs.max() / min_nonzero)).item() if non_zero_mask.any() else 0.0,
             "outlier_ratio": (f_abs > self.outlier_sigma * std).float().mean().item(),
             "norm_entropy": norm_entropy,
+        }
+
+    # ------------------------------------------------------------------
+    # Vectorized per-channel (the default Python loop was the #1 bottleneck)
+    # ------------------------------------------------------------------
+
+    def _measure_per_unit(self, fp32_2d, quant_2d):
+        """Vectorized per-channel stats. Only histc loops per channel."""
+        f = fp32_2d  # [N_ch, D]
+        n = f.shape[1]
+        f_abs = f.abs()
+        eps = self.sparse_eps
+
+        # -- all reduction-based stats, vectorized over dim=1 ----------
+        f_min = f.min(dim=1).values
+        f_max = f.max(dim=1).values
+        mean = f.mean(dim=1)
+        delta = f - mean.unsqueeze(1)
+        var = delta.pow(2).mean(dim=1)
+        std = var.sqrt()
+        m3 = delta.pow(3).mean(dim=1)
+        m4 = delta.pow(4).mean(dim=1)
+        skew = m3 / (var * std + 1e-30)
+        kurt = m4 / (var.pow(2) + 1e-30)
+        excess_kurt = kurt - 3.0
+        bc_denom = excess_kurt + 3 * (n - 1)**2 / ((n - 2) * (n - 3) + 1e-30)
+        bimodality = (skew.pow(2) + 1) / (bc_denom + 1e-30)
+
+        rms = f.pow(2).mean(dim=1).sqrt()
+        peak = f_abs.max(dim=1).values
+        crest_factor = peak / (rms + 1e-30)
+        sparse_ratio = (f_abs < eps).float().mean(dim=1)
+
+        non_zero_mask = f_abs > eps
+        min_nonzero = torch.where(
+            non_zero_mask, f_abs,
+            torch.tensor(float('inf'), device=f.device, dtype=f.dtype)
+        ).min(dim=1).values
+        has_nonzero = non_zero_mask.any(dim=1)
+        dynamic_range_bits = torch.where(
+            has_nonzero,
+            torch.log2(f_max / min_nonzero.clamp_min(eps)),
+            torch.zeros_like(f_max)
+        )
+        outlier_ratio = (f_abs > self.outlier_sigma * std.unsqueeze(1)).float().mean(dim=1)
+
+        # -- pull to Python once ---------------------------
+        f_min_l = f_min.tolist()
+        f_max_l = f_max.tolist()
+        mean_l = mean.tolist()
+        std_l = std.tolist()
+        peak_l = peak.tolist()
+        rms_l = rms.tolist()
+        crest_l = crest_factor.tolist()
+        skew_l = skew.tolist()
+        kurt_l = kurt.tolist()
+        excess_l = excess_kurt.tolist()
+        bimod_l = bimodality.tolist()
+        sparse_l = sparse_ratio.tolist()
+        drange_l = dynamic_range_bits.tolist()
+        outlier_l = outlier_ratio.tolist()
+
+        # -- per-channel histogram + entropy (torch.histc is single-threaded CPU) --
+        results = []
+        max_entropy = torch.log2(torch.tensor(self.hist_bins, dtype=torch.float32)).item()
+        for i in range(f.shape[0]):
+            hist = torch.histc(f[i], bins=self.hist_bins)
+            probs = hist.float() / (n + 1e-30)
+            probs_pos = probs[probs > 0]
+            entropy_raw = -(probs_pos * torch.log2(probs_pos + 1e-30)).sum().item()
+            norm_entropy = entropy_raw / (max_entropy + 1e-30)
+
+            results.append({
+                "min": f_min_l[i],
+                "max": f_max_l[i],
+                "mean": mean_l[i],
+                "std": std_l[i],
+                "peak": peak_l[i],
+                "rms": rms_l[i],
+                "crest_factor": crest_l[i],
+                "skewness": skew_l[i],
+                "kurtosis": kurt_l[i],
+                "excess_kurtosis": excess_l[i],
+                "bimodality_coefficient": bimod_l[i],
+                "sparse_ratio": sparse_l[i],
+                "dynamic_range_bits": drange_l[i],
+                "outlier_ratio": outlier_l[i],
+                "norm_entropy": norm_entropy,
+            })
+
+        return results
+
+    # ------------------------------------------------------------------
+    # Vectorized per-block aggregate
+    # ------------------------------------------------------------------
+
+    def _measure_batch(self, fp32_2d, quant_2d, valid_counts=None):
+        """Per-block aggregate: mean/std/min/max of key distribution stats."""
+        err_sq = (fp32_2d - quant_2d).pow(2)
+        if valid_counts is not None:
+            n_valid = valid_counts.clamp_min(1)
+            mse = err_sq.sum(dim=1) / n_valid
+        else:
+            mse = err_sq.mean(dim=1)
+        return {
+            "mse": mse.mean().item(),
+            "mse_std": mse.std(unbiased=False).item() if mse.numel() > 1 else 0.0,
+            "mse_min": mse.min().item(),
+            "mse_max": mse.max().item(),
         }
 
 

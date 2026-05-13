@@ -1,28 +1,12 @@
 # SessionResult & 结果查看
 
+> 第 4 章 · [Session 文档索引](INDEX.md)
+
 `SessionResult` 是 Session 的输出，包含精度对比、逐层误差、原始 observer 数据。
 
-## eval_fn 合约
+**前提**：已阅读 [第 1 章 · Session 概览](overview.md)。
 
-多个方法依赖 `eval_fn`。它的签名和返回值必须满足：
-
-```python
-def eval_fn(model, data) -> dict[str, float]:
-    """在 data 上运行 model，返回 {指标名: 浮点值}。
-
-    model 是当前推理模式下的模型（fp32 或 quant），
-    data 是 eval_data（或 calib_data 当 eval_data 未单独传入时）。
-    """
-    ...
-    return {"loss": 0.1234}          # 单指标
-    # 或
-    return {"loss": 0.12, "acc": 0.95}  # 多指标
-```
-
-**约束**：
-- 返回值必须是 `Dict[str, float]` —— 字符串 key，浮点 value。
-- `accuracy_table()` / `summary()` 的准确率列 / `pareto_frontier(metric="accuracy")` 都依赖这个返回值。
-- 不传 `eval_fn` 时 `evaluate()` 阶段被跳过，`fp32_metrics` / `quant_metrics` / `delta` 全部为 `None`。
+> `eval_fn` 合约见 [Session 概览 § eval_fn 合约](overview.md#eval_fn-合约)。不传 `eval_fn` 时 `evaluate()` 阶段被跳过，`fp32_metrics` / `quant_metrics` / `delta` 全部为 `None`。
 
 ## 快速查看
 
@@ -146,6 +130,8 @@ outputs=["qsnr", "distribution", "fit", "accuracy"]           # + distribution_f
 | `result.observers_data` | `dict` | 原始 observer 数据（供高级分析） |
 | `result.cost` | `CostResult` | 量化模型延迟 & 内存估算 |
 | `result.cost_fp32` | `CostResult` | fp32 模型延迟 & 内存估算 |
+| `result.plot` | `SessionPlotAccessor` | 后置可视化（QSNR 对比、误差传播等） |
+| `result.report` | `AnalysisReport` | 分布分析（taxonomy / profile / sensitivity） |
 
 ## 方法速查
 
@@ -156,6 +142,8 @@ outputs=["qsnr", "distribution", "fit", "accuracy"]           # + distribution_f
 | `.top_k_qsnr(k, reverse=False)` | `List[Tuple]` | QSNR 最差/最好的 k 层 |
 | `.layer_report()` | `DataFrame` | 逐层 QSNR + MSE（需 pandas） |
 | `.qsnr_per_role(role)` | `Tuple[Dict, Dict]` | 从 observers_data 提取指定 role 的 (qsnr, mse) |
+| `.save(dir)` | `None` | 保存结果到目录（CSV + 图表 + JSON） |
+| `.to_serializable()` | `dict` | 返回可 JSON 序列化的 dict |
 | `.tables` | `SessionTablesAccessor` | 终端表格输出（per_layer_qsnr, error_source_analysis） |
 
 ## 获取 observer 原始数据
@@ -168,3 +156,6 @@ for layer, roles in result.observers_data.items():
             for slice_key, metrics in slices.items():
                 print(f"{layer}/{role}/{stage}/{slice_key}: {metrics}")
 ```
+
+---
+← [上一章：精度优化方法](optimization.md) | [Session 文档索引](INDEX.md) | [下一章：可视化](plotting.md) →

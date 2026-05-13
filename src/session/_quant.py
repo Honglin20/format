@@ -171,7 +171,8 @@ class _QuantSession:
     # Calibration
     # ------------------------------------------------------------------
 
-    def calibrate(self, strategy: Optional[ScaleStrategy] = None) -> CalibrationSession:
+    def calibrate(self, strategy: Optional[ScaleStrategy] = None,
+                  track_input: bool = False) -> CalibrationSession:
         """Return a ``CalibrationSession`` context manager.
 
         Scales are auto-assigned on context exit. The user runs forward
@@ -179,9 +180,14 @@ class _QuantSession:
 
             with session.calibrate():
                 eval_fn(session, calib_data)
+
+        Args:
+            strategy: Override the default calibrator strategy.
+            track_input: If True, also track input amax and assign
+                ``_input_scale`` buffers for static input quantization.
         """
         strat = strategy if strategy is not None else self.calibrator
-        return CalibrationSession(self.qmodel, strat)
+        return CalibrationSession(self.qmodel, strat, track_input=track_input)
 
     # ------------------------------------------------------------------
     # Analysis

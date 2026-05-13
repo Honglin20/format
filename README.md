@@ -48,37 +48,46 @@ report.print_summary(qsnr_type="accum")   # 切换为端到端累积 QSNR
 
 ## 文档导航
 
-### 使用指南
+一切从 Session 开始。以下按推荐阅读顺序排列：
+
+### Session 阅读路径
+
+1. [Session 概览](docs/guides/session/overview.md) — 量化生命周期、一键模式 vs 分步模式
+2. [QuantConfig 配置](docs/guides/session/config.md) — format × granularity × transform × calibration
+3. [精度优化方法](docs/guides/session/optimization.md) — Prescale / LSQ / GPTQ / Hadamard / SmoothQuant / Adaptive / per_layer_optimal
+4. [结果查看](docs/guides/session/result.md) — summary / accuracy_table / layer_report / top_k_qsnr
+5. [可视化](docs/guides/session/plotting.md) — 12 种内置图表
+6. [误差分析](docs/guides/session/analysis.md) — 5 种 Observer / 累积 vs 本地误差传播
+7. [Study 多配置对比](docs/guides/session/study.md) — 批量对比 · DataFrame 导出
+8. [ONNX 导出](docs/guides/session/export.md) — QDQ + MX 自定义算子
+9. [性能估算](docs/guides/session/cost.md) — Roofline 延迟 & 内存
+
+→ [Session 文档索引](docs/guides/session/INDEX.md)
+
+### 参考手册
 
 | 文档 | 内容 |
 |------|------|
-| [Session 概览](docs/guides/session/overview.md) | 量化生命周期：quantize → calibrate → analyze → evaluate → cost |
-| [SessionResult & 结果查看](docs/guides/session/result.md) | summary / accuracy_table / layer_report / QSNR / MSE |
-| [绘图 & 可视化](docs/guides/session/plotting.md) | 12 种内置图表：QSNR/MSE/outlier/block-QSNR/Pareto/correlation/cost/role-distribution/error-propagation |
-| [误差分析](docs/guides/session/analysis.md) | 5 种 Observer、分布分析、LayerSensitivity、累积 vs 本地误差传播 |
 | [格式选择](docs/guides/formats.md) | int8/fp8/nf4 等格式对比 & 自定义格式注册 |
-| [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block 选择 |
-| [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive · smoothquant_distrib 分布对比 |
-| [校准策略](docs/guides/calibration.md) | mse / max / percentile / kl 对比 |
-| [多配置对比 (Study)](docs/guides/session/study.md) | Study → StudyReport → 对比表 + 图表导出 |
-| [ONNX 导出](docs/guides/onnx-export.md) | 标准 QDQ + MX 自定义算子 |
-
-### API 参考
-
-| 文档 | 内容 |
-|------|------|
-| [QuantConfig](docs/reference/quant-config.md) | 完整字段表（含 storage_format） |
-| [Session](docs/reference/session.md) | 方法签名 & 链式 API |
-| [SessionResult](docs/reference/session-result.md) | 属性/方法速查 |
+| [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block |
+| [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive |
+| [校准策略](docs/guides/calibration.md) | mse / max / percentile / kl |
 
 ### 进阶主题
 
 | 文档 | 内容 |
 |------|------|
 | [自适应 Transform](docs/advanced/adaptive-transform.md) | 逐层自动选择最优变换 |
-| [LSQ 可学习量化](docs/advanced/lsq.md) | LayerwiseScaleOptimizer |
-| [自定义格式](docs/advanced/custom-formats.md) | register_format / 自动解析 fpN_eXmY |
+| [LSQ 深入](docs/advanced/lsq.md) | LayerwiseScaleOptimizer 原理 |
+| [自定义格式](docs/advanced/custom-formats.md) | register_format / FormatBase 子类 |
 | [底层 API](docs/advanced/low-level-api.md) | quantize_model / OpQuantConfig |
 | [MX 位精确等价](docs/advanced/mx-equivalence.md) | 与 microsoft/microxcaling 的等价性验证 |
-| [性能估算](docs/advanced/cost-model.md) | Roofline 延迟 & 内存估算 |
 | [架构决策 (ADR)](docs/architecture/INDEX.md) | 设计意图 & 技术决策 |
+
+### API 参考
+
+| 文档 | 内容 |
+|------|------|
+| [QuantConfig](docs/reference/quant-config.md) | 完整字段表（30 个字段） |
+| [Session](docs/reference/session.md) | 方法签名 & 链式 API |
+| [SessionResult](docs/reference/session-result.md) | 属性/方法速查 |

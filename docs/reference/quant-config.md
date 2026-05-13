@@ -22,13 +22,23 @@
 | `prescale_granularity` | `str\|None` | `None` | None = 跟随 a_granularity |
 | `lsq_steps` | `int` | `0` | LSQ 优化步数（>0 需 transform="prescale"） |
 | `lsq_lr` | `float` | `1e-3` | LSQ 学习率 |
-| `scale_storage` | `str` | `"fp32"` | scale 存储格式：fp32 / pot |
+| `scale_storage` | `str` | `"pot"` | scale 存储格式：pot（2 的幂）/ fp32 |
 | `calibrator` | `str` | `"mse"` | 校准策略：mse / max / percentile / kl |
 | `storage_bits` | `int` | `0` | Element-wise 存储位宽（16=bf16，0=禁用） |
 | `storage_kind` | `str` | `"bfloat"` | 存储类型：bfloat / fp |
 | `storage_format` | `str\|None` | `None` | 显式格式名："fp8_e4m3"、"fp4_e2m1" 等。优先于 storage_bits/storage_kind |
 | `weight_only` | `bool` | `False` | 仅量化权重 |
 | `quantize_nonlinear` | `bool` | `True` | False = 非线性算子保持 fp32 |
+| `static_input_scale` | `bool` | `False` | True = 用校准期计算的 input_scale 做激活量化（推理时 scale 固定不变，而非每 batch 动态计算） |
+
+## 精度优化字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `gptq` | `bool` | `False` | 启用 GPTQ Hessian 引导权重量化 |
+| `gptq_block_size` | `int` | `128` | GPTQ 列块大小 |
+| `gptq_damp` | `float` | `0.01` | Hessian 对角阻尼分数，范围 (0, 1] |
+| `gptq_act_order` | `bool` | `False` | True = 按 Hessian 影响降序量化列 |
 
 ## 常用组合
 

@@ -7,6 +7,7 @@ It simply loops over configs, creates a Session for each, and collects results.
 from __future__ import annotations
 
 import copy
+import time
 from typing import Callable, Dict, List, Optional, Union
 
 import torch.nn as nn
@@ -63,8 +64,14 @@ class Study:
             ``StudyReport`` from ``src.report``.
         """
         results: Dict[str, List[SessionResult]] = {}
+        n_configs = len(self._configs)
 
-        for cfg in self._configs:
+        print(f"\nStudy: {n_configs} config(s), outputs={outputs}")
+
+        for idx, cfg in enumerate(self._configs):
+            t0 = time.perf_counter()
+            print(f"  [{idx + 1}/{n_configs}] {cfg.name} ... ", end="", flush=True)
+
             if model_factory is not None:
                 model = model_factory(cfg)
             else:
@@ -78,6 +85,9 @@ class Study:
                 outputs=outputs,
             )
             results.setdefault(cfg.name, []).append(result)
+
+            elapsed = time.perf_counter() - t0
+            print(f"done ({elapsed:.1f}s)")
 
         # Lazy import to avoid module-level circular dependency (ADR-008 SS5.2)
         from src.report._study_report import StudyReport  # noqa: PLC0415

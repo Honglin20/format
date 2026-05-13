@@ -1,5 +1,7 @@
 # Session 概览
 
+> 第 1 章 · [Session 文档索引](INDEX.md)
+
 Session 是单次量化实验的生命周期管理。一个 `QuantConfig` → 一个 `Session` → 一个 `SessionResult`。
 
 ## 两种使用模式
@@ -98,8 +100,5 @@ Session(model, cfg).run(
 )
 ```
 
-## 下一步
-
-- [SessionResult & 结果查看](result.md) — 如何读取和理解量化结果
-- [绘图 & 可视化](plotting.md) — 内置图表
-- [误差分析](analysis.md) — Observer 体系
+---
+← [Session 文档索引](INDEX.md) | [下一章：QuantConfig 配置](config.md) →

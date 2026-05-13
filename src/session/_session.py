@@ -732,7 +732,9 @@ class Session:
         if not _needs_calibration(self._quant_session.cfg):
             return self  # MX per_block: scales computed dynamically
 
-        with self._quant_session.calibrate():
+        with self._quant_session.calibrate(
+            track_input=self._config.static_input_scale,
+        ):
             _run_model(self._quant_session, calib_data, eval_fn)
 
         return self

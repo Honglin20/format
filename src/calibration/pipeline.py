@@ -47,12 +47,15 @@ class CalibrationSession:
         strategy: ScaleStrategy,
         axis: int = -1,
         assign: bool = True,
+        track_input: bool = False,
     ):
         self.model = model
         self.strategy = strategy
         self.axis = axis
         self._assign = assign
+        self._track_input = track_input
         self._running_amax: Dict[str, torch.Tensor] = {}
+        self._running_input_amax: Dict[str, torch.Tensor] = {}
         self._hooks: list = []
 
     # ------------------------------------------------------------------
@@ -71,9 +74,11 @@ class CalibrationSession:
         for hook in self._hooks:
             hook.remove()
         self._hooks.clear()
-        if self._assign and self._running_amax:
-            s = self.scales()
-            self._assign_scales(s)
+        if self._assign:
+            if self._running_amax:
+                self._assign_scales(self.scales())
+            if self._track_input and self._running_input_amax:
+                self._assign_input_scales(self.input_scales())
 
     # ------------------------------------------------------------------
     # Public API
@@ -94,6 +99,13 @@ class CalibrationSession:
             scales[name] = amax.clamp(min=1e-12)
         return scales
 
+    def input_scales(self) -> Dict[str, torch.Tensor]:
+        """Return input amax scale factors (only when ``track_input=True``)."""
+        scales: Dict[str, torch.Tensor] = {}
+        for name, amax in self._running_input_amax.items():
+            scales[name] = amax.clamp(min=1e-12)
+        return scales
+
     def assign_scales(self, scales: Optional[Dict[str, torch.Tensor]] = None) -> List[str]:
         """Register scales as ``_output_scale`` buffers on model modules.
 
@@ -107,6 +119,20 @@ class CalibrationSession:
         if scales is None:
             scales = self.scales()
         return self._assign_scales(scales)
+
+    def assign_input_scales(self, scales: Optional[Dict[str, torch.Tensor]] = None) -> List[str]:
+        """Register input scales as ``_input_scale`` buffers.
+
+        Args:
+            scales: Dict mapping module names to scale tensors.
+                If None, calls :meth:`input_scales` internally.
+
+        Returns:
+            List of module names that were successfully assigned.
+        """
+        if scales is None:
+            scales = self.input_scales()
+        return self._assign_input_scales(scales)
 
     def save_scales(self, filepath: str, scales: Optional[Dict[str, torch.Tensor]] = None) -> str:
         """Save scale factors to disk.
@@ -166,7 +192,7 @@ class CalibrationSession:
         return torch.load(filepath, weights_only=False)
 
     def clear_scales(self) -> List[str]:
-        """Remove all ``_output_scale`` buffers from the model.
+        """Remove all ``_output_scale`` and ``_input_scale`` buffers from the model.
 
         Returns:
             List of module names from which buffers were removed.
@@ -174,9 +200,11 @@ class CalibrationSession:
         removed = []
         module_map = dict(self.model.named_modules())
         for name, module in module_map.items():
-            if hasattr(module, "_output_scale"):
-                del module._output_scale
-                removed.append(name)
+            for buf_name in ("_output_scale", "_input_scale"):
+                if hasattr(module, buf_name):
+                    delattr(module, buf_name)
+                    if name not in removed:
+                        removed.append(name)
         return removed
 
     # ------------------------------------------------------------------
@@ -189,6 +217,15 @@ class CalibrationSession:
         for name, scale in scales.items():
             if name in module_map:
                 module_map[name].register_buffer("_output_scale", scale)
+                assigned.append(name)
+        return assigned
+
+    def _assign_input_scales(self, scales: Dict[str, torch.Tensor]) -> List[str]:
+        assigned = []
+        module_map = dict(self.model.named_modules())
+        for name, scale in scales.items():
+            if name in module_map:
+                module_map[name].register_buffer("_input_scale", scale)
                 assigned.append(name)
         return assigned
 
@@ -217,6 +254,29 @@ class CalibrationSession:
                 )
             else:
                 self._running_amax[name] = amax
+
+            # Track input amax when static_input_scale is requested
+            if self._track_input and _input and isinstance(_input[0], torch.Tensor):
+                inp = _input[0].detach()
+                imode, ich_axis = self._input_granularity(module)
+                if imode is not None:
+                    if imode == GranularityMode.PER_TENSOR:
+                        inp_amax = torch.amax(torch.abs(inp))
+                    elif imode == GranularityMode.PER_CHANNEL:
+                        ax = ich_axis if ich_axis >= 0 else inp.ndim + ich_axis
+                        dims = [i for i in range(inp.ndim) if i != ax]
+                        inp_amax = torch.amax(
+                            torch.abs(inp), dim=tuple(dims), keepdim=True,
+                        )
+                    else:
+                        inp_amax = torch.amax(torch.abs(inp), dim=self.axis, keepdim=True)
+
+                    if name in self._running_input_amax:
+                        self._running_input_amax[name] = torch.max(
+                            self._running_input_amax[name], inp_amax,
+                        )
+                    else:
+                        self._running_input_amax[name] = inp_amax
         return _hook
 
     @staticmethod
@@ -226,6 +286,23 @@ class CalibrationSession:
             g = module.cfg.output.granularity
             return g.mode, g.channel_axis
         return GranularityMode.PER_TENSOR, 0
+
+    @staticmethod
+    def _input_granularity(module):
+        """Return (mode, channel_axis) for the module's input quant scheme.
+
+        Returns (None, 0) when input scheme is absent or uses a mode
+        where static scale is not applicable (per_block MX, float formats).
+        """
+        if not hasattr(module, "cfg") or module.cfg.input is None:
+            return None, 0
+        s = module.cfg.input
+        g = s.granularity
+        if g.mode == GranularityMode.PER_BLOCK:
+            return None, 0
+        if s.format.ebits > 0:
+            return None, 0
+        return g.mode, g.channel_axis
 
 
 # ------------------------------------------------------------------

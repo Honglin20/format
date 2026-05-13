@@ -177,6 +177,7 @@ class QuantConfig:
     # ---- Mode ----
     weight_only: bool = False
     quantize_nonlinear: bool = True         # False = skip quantizing nonlinear ops (norm/activation/pool)
+    static_input_scale: bool = False        # True → use calibrated _input_scale for input activation quant
 
     def __post_init__(self):
         # prescale_granularity only matters when transform='prescale'

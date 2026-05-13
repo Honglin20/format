@@ -34,7 +34,7 @@ from src.scheme.granularity import GranularityMode
 from src.session._model import _get_quantized_modules
 
 
-def _precompute_scale(W: torch.Tensor, scheme) -> torch.Tensor | None:
+def _precompute_scale(W: torch.Tensor, scheme) -> Optional[torch.Tensor]:
     """Pre-compute the per-channel or per-tensor amax from the full weight.
 
     Returns the scale tensor that ``quantize(..., scale=result)`` expects,

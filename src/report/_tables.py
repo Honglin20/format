@@ -71,14 +71,8 @@ class StudyTablesAccessor:
     def error_source_analysis(self, role: str = "output") -> str:
         """Per-layer error source diagnosis: accumulated vs local QSNR.
 
-        For each config and matched layer, shows accumulated QSNR (hook
-        path), local QSNR (observer path), delta-QSNR
-        (drop from previous layer), headroom, and a diagnosis.
-
-        Diagnosis thresholds:
-          - headroom < 3 dB  → Source
-          - headroom 3-10 dB → Mixed
-          - headroom > 10 dB → Propagated
+        Delegates to :meth:`SessionTablesAccessor.error_source_analysis`
+        for each config, concatenating the per-config tables.
 
         Args:
             role: Tensor role to analyse (default ``"output"``).
@@ -86,15 +80,16 @@ class StudyTablesAccessor:
         Returns:
             Formatted text table.
         """
-        data: dict = {}
+        from src.report._session_tables import SessionTablesAccessor
+
+        blocks: list[str] = []
         for part_results in self._report._results.values():
             for r in part_results:
-                cfg_name = r.name or "(unnamed)"
-                corr = r.correlate_hook_observer(role=role)
-                if corr:
-                    data[cfg_name] = corr
+                block = SessionTablesAccessor(r).error_source_analysis(role=role)
+                if block and not block.startswith("No "):
+                    blocks.append(block)
 
-        if not data:
+        if not blocks:
             return (
                 "No error propagation data available.\n"
                 "Requires QSNRObserver active (included in default outputs)\n"
@@ -102,98 +97,7 @@ class StudyTablesAccessor:
                 "session.run(calib_data, outputs=['qsnr'])"
             )
 
-        lines: list[str] = []
-        for cfg_name, info in data.items():
-            matched = info["matched"]
-            if not matched:
-                lines.append(
-                    f"\n  {cfg_name}: no matched hook/observer layers — "
-                    "skipping"
-                )
-                continue
-
-            lines.append(f"\n{'=' * 105}")
-            lines.append(
-                f"  Error Source Analysis — {cfg_name} [{role}]"
-            )
-            lines.append(f"{'=' * 105}")
-
-            hdr = (
-                f"{'Layer':<28} "
-                f"{'Accum QSNR':>12} {'Local QSNR':>12} "
-                f"{'Delta':>10} {'Headroom':>10}  Diagnosis"
-            )
-            lines.append(hdr)
-            lines.append("-" * len(hdr))
-
-            prev_acc = None
-            sources = propagated = mixed = 0
-            for hook_key, acc_qsnr, loc_qsnr in matched:
-                delta = (
-                    prev_acc - acc_qsnr if prev_acc is not None else 0.0
-                )
-                headroom = loc_qsnr - acc_qsnr
-                prev_acc = acc_qsnr
-
-                if headroom < 3.0:
-                    diagnosis = "Source"
-                    sources += 1
-                elif headroom < 10.0:
-                    diagnosis = "Mixed"
-                    mixed += 1
-                else:
-                    diagnosis = "Propagated"
-                    propagated += 1
-
-                short = hook_key.replace("module.", "").replace(
-                    "Quantized", ""
-                )[:28]
-                lines.append(
-                    f"{short:<28} "
-                    f"{acc_qsnr:>12.2f} {loc_qsnr:>12.2f} "
-                    f"{delta:>+10.2f} {headroom:>+10.2f}  {diagnosis}"
-                )
-
-            # Summary line
-            if len(matched) >= 2:
-                total_drop = matched[0][1] - matched[-1][1]
-                headrooms = [l - a for _, a, l in matched]
-                avg_headroom = sum(headrooms) / len(headrooms)
-                lines.append("-" * len(hdr))
-                lines.append(
-                    f"{'Summary:':<28} "
-                    f"{'':>12} {'':>12} "
-                    f"drop={total_drop:>+.1f} "
-                    f"avg_headroom={avg_headroom:>+.1f}  "
-                    f"{sources} source, {mixed} mixed, "
-                    f"{propagated} propagated"
-                )
-
-            # Observer-only layers
-            obs_only = info["observer_only"]
-            if obs_only:
-                lines.append(
-                    f"\n  Observer-only (no hook data):"
-                )
-                for obs_key, loc_qsnr in obs_only:
-                    short = obs_key[:36]
-                    lines.append(
-                        f"    {short:<36} local={loc_qsnr:.2f} dB"
-                    )
-
-            # Hook-only layers
-            hook_only = info["hook_only"]
-            if hook_only:
-                lines.append(
-                    f"\n  Hook-only (no observer data):"
-                )
-                for hk, acc_qsnr in hook_only:
-                    short = hk[:36]
-                    lines.append(
-                        f"    {short:<36} accum={acc_qsnr:.2f} dB"
-                    )
-
-        return "\n".join(lines) if lines else "No data."
+        return "\n".join(blocks)
 
     # ── CSV helpers ─────────────────────────────────────────────────────
 

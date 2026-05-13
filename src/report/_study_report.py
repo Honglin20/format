@@ -250,10 +250,10 @@ class StudyReport:
         metric_cols = sorted(metric_cols, key=_col_sort_key)
         return df[leading + metric_cols]
 
-    # ── print_summary ───────────────────────────────────────────────────
+    # ── summary ──────────────────────────────────────────────────────────
 
-    def print_summary(self, qsnr_type: str = "local"):
-        """Print a unified comparison table across all parts.
+    def summary(self, qsnr_type: str = "local") -> str:
+        """Return a unified comparison table across all parts as a string.
 
         All configs from all parts appear in a single table with FP32
         baseline, quantized metrics, deltas, and average QSNR/MSE.
@@ -263,6 +263,9 @@ class StudyReport:
         Args:
             qsnr_type: ``"local"`` (default) reads per-op observer QSNR.
                 ``"accum"`` reads end-to-end accumulated hook QSNR.
+
+        Returns:
+            Formatted table string.
         """
         label = "Accum QSNR" if qsnr_type == "accum" else "Avg QSNR"
         df = self.summary_dataframe(qsnr_type=qsnr_type)
@@ -274,24 +277,36 @@ class StudyReport:
                     all_results.append((part_name, r))
 
             if not all_results:
-                return
+                return ""
 
-            hdr = f"{'Part':<20} {'Config':<24} {label:<12} {'Avg MSE':<12}"
-            print(hdr)
-            print("-" * len(hdr))
+            lines = [f"{'Part':<20} {'Config':<24} {label:<12} {'Avg MSE':<12}"]
+            lines.append("-" * len(lines[0]))
             for part_name, r in all_results:
                 avg_qsnr, avg_mse = self._avg_qsnr_mse(r, qsnr_type=qsnr_type)
-                print(
+                lines.append(
                     f"{part_name:<20} {r.name:<24} "
                     f"{avg_qsnr:<12.2f} {avg_mse:<12.6f}"
                 )
-            return
+            return "\n".join(lines)
 
         if df.empty:
-            return
+            return ""
 
-        # Suppress pandas index for cleaner display
-        print(df.to_string(index=False))
+        return df.to_string(index=False)
+
+    def print_summary(self, qsnr_type: str = "local"):
+        """Deprecated: use :meth:`summary` instead.
+
+        Prints the summary table. Kept for backward compatibility.
+        """
+        import warnings
+        warnings.warn(
+            "print_summary() is deprecated, use summary() instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        text = self.summary(qsnr_type=qsnr_type)
+        if text:
+            print(text)
 
     # ── to_serializable ─────────────────────────────────────────────────
 

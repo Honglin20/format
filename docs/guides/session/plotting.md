@@ -1,5 +1,7 @@
 # 绘图 & 可视化
 
+> 第 5 章 · [Session 文档索引](INDEX.md)
+
 通过 `Study` 对比多个配置时，`StudyReport.plot` 提供 10 种内置图表。所有方法返回 `matplotlib.Figure`，可 `plt.show()` 或 `fig.savefig()`。
 
 ## 基础用法
@@ -17,7 +19,30 @@ configs = [
 report = Study(configs, model=model).run(calib_data, eval_fn=eval_fn)
 ```
 
-## 一键保存
+## 单结果模式
+
+`SessionResult` 也支持 `plot` 和 `save()`，无需创建 Study：
+
+```python
+result = Session(model, cfg).run(calib_data, eval_fn=eval_fn)
+
+# 可视化
+result.plot.qsnr_comparison()         # 逐层 QSNR 柱状图
+result.plot.error_propagation()       # 累积 vs 本地误差传播面板
+result.plot.accumulated_vs_local()    # 散点图
+result.plot.crest_vs_qsnr()           # crest factor vs QSNR
+result.plot.outlier_analysis()        # outlier 分析
+result.plot.correlation_heatmap()     # 分布特征 × 误差相关矩阵
+result.plot.role_distribution_comparison()  # role 分布对比
+result.plot.per_layer_role_histogram(k=5)   # 最差 k 层直方图
+
+# 保存
+result.save("results/my_config/")
+```
+
+单结果模式不含 `pareto_frontier()` — 需要多配置对比才有 trade-off 曲线。
+
+## 一键保存（Study 模式）
 
 ```python
 report.save("results/")
@@ -281,3 +306,6 @@ from src.report import StudyReport
 report = StudyReport.from_file("results/")
 # 可以继续调用 report.plot.* 方法（但 observer 数据从 results.json 恢复不全）
 ```
+
+---
+← [上一章：结果查看](result.md) | [Session 文档索引](INDEX.md) | [下一章：误差分析](analysis.md) →

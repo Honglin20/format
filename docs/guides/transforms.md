@@ -1,5 +1,7 @@
 # Transform
 
+> 这是参考手册。快速上手请阅读 [Session 精度优化方法](session/optimization.md)。
+
 Transform 在量化前/后对数据做预处理，主要用于处理 outlier 降低量化误差。
 
 ## 五种 Transform
@@ -89,7 +91,7 @@ fig = smoothquant_distrib_comparison(result.sq_distrib_comparison, k=5,
                                      output_dir="./output")
 ```
 
-见 [绘图 & 可视化](plotting.md)。
+见 [绘图 & 可视化](session/plotting.md)。
 
 ## Prescale + LSQ
 

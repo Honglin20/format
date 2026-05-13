@@ -1,5 +1,7 @@
 # 误差分析
 
+> 第 6 章 · [Session 文档索引](INDEX.md)
+
 Session 内置 5 种 Observer，在 `analyze()` 阶段自动挂载，记录每层每个 tensor 角色的量化误差。
 
 ## Observer 类型
@@ -246,7 +248,7 @@ report = ctx.report()
 
 ## 分布分析与误差关联
 
-拿到 observer 数据后，可以对分布指纹做聚合分析。单结果模式通过 `result.report()` 获取 `AnalysisReport`，独立模式通过 `ctx.report()`：
+拿到 observer 数据后，可以对分布指纹做聚合分析。单结果模式通过 `result.report` 获取 `AnalysisReport`，独立模式通过 `ctx.report()`：
 
 ```python
 from src.analysis.correlation import (
@@ -257,7 +259,7 @@ from src.analysis.correlation import (
 )
 
 # SessionResult 模式（推荐）
-report = result.report()
+report = result.report
 
 # 独立 AnalysisContext 模式
 # report = ctx.report()
@@ -296,12 +298,15 @@ for layer, role, mse in sens.topk(k=5, metric="mse"):
 result = Session(model, cfg).run(calib_data, outputs=["distribution", "fit"])
 
 # 分类结果
-result.report().taxonomy.classify()
+result.report.taxonomy.classify()
 # {"norm": {"count": 12, ...}, "heavy-tailed": {"count": 3, ...}, ...}
 
 # 打印分类报告
-result.report().taxonomy.print()
+result.report.taxonomy.print()
 
 # 获取某类的代表层
-result.report().taxonomy.exemplars("heavy-tailed", n=3)
+result.report.taxonomy.exemplars("heavy-tailed", n=3)
 ```
+
+---
+← [上一章：可视化](plotting.md) | [Session 文档索引](INDEX.md) | [下一章：Study 多配置对比](study.md) →
