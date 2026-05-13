@@ -381,13 +381,13 @@ transformer.transformer.layers.0.transformer.layers.0.self_attn.linear input: 4b
 
 ```python
 print(planner.recommend(strategy="conservative").explain())
-# → 6 layers: 基于 QSNR 阈值自动选取最差的 6 层 input role 提升至 8-bit
+# → 5 layers: 基于 QSNR 阈值从 boostable roles（input/weight）中选取 5 层提升至 8-bit
 
 print(planner.recommend(strategy="aggressive").explain())
 # → 11 layers: 所有层的 worst boostable role 全部提升
 ```
 
-- **Conservative**：QSNR 分布下 15% 阈值（6 层），最小修改量。
+- **Conservative**：QSNR 分布下 15% 阈值（5 层，仅 boostable roles），最小修改量。
 - **Aggressive**：QSNR 分布下 35% 阈值（11 层），追求最大精度恢复但存储开销大。
 
 ### 3.3 不可提升 Role 的处理
@@ -398,7 +398,7 @@ print(plan_out.explain())
 ```
 
 ```
-(Empty plan — no overrides.)
+(Empty plan — Role 'output' cannot be boosted — no scheme in base config (boostable: ['input', 'weight']))
   (output role has no scheme in OpQuantConfig → no-override plan)
 ```
 

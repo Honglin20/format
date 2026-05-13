@@ -41,7 +41,8 @@ class InterventionPlan:
             Formatted text showing layer, what was changed, and why.
         """
         if not self.overrides:
-            return "(Empty plan — no overrides.)"
+            desc = self.metadata.get("description", "no overrides")
+            return f"(Empty plan — {desc})"
 
         lines = [
             f"Intervention Plan: {self.metadata.get('description', '(unnamed)')}",
@@ -115,11 +116,26 @@ class InterventionPlanner:
 
         # Determine which roles are boostable (have non-None schemes in base cfg)
         base_cfg = self._result.config.to_op_config() if self._result.config else None
-        boostable_roles = set()
+        boostable_roles: set = set()
         if base_cfg is not None:
             for r in _DIAG_ROLES:
                 if getattr(base_cfg, r, None) is not None:
                     boostable_roles.add(r)
+
+        # Explicitly requested a non-boostable role → return early with explanation.
+        if role != "auto" and role not in boostable_roles:
+            return InterventionPlan(
+                metadata={
+                    "description": (
+                        f"Role '{role}' cannot be boosted — "
+                        f"no scheme in base config (boostable: {sorted(boostable_roles)})"
+                    ),
+                    "strategy": "top_k_boost",
+                    "k": k,
+                    "role": role,
+                    "target_bits": target_bits,
+                },
+            )
 
         # Build candidate list: (layer, role, qsnr)
         # Skip roles that can't be boosted (None scheme in base config).
@@ -132,7 +148,7 @@ class InterventionPlanner:
                     candidates.append((layer, r, qsnr))
 
         if role == "auto":
-            # Keep only the worst role per layer
+            # Keep only the worst (boostable) role per layer
             best_per_layer: dict = {}
             for layer, r, qsnr in candidates:
                 if layer not in best_per_layer or qsnr < best_per_layer[layer][1]:
@@ -256,22 +272,34 @@ class InterventionPlanner:
                 metadata={"description": "No QSNR data — empty plan"},
             )
 
-        # Determine threshold and k based on strategy
+        # Determine boostable roles — threshold and k must be computed from
+        # the same subset that top_k_boost actually operates on.
+        base_cfg = self._result.config.to_op_config() if self._result.config else None
+        boostable_roles: set = set()
+        if base_cfg is not None:
+            for r in _DIAG_ROLES:
+                if getattr(base_cfg, r, None) is not None:
+                    boostable_roles.add(r)
+        role_subset = tuple(boostable_roles) if boostable_roles else _DIAG_ROLES
+
+        # Collect QSNR only from boostable roles
         all_qsnr = []
-        for role in _DIAG_ROLES:
+        for role in role_subset:
             for v in qsnr_by_role.get(role, {}).values():
                 if v is not None and v == v and v != float("-inf"):
                     all_qsnr.append(v)
 
         if not all_qsnr:
             return InterventionPlan(
-                metadata={"description": "No valid QSNR data"},
+                metadata={"description": "No valid QSNR data in boostable roles"},
             )
 
         all_qsnr.sort()
 
-        # Count unique layers (per-role values may be 3x layer count)
-        n_layers = len(set().union(*(m.keys() for m in qsnr_by_role.values()))) if qsnr_by_role else 0
+        # Count unique layers that have a boostable role
+        n_layers = len(
+            set().union(*(qsnr_by_role.get(r, {}).keys() for r in role_subset))
+        )
 
         if strategy == "conservative":
             threshold = all_qsnr[0] + (all_qsnr[-1] - all_qsnr[0]) * 0.15
