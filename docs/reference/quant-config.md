@@ -30,6 +30,7 @@
 | `weight_only` | `bool` | `False` | 仅量化权重 |
 | `quantize_nonlinear` | `bool` | `True` | False = 非线性算子保持 fp32 |
 | `static_input_scale` | `bool` | `False` | True = 用校准期计算的 input_scale 做激活量化（推理时 scale 固定不变，而非每 batch 动态计算） |
+| `outlier_ratio` | `float` | `0.0` | Sparse outlier 比例，∈ [0, 1]。>0 时将 top-k 离群点分离到独立 scale 组，适用于 per_tensor / per_channel / per_block |
 
 ## 精度优化字段
 

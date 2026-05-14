@@ -102,6 +102,7 @@ result = Session(model, cfg).run(calib_data, eval_fn=eval_fn)
 | `storage_format` | `None` | 逐元素存储格式，如 `"bfloat16"`、`"fp8_e4m3"` |
 | `sq_alpha` | `0.5` | SmoothQuant 平滑强度（0=激活侧重，1=权重侧重） |
 | `static_input_scale` | `False` | True = 用校准期计算的 `_input_scale` 做激活量化，推理时 scale 固定不变（而非每 batch 动态计算） |
+| `outlier_ratio` | `0.0` | Sparse outlier 比例，∈ [0, 1]。将 top-k 离群点分离到独立 scale 组 |
 
 精度优化相关字段（LSQ、GPTQ、Prescale）见 [第 3 章 · 精度优化方法](optimization.md)。
 

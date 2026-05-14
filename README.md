@@ -2,7 +2,7 @@
 
 基于 [microsoft/microxcaling](https://github.com/microsoft/microxcaling) 的增量式重建。将量化拆为**格式 × 粒度 × 变换**三个正交轴，一个 `QuantConfig` 控制一切。
 
-全算子覆盖（Linear/Conv/Norm/Activation/Softmax/Pool）· MX per-block 位精确等价 · 4 种校准策略 · 5 种 Transform · LSQ · ONNX 导出 · 误差分析 · 性能估算
+全算子覆盖（Linear/Conv/Norm/Activation/Softmax/Pool）· MX per-block 位精确等价 · Sparse outlier 隔离 · 4 种校准策略 · 5 种 Transform · LSQ · ONNX 导出 · 误差分析 · 性能估算
 
 ## 安装
 
@@ -75,6 +75,7 @@ report.print_summary(qsnr_type="accum")   # 切换为端到端累积 QSNR
 |------|------|
 | [格式选择](docs/guides/formats.md) | int8/fp8/nf4 等格式对比 & 自定义格式注册 |
 | [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block |
+| [Sparse Outlier](docs/guides/sparse-outlier.md) | 离群点隔离量化 — 原理、效果与 ratio 选择 |
 | [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive |
 | [校准策略](docs/guides/calibration.md) | mse / max / percentile / kl |
 

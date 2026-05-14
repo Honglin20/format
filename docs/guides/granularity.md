@@ -32,14 +32,23 @@ MX per_block 格式的 scale（shared exponent）在推理时动态计算，因�
 
 可通过 `w_axis` / `a_axis` 控制量化轴（默认 -1，即最后一维）。
 
-## Outlier Bank
+## Sparse Outlier 隔离
 
-`GranularitySpec` 支持 `outlier_ratio` 参数（∈ [0, 1]），将 block 内的 outlier 拆分单独量化：
+`outlier_ratio`（∈ [0, 1]）将每组内 top-k 离群点分离到独立 scale 组，三种粒度均支持：
 
 ```python
-# 内部由 GranularitySpec 控制，由 QuantConfig 暴露时通过特定需求使用
-from src.scheme.granularity import GranularitySpec
-
-spec = GranularitySpec.per_block(size=32)
-# outlier_ratio=0.05: 将 5% 的最大值作为 outlier 单独处理
+# 通过 QuantConfig 设置，所有粒度模式均可用
+cfg = QuantConfig(w_format="int8", outlier_ratio=0.05)          # per_tensor + sparse
+cfg = QuantConfig(w_format="int4", w_granularity="per_channel",
+                  outlier_ratio=0.02)                            # per_channel + sparse
+cfg = QuantConfig(w_format="fp4_e2m1", w_granularity="per_block",
+                  w_block_size=32, outlier_ratio=0.05)           # per_block + sparse
 ```
+
+| 模式 | 无 sparse | outlier_ratio=0.05 |
+|------|----------|-------------------|
+| per_tensor | 1 个 amax | 2 个 amax（outlier + normal） |
+| per_channel | C 个 amax | 2C 个 amax |
+| per_block | 每 block 1 个 shared exp | 每 block 2 个 shared exp |
+
+> 详见 [ADR-011: Sparse 泛化](../../architecture/011-sparse-generalization.md)
