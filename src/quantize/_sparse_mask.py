@@ -132,14 +132,38 @@ def _mask_per_block(x: torch.Tensor, granularity: GranularitySpec,
     axes = [a + x.ndim if a < 0 else a for a in axes]
     from src.formats._block_utils import _reshape_to_blocks, _undo_reshape_to_blocks
     A, axes, orig_shape, padded_shape = _reshape_to_blocks(x, axes, block_size)
-    block_dim = axes[-1] + 1  # inner block dimension
-    k = max(1, int(block_size * outlier_ratio))
-    if k >= block_size:
-        mask = torch.ones_like(A, dtype=torch.bool)
-        return _undo_reshape_to_blocks(mask, padded_shape, orig_shape, axes)
-    _, top_indices = torch.topk(torch.abs(A), k, dim=block_dim)
-    mask = torch.zeros_like(A, dtype=torch.bool)
-    mask.scatter_(block_dim, top_indices, True)
+
+    # Permute block-group dims (at sorted `axes`) to front so all elements
+    # within a block tile compete for the k outlier positions.  This matches
+    # the ADR spec: "each granularity group internally takes top-k."
+    ndim = A.ndim
+    block_group_dims = sorted(axes)
+    other_dims = [i for i in range(ndim) if i not in block_group_dims]
+    perm = block_group_dims + other_dims
+    A_p = A.permute(perm)
+
+    num_blocks_total = 1
+    for i in range(len(block_group_dims)):
+        num_blocks_total *= A_p.shape[i]
+    group_size = A_p.reshape(num_blocks_total, -1).shape[1]
+    k = max(1, int(group_size * outlier_ratio))
+
+    if k >= group_size:
+        mask_p = torch.ones_like(A_p, dtype=torch.bool)
+    else:
+        A_flat = A_p.reshape(num_blocks_total, group_size)
+        _, top_indices = torch.topk(torch.abs(A_flat), k, dim=1)
+        mask_flat = torch.zeros(num_blocks_total, group_size, dtype=torch.bool,
+                                device=x.device)
+        mask_flat.scatter_(1, top_indices, True)
+        mask_p = mask_flat.reshape(A_p.shape)
+
+    # Undo permutation
+    inv_perm = [0] * ndim
+    for i, p in enumerate(perm):
+        inv_perm[p] = i
+    mask = mask_p.permute(inv_perm).contiguous()
+
     return _undo_reshape_to_blocks(mask, padded_shape, orig_shape, axes)
 
 

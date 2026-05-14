@@ -159,9 +159,11 @@ class FormatBase(ABC):
                                               scale=scale, scale_storage=scale_storage)
         elif mode == GranularityMode.PER_BLOCK:
             if granularity.outlier_ratio > 0.0 and mask is not None:
-                return self._quantize_static_sparse(
-                    x, mask, scale, scale_o, round_mode, allow_denorm,
-                    scale_storage, outlier_format=outlier_format)
+                raise NotImplementedError(
+                    "PER_BLOCK static sparse is not yet implemented. "
+                    "Use dynamic sparse (mask=None) or per_tensor/per_channel/bank "
+                    "granularity for static sparse."
+                )
             return self._quantize_per_block(x, granularity, round_mode,
                                               scale=scale, scale_storage=scale_storage)
         elif mode == GranularityMode.BANK:
@@ -467,6 +469,11 @@ class FormatBase(ABC):
         axis = granularity.bank_axis
         if axis < 0:
             axis = x.ndim + axis
+        if not (0 <= axis < x.ndim):
+            raise ValueError(
+                f"bank_axis={granularity.bank_axis} out of range "
+                f"for tensor with ndim={x.ndim}"
+            )
         bank_size = granularity.bank_size
         N_along = x.shape[axis]
         if N_along % bank_size != 0:
@@ -490,10 +497,18 @@ class FormatBase(ABC):
         # Scalars (ndim==0) broadcast naturally — skip reshape.
         target_shape = [1] * x_r.ndim
         target_shape[axis] = num_banks
-        if amax_n.ndim > 0 and (amax_n.ndim != x_r.ndim or amax_n.shape != torch.Size(target_shape)):
-            amax_n = amax_n.reshape(target_shape)
-        if amax_o.ndim > 0 and (amax_o.ndim != x_r.ndim or amax_o.shape != torch.Size(target_shape)):
-            amax_o = amax_o.reshape(target_shape)
+        for name, t in [("amax_n", amax_n), ("amax_o", amax_o)]:
+            if t.ndim > 0 and t.numel() != num_banks:
+                raise ValueError(
+                    f"{name} has {t.numel()} elements but {num_banks} banks "
+                    f"are expected. Shape {tuple(t.shape)} cannot be reshaped "
+                    f"to target {tuple(target_shape)}."
+                )
+            if t.ndim > 0 and (t.ndim != x_r.ndim or t.shape != torch.Size(target_shape)):
+                if name == "amax_n":
+                    amax_n = amax_n.reshape(target_shape)
+                else:
+                    amax_o = amax_o.reshape(target_shape)
 
         result = self._quantize_static_sparse(
             x_r, mask_r, amax_n, amax_o, round_mode,

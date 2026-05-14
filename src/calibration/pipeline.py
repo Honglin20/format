@@ -27,7 +27,7 @@ class CalibrationSession:
     """Context manager for activation-scale calibration.
 
     Args:
-        model: PyTorch model (typically the quantized model from _QuantSession).
+        model: PyTorch model (typically the quantized model from quantize_model()).
         strategy: ``ScaleStrategy`` instance used to compute final scales.
         axis: Dimension along which per-slice statistics are tracked.
         assign: If True (default), scales are auto-assigned as module
@@ -235,7 +235,8 @@ class CalibrationSession:
             # Compute amax with shape determined by output granularity.
             # PER_TENSOR: scalar. PER_CHANNEL: (C,) — reduce all dims
             # except channel_axis so each channel has its own scale.
-            mode, channel_axis = self._output_granularity(module)
+            # BANK: reshape to expose bank dim, reduce all except bank dim.
+            mode, channel_axis, gran = self._output_granularity(module)
             if mode == GranularityMode.PER_TENSOR:
                 amax = torch.amax(torch.abs(x))
             elif mode == GranularityMode.PER_CHANNEL:
@@ -244,6 +245,8 @@ class CalibrationSession:
                 amax = torch.amax(
                     torch.abs(x), dim=tuple(dims_to_reduce), keepdim=True,
                 )
+            elif mode == GranularityMode.BANK and gran is not None:
+                amax = self._compute_bank_amax(x, gran)
             else:
                 # PER_BLOCK / DYNAMIC_GROUP: per-element or caller-driven
                 amax = torch.amax(torch.abs(x), dim=self.axis, keepdim=True)
@@ -258,7 +261,7 @@ class CalibrationSession:
             # Track input amax when static_input_scale is requested
             if self._track_input and _input and isinstance(_input[0], torch.Tensor):
                 inp = _input[0].detach()
-                imode, ich_axis = self._input_granularity(module)
+                imode, ich_axis, igran = self._input_granularity(module)
                 if imode is not None:
                     if imode == GranularityMode.PER_TENSOR:
                         inp_amax = torch.amax(torch.abs(inp))
@@ -268,6 +271,8 @@ class CalibrationSession:
                         inp_amax = torch.amax(
                             torch.abs(inp), dim=tuple(dims), keepdim=True,
                         )
+                    elif imode == GranularityMode.BANK and igran is not None:
+                        inp_amax = self._compute_bank_amax(inp, igran)
                     else:
                         inp_amax = torch.amax(torch.abs(inp), dim=self.axis, keepdim=True)
 
@@ -281,28 +286,65 @@ class CalibrationSession:
 
     @staticmethod
     def _output_granularity(module):
-        """Return (mode, channel_axis) for the module's output quant scheme."""
+        """Return (mode, channel_axis, granularity) for the module's output quant scheme."""
         if hasattr(module, "cfg") and module.cfg.output is not None:
             g = module.cfg.output.granularity
-            return g.mode, g.channel_axis
-        return GranularityMode.PER_TENSOR, 0
+            return g.mode, g.channel_axis, g
+        return GranularityMode.PER_TENSOR, 0, None
 
     @staticmethod
     def _input_granularity(module):
-        """Return (mode, channel_axis) for the module's input quant scheme.
+        """Return (mode, channel_axis, granularity) for the module's input quant scheme.
 
-        Returns (None, 0) when input scheme is absent or uses a mode
+        Returns (None, 0, None) when input scheme is absent or uses a mode
         where static scale is not applicable (per_block MX, float formats).
         """
         if not hasattr(module, "cfg") or module.cfg.input is None:
-            return None, 0
+            return None, 0, None
         s = module.cfg.input
         g = s.granularity
         if g.mode == GranularityMode.PER_BLOCK:
-            return None, 0
+            return None, 0, None
         if s.format.ebits > 0:
-            return None, 0
-        return g.mode, g.channel_axis
+            return None, 0, None
+        return g.mode, g.channel_axis, g
+
+    @staticmethod
+    def _compute_bank_amax(x: torch.Tensor, gran) -> torch.Tensor:
+        """Compute per-bank amax with shape broadcastable with the reshaped tensor.
+
+        Reshapes x to expose the bank dimension, then reduces all dims
+        except the bank dim.  The result has the same shape as the
+        intermediate reshaped tensor inside _quantize_per_bank, with
+        size 1 on all non-bank dims.
+        """
+        import warnings
+        axis = gran.bank_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        if not (0 <= axis < x.ndim):
+            raise ValueError(
+                f"bank_axis={gran.bank_axis} out of range "
+                f"for tensor with ndim={x.ndim}"
+            )
+        bank_size = gran.bank_size
+        N_along = x.shape[axis]
+        if N_along % bank_size != 0:
+            warnings.warn(
+                f"Dimension {axis} size {N_along} not divisible by "
+                f"bank_size {bank_size}. Falling back to scalar amax. "
+                f"This calibration scale will not match _quantize_per_bank "
+                f"which requires divisibility.",
+                stacklevel=2,
+            )
+            return torch.amax(torch.abs(x))
+        num_banks = N_along // bank_size
+        new_shape = list(x.shape)
+        new_shape[axis] = num_banks
+        new_shape.insert(axis + 1, bank_size)
+        x_r = x.reshape(new_shape)
+        dims_to_reduce = [i for i in range(x_r.ndim) if i != axis]
+        return torch.amax(torch.abs(x_r), dim=tuple(dims_to_reduce), keepdim=True)
 
 
 # ------------------------------------------------------------------

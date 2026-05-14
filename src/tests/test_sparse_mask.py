@@ -218,3 +218,39 @@ class TestSparseMaskEdgeCases:
         g = GranularitySpec(mode=GranularityMode.PER_TENSOR)
         with pytest.raises(ValueError, match="batch dim"):
             compute_sparse_mask(x_calib, _FMT, g, outlier_ratio=0.1)
+
+    def test_per_block_full_group_competition(self):
+        """PER_BLOCK: all rows within a block compete for the k outlier spots.
+
+        With 4 rows and block_size=2, a block tile has 8 elements.
+        If one row has a dominant element, it should claim more outlier
+        spots than a row with uniformly small values.
+        """
+        from src.quantize._sparse_mask import compute_sparse_mask
+
+        # 4 identical samples, 4x4 tensor, block_axis=-1, block_size=2
+        # Each block is a 4×2 tile (8 elements per block, 2 blocks total)
+        # Block 0 (cols 0-1): row 0 has values [100, 0], rows 1-3 have [0.1, 0.1]
+        #   → row 0 should dominate top-k for block 0
+        single = [
+            [100.0, 0.0, 1.0, 1.0],   # row 0: dominant in block 0
+            [0.1, 0.1, 1.0, 1.0],     # row 1: small values in block 0
+            [0.1, 0.1, 1.0, 1.0],     # row 2: small values in block 0
+            [0.1, 0.1, 1.0, 1.0],     # row 3: small values in block 0
+        ]
+        x_calib = torch.tensor([single, single, single])
+        g = GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=2,
+                            block_axis=-1)
+        mask = compute_sparse_mask(x_calib, _FMT, g, outlier_ratio=0.25)
+
+        # Block 0 (cols 0-1): group_size=8, k=2. Row 0's 100.0 is clearly top.
+        # Position (0,0) with value 100.0 must be an outlier.
+        assert mask[0, 0].item() is True
+
+        # Block 1 (cols 2-3): all values are 1.0 (all rows tie).
+        # With group_size=8, k=2. Positions are determined by tie-breaking.
+
+        # Verify shape and total outlier count
+        assert mask.shape == (4, 4)
+        # 2 blocks × k=2 per block = 4 outliers
+        assert mask.sum().item() == 4
