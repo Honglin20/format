@@ -195,3 +195,41 @@ class TestBankEdgeCases:
 
         assert torch.equal(result_pt, result_bank), \
             "BANK covering full axis should match per_tensor"
+
+
+class TestBankQuantConfig:
+    """QuantConfig → OpQuantConfig resolution for BANK mode."""
+
+    def test_quantconfig_bank_resolves(self):
+        """QuantConfig with bank granularity produces BANK GranularitySpec."""
+        from src.session._config import QuantConfig
+
+        cfg = QuantConfig(
+            w_format="int8",
+            w_granularity="bank",
+            w_block_size=16,
+            w_axis=0,
+        )
+        op_cfg = cfg.to_op_config()
+        g = op_cfg.weight.granularity
+        assert g.mode == GranularityMode.BANK
+        assert g.bank_size == 16
+        assert g.bank_axis == 0
+
+    def test_quantconfig_bank_requires_size(self):
+        """BANK without block_size raises."""
+        from src.session._config import QuantConfig
+        with pytest.raises(ValueError, match="bank_size"):
+            QuantConfig(w_granularity="bank")
+
+    def test_quantconfig_bank_outlier_ratio(self):
+        """BANK + outlier_ratio stores correctly for future sparse."""
+        from src.session._config import QuantConfig
+        cfg = QuantConfig(
+            w_format="int8",
+            w_granularity="bank",
+            w_block_size=8,
+            outlier_ratio=0.1,
+        )
+        op_cfg = cfg.to_op_config()
+        assert op_cfg.weight.granularity.outlier_ratio == 0.1

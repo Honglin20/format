@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from src.formats.base import FormatBase
-from src.scheme.granularity import GranularitySpec
+from src.scheme.granularity import GranularityMode, GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.transform import IdentityTransform, TransformBase
 from src.transform.hadamard import HadamardTransform
 from src.transform.smooth_quant import SmoothQuantTransform
 
-_VALID_GRANULARITIES = frozenset({"per_tensor", "per_channel", "per_block"})
+_VALID_GRANULARITIES = frozenset({"per_tensor", "per_channel", "per_block", "bank"})
 _VALID_TRANSFORMS = frozenset({"none", "hadamard", "smoothquant", "prescale", "adaptive"})
 _VALID_CALIBRATORS = frozenset({"mse", "max", "percentile", "kl"})
 _VALID_SCALE_STORAGES = frozenset({"fp32", "pot"})
@@ -44,6 +44,15 @@ def _resolve_granularity(
         return GranularitySpec(mode=GranularitySpec.per_block(size=block_size, axis=axis).mode,
                                block_size=block_size, block_axis=axis,
                                outlier_ratio=outlier_ratio)
+    elif granularity == "bank":
+        if block_size is None:
+            raise ValueError("bank granularity requires bank_size (pass as block_size)")
+        return GranularitySpec(
+            mode=GranularityMode.BANK,
+            bank_size=block_size,
+            bank_axis=axis,
+            outlier_ratio=outlier_ratio,
+        )
     else:
         raise ValueError(f"Unknown granularity: {granularity}")
 
@@ -258,6 +267,14 @@ class QuantConfig:
             raise ValueError(
                 "a_block_size is required when a_granularity='per_block'"
             )
+        if self.w_granularity == "bank" and self.w_block_size is None:
+            raise ValueError(
+                "w_block_size is required when w_granularity='bank' (used as bank_size)"
+            )
+        if self.a_granularity == "bank" and self.a_block_size is None:
+            raise ValueError(
+                "a_block_size is required when a_granularity='bank' (used as bank_size)"
+            )
         if self.storage_bits < 0:
             raise ValueError(
                 f"storage_bits must be >= 0, got {self.storage_bits}"
@@ -464,9 +481,13 @@ class QuantConfig:
             a_format=act_format,
             w_granularity=gran or "per_tensor",
             a_granularity=gran or "per_tensor",
-            w_block_size=(w_gran.block_size
+            w_block_size=(w_gran.bank_size
+                          if w_gran.mode.name == "BANK" else
+                          w_gran.block_size
                           if w_gran.mode.name == "PER_BLOCK" else None),
-            a_block_size=(a_gran.block_size
+            a_block_size=(a_gran.bank_size
+                          if a_gran.mode.name == "BANK" else
+                          a_gran.block_size
                           if a_gran.mode.name == "PER_BLOCK" else None),
             w_axis=desc.get("w_axis", axis),
             a_axis=desc.get("a_axis", axis),
