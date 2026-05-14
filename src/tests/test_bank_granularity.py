@@ -119,3 +119,79 @@ class TestBankQuantizeBitExact:
                                  [8.0, 8.0]])
         assert torch.equal(result, expected), \
             f"BANK axis=0 mismatch:\n got {result}\n expected {expected}"
+
+
+class TestBankEdgeCases:
+    """Shape preservation, boundary, and error cases for BANK quantization."""
+
+    @pytest.mark.parametrize("shape,axis", [
+        ((4, 8), -1),
+        ((2, 3, 8), -1),
+        ((2, 4, 6, 8), 1),
+    ])
+    def test_shape_preserved(self, shape, axis):
+        """Output shape matches input for various ranks."""
+        torch.manual_seed(42)
+        x = torch.randn(*shape)
+        fmt = FormatBase.from_str("int8")
+        dim_size = shape[axis] if axis >= 0 else shape[axis]
+        g = GranularitySpec(mode=GranularityMode.BANK, bank_size=dim_size // 2, bank_axis=axis)
+        scheme = QuantScheme(format=fmt, granularity=g, scale_storage="pot")
+        result = quantize(x, scheme)
+        assert result.shape == x.shape
+
+    def test_non_divisible_raises(self):
+        """Dimension not divisible by bank_size raises."""
+        x = torch.randn(4, 7)
+        fmt = FormatBase.from_str("int8")
+        g = GranularitySpec(mode=GranularityMode.BANK, bank_size=3, bank_axis=-1)
+        scheme = QuantScheme(format=fmt, granularity=g, scale_storage="pot")
+        with pytest.raises(ValueError, match="not divisible"):
+            quantize(x, scheme)
+
+    def test_bank_axis_out_of_range_raises(self):
+        """bank_axis out of range raises."""
+        x = torch.randn(4, 8)
+        fmt = FormatBase.from_str("int8")
+        g = GranularitySpec(mode=GranularityMode.BANK, bank_size=2, bank_axis=5)
+        scheme = QuantScheme(format=fmt, granularity=g, scale_storage="pot")
+        with pytest.raises(ValueError, match="bank_axis"):
+            quantize(x, scheme)
+
+    def test_zero_input(self):
+        """Zero input → zero output."""
+        x = torch.zeros(4, 8)
+        fmt = FormatBase.from_str("int8")
+        g = GranularitySpec(mode=GranularityMode.BANK, bank_size=4, bank_axis=-1)
+        scheme = QuantScheme(format=fmt, granularity=g, scale_storage="pot")
+        result = quantize(x, scheme)
+        assert (result == 0).all()
+
+    def test_static_scale_smoke(self):
+        """Static scale with BANK produces finite output."""
+        x = torch.randn(2, 8)
+        fmt = FormatBase.from_str("int8")
+        g = GranularitySpec(mode=GranularityMode.BANK, bank_size=4, bank_axis=-1)
+        scheme = QuantScheme(format=fmt, granularity=g, scale_storage="pot")
+        # Pre-computed scale: 2 banks → shape (1, 2, 1) after reshape
+        scale = torch.tensor([[[2.0], [3.0]]])  # broadcastable
+        result = quantize(x, scheme, scale=scale)
+        assert result.shape == x.shape
+        assert torch.isfinite(result).all()
+
+    def test_per_tensor_vs_bank_full_tensor(self):
+        """BANK with bank_size covering entire axis = per_tensor behavior."""
+        torch.manual_seed(42)
+        x = torch.randn(4, 8)
+        fmt = FormatBase.from_str("int8")
+
+        g_pt = GranularitySpec.per_tensor()
+        scheme_pt = QuantScheme(format=fmt, granularity=g_pt, scale_storage="pot")
+        result_pt = quantize(x, scheme_pt)
+
+        g_bank = GranularitySpec(mode=GranularityMode.BANK, bank_size=8, bank_axis=-1)
+        scheme_bank = QuantScheme(format=fmt, granularity=g_bank, scale_storage="pot")
+        result_bank = quantize(x, scheme_bank)
+
+        assert torch.equal(result_pt, result_bank), \
+            "BANK covering full axis should match per_tensor"
