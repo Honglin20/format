@@ -397,9 +397,86 @@ def main() -> None:
         print(f"| ... and {len(rows) - 20} more rows |")
 
     # ------------------------------------------------------------------
-    # Part 3: Weight-only NF4 + FP8 evaluation
+    # Part 3: MXFP / NF4 Format Comparison
     # ------------------------------------------------------------------
-    print("\n[Part 3] Weight-only NF4 + FP8 — TBD")
+    print("\n" + "=" * 60)
+    print("  Part 3: MXFP / NF4 Cross-Format Comparison")
+    print("=" * 60)
+
+    xfmt_configs = [
+        QuantConfig(
+            name="MXINT-4",
+            w_format="int4", a_format="int4",
+            w_granularity="per_block", a_granularity="per_block",
+            w_block_size=32, a_block_size=32,
+            quantize_nonlinear=False,
+        ),
+        QuantConfig(
+            name="MXFP-4",
+            w_format="fp4_e2m1", a_format="fp4_e2m1",
+            w_granularity="per_block", a_granularity="per_block",
+            w_block_size=32, a_block_size=32,
+            quantize_nonlinear=False,
+        ),
+        QuantConfig(
+            name="NF4-W",
+            w_format="nf4",
+            w_granularity="per_channel",
+            weight_only=True,
+            quantize_nonlinear=False,
+            scale_storage="fp32",
+        ),
+        QuantConfig(
+            name="NF4-WA",
+            w_format="nf4", a_format="nf4",
+            w_granularity="per_channel", a_granularity="per_channel",
+            weight_only=False,
+            quantize_nonlinear=False,
+            scale_storage="fp32",
+        ),
+        QuantConfig(
+            name="MXFP-8",
+            w_format="fp8_e4m3", a_format="fp8_e4m3",
+            w_granularity="per_block", a_granularity="per_block",
+            w_block_size=32, a_block_size=32,
+            quantize_nonlinear=False,
+        ),
+    ]
+
+    study_xfmt = Study(xfmt_configs, model=model)
+    report_xfmt = study_xfmt.run(
+        calib_data,
+        eval_data=val_loader,
+        eval_fn=eval_fn,
+        outputs="default",
+    )
+
+    print("\n--- Summary (local QSNR) ---")
+    print(report_xfmt.summary())
+
+    print("\n--- Summary (accum QSNR) ---")
+    print(report_xfmt.summary(qsnr_type="accum"))
+
+    # --- Markdown table ---
+    df_xfmt_local = report_xfmt.summary_dataframe(qsnr_type="local")
+    df_xfmt_accum = report_xfmt.summary_dataframe(qsnr_type="accum")
+
+    print("\n--- MXFP / NF4 Comparison Table ---")
+    print()
+    print(f"| Format | PPL | ΔPPL | QSNR (local) | QSNR (accum) |")
+    print(f"|--------|-----|------|--------------|---------------|")
+    print(f"| FP32 baseline | {fp32_ppl:.4f} | — | — | — |")
+
+    if df_xfmt_local is not None and df_xfmt_accum is not None:
+        merged = df_xfmt_local.merge(
+            df_xfmt_accum[["config", "avg_qsnr_db"]],
+            on="config", suffixes=("", "_accum")
+        )
+        for _, row in merged.iterrows():
+            print(f"| {row['config']:<12} | {row['quant_perplexity']:.4f} | "
+                  f"{row['delta_perplexity']:+.4f} | "
+                  f"{row['avg_qsnr_db']:.2f} dB | "
+                  f"{row['avg_qsnr_db_accum']:.2f} dB |")
 
     # ------------------------------------------------------------------
     # Part 4: Best configs + comparative summary
