@@ -17,13 +17,14 @@ import torch
 
 from scripts.transformer_quant_study import (
     MiniGPT,
-    download_shakespeare,
     make_dataloaders,
     eval_fn,
 )
 
 
 def main() -> None:
+    torch.manual_seed(42)
+
     print("=" * 60)
     print("  4-bit Format Analysis — Shakespeare GPT")
     print("=" * 60)
@@ -100,7 +101,6 @@ def main() -> None:
     print(f"  Architecture:            MiniGPT(d=192, h=3, L=4, T=128)")
     print(f"  FP32 val PPL:            {fp32_ppl:.4f}")
     print(f"  Calibration batches:     {len(calib_data)}")
-    print(f"  Expected FP32 PPL:       ~7.95")
     print()
 
     # ------------------------------------------------------------------
