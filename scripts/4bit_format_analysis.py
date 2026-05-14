@@ -136,7 +136,7 @@ def main() -> None:
         ),
     ]
 
-    study = Study(mxint_configs, model=copy.deepcopy(model))
+    study = Study(mxint_configs, model=model)
     report = study.run(
         calib_data,
         eval_data=val_loader,
@@ -145,10 +145,10 @@ def main() -> None:
     )
 
     print("\n--- Summary (local QSNR) ---")
-    report.print_summary()
+    print(report.summary())
 
     print("\n--- Summary (accum QSNR) ---")
-    report.print_summary(qsnr_type="accum")
+    print(report.summary(qsnr_type="accum"))
 
     # --- Markdown table ---
     df_local = report.summary_dataframe(qsnr_type="local")
@@ -161,13 +161,15 @@ def main() -> None:
     print(f"| FP32 baseline | {fp32_ppl:.4f} | — | — | — |")
 
     if df_local is not None and df_accum is not None:
-        for idx in range(len(df_local)):
-            config = df_local.iloc[idx]["config"]
-            ppl = df_local.iloc[idx]["quant_perplexity"]
-            dppl = df_local.iloc[idx]["delta_perplexity"]
-            qsnr_local = df_local.iloc[idx]["avg_qsnr_db"]
-            qsnr_accum = df_accum.iloc[idx]["avg_qsnr_db"]
-            print(f"| {config} | {ppl:.4f} | {dppl:+.4f} | {qsnr_local:.2f} | {qsnr_accum:.2f} |")
+        merged = df_local.merge(
+            df_accum[["config", "avg_qsnr_db"]],
+            on="config", suffixes=("", "_accum")
+        )
+        for _, row in merged.iterrows():
+            print(f"| {row['config']} | {row['quant_perplexity']:.4f} | "
+                  f"{row['delta_perplexity']:+.4f} | "
+                  f"{row['avg_qsnr_db']:.2f} dB | "
+                  f"{row['avg_qsnr_db_accum']:.2f} dB |")
 
     # ------------------------------------------------------------------
     # Part 2: W4A4 with Hadamard / SmoothQuant transforms
