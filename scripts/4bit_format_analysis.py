@@ -11,12 +11,9 @@ Run:  PYTHONPATH=. python scripts/4bit_format_analysis.py
 
 from __future__ import annotations
 
-import math
 import os
-import sys
 
 import torch
-import torch.nn.functional as F
 
 from scripts.transformer_quant_study import (
     MiniGPT,
