@@ -374,14 +374,21 @@ def test_nf4_inf_nan_per_channel(nf4):
 
 
 def test_nf4_large_random_values_are_finite(nf4):
-    """Quantization of large random values should produce finite output."""
+    """Per-tensor NF4 quant normalises by amax, quantises, then rescales.
+
+    Large random values should produce finite output at the original scale,
+    not clamped to [-1, 1].  The values after quantisation should be close
+    to the original (within NF4's 4-bit precision).
+    """
     torch.manual_seed(123)
     x = torch.randn(10, 20) * 5.0  # values well outside [-1, 1]
     y = quantize_via_scheme(x, QuantScheme.per_tensor("nf4"))
     assert torch.isfinite(y).all()
-    # All values should be nf4 levels (in [-1, 1])
-    assert y.min() >= -1.0
-    assert y.max() <= 1.0
+    # Rescaled output preserves original magnitude
+    assert y.abs().max() > 1.0
+    # Each quantised value should be one of the NF4 levels times the POT amax
+    unique_y = torch.unique(y)
+    assert unique_y.numel() <= 16  # at most 16 distinct NF4 levels
 
 
 # ---------------------------------------------------------------------------

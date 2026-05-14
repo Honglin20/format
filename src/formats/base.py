@@ -176,6 +176,8 @@ class FormatBase(ABC):
         When ``scale_storage="pot"`` (default), the scalar amax is rounded
         to the nearest power of 2 before normalization.
         """
+        if torch.jit.is_tracing():
+            return x
         hw_dtype = getattr(self, "_hardware_dtype", None)
         if (hw_dtype is not None
                 and round_mode == "even"
@@ -216,6 +218,8 @@ class FormatBase(ABC):
         When ``scale_storage="pot"``, the amax is rounded to the nearest power
         of 2 before normalization.
         """
+        if torch.jit.is_tracing():
+            return x
         if scale is not None:
             amax = scale
         else:
@@ -240,6 +244,19 @@ class FormatBase(ABC):
         x_q = self.quantize_elemwise(x_norm, round_mode=round_mode,
                                      allow_denorm=allow_denorm)
         return x_q * amax
+
+    def _per_block_norm_shift(self) -> int:
+        """Extra shared-exponent shift for per-block normalization.
+
+        Per-block normalizes by ``2^shared_exp`` where shared_exp is
+        ``floor(log2(amax))``.  After normalization the max magnitude is
+        in [1, 2).  Formats whose ``max_norm < 2`` need an extra shift
+        so the normalized values fit within the representable range.
+
+        Returns 0 for most formats.  Subclasses (e.g. LUT formats) may
+        return a positive integer to shift the normalization factor.
+        """
+        return 0
 
     def _quantize_per_block(self, x, granularity, round_mode, scale=None,
                               scale_storage="pot",
@@ -296,7 +313,7 @@ class FormatBase(ABC):
             A = A * (shared_exp > -FP32_EXPONENT_BIAS).type(A.dtype)
 
         # Step 4: offset by format's max representable exponent
-        shared_exp = shared_exp - self.emax
+        shared_exp = shared_exp - self.emax + self._per_block_norm_shift()
 
         # Step 5: clamp shared exponents to int8 range (scale_bits=8)
         scale_emax = 2**(8-1) - 1
@@ -460,31 +477,16 @@ class FormatBase(ABC):
         return x_t_q.transpose(0, axis)
 
     def export_onnx(self, g, x, scheme):
-        """Emit ONNX nodes for this format's quantize step.
+        """Emit unified three-axis ONNX nodes: Scale → Quantize.
 
-        Default: emit as com.microxscaling::MxQuantize custom node.
-        Subclasses that have standard ONNX representations (e.g. IntFormat
-        for QDQ, standard FP8 for QDQ) override this.
-
-        Args:
-            g: TorchScript ONNX graph builder.
-            x: Input graph value.
-            scheme: The full QuantScheme (format + granularity + transform).
-
-        Returns:
-            ONNX graph value representing quantized-then-dequantized x.
+        Scale node represents the granularity axis.
+        Quantize node represents the format axis.
+        Subclasses with non-standard quantize (Truncate, NF4) are handled
+        by ``_emit_format_node`` in helpers — no override needed.
         """
-        from src.scheme.granularity import GranularityMode
-        block_size = (scheme.granularity.block_size
-                      if scheme.granularity.mode == GranularityMode.PER_BLOCK
-                      else 0)
-        return g.op(
-            "com.microxscaling::MxQuantize",
-            x,
-            elem_format_s=self.name,
-            block_size_i=block_size,
-            round_mode_s=scheme.round_mode,
-        )
+        from src.onnx.helpers import _emit_scale_node, _emit_format_node
+        scale = _emit_scale_node(g, x, scheme.granularity)
+        return _emit_format_node(g, x, scale, self)
 
     @staticmethod
     def from_str(s: str) -> "FormatBase":
