@@ -105,6 +105,16 @@ def main() -> None:
     print(f"  Calibration batches:     {len(calib_data)}")
     print()
 
+    # Report collection for consolidated markdown output
+    report_sections: list[str] = []
+    report_sections.append("# 4-bit Format Analysis Report — Shakespeare GPT")
+    report_sections.append("")
+    report_sections.append(f"- **Model**: MiniGPT(d=192, h=3, L=4, T=128)")
+    report_sections.append(f"- **Parameters**: {n_params:,}")
+    report_sections.append(f"- **FP32 Validation PPL**: {fp32_ppl:.4f}")
+    report_sections.append(f"- **Calibration batches**: {len(calib_data)}")
+    report_sections.append("")
+
     # ------------------------------------------------------------------
     # Part 1: MXINT Precision Comparison (W8A8 / W4A8 / W4A4)
     # ------------------------------------------------------------------
@@ -154,11 +164,11 @@ def main() -> None:
     df_local = report.summary_dataframe(qsnr_type="local")
     df_accum = report.summary_dataframe(qsnr_type="accum")
 
-    print("\n--- MXINT Comparison Table ---")
-    print()
-    print(f"| Config | PPL | ΔPPL | QSNR (local) | QSNR (accum) |")
-    print(f"|--------|-----|------|--------------|---------------|")
-    print(f"| FP32 baseline | {fp32_ppl:.4f} | — | — | — |")
+    # --- Markdown table (collect for report) ---
+    part1_table: list[str] = []
+    part1_table.append(f"| Config | PPL | ΔPPL | QSNR (local) | QSNR (accum) |")
+    part1_table.append(f"|--------|-----|------|--------------|---------------|")
+    part1_table.append(f"| FP32 baseline | {fp32_ppl:.4f} | — | — | — |")
 
     if df_local is not None and df_accum is not None:
         merged = df_local.merge(
@@ -166,10 +176,22 @@ def main() -> None:
             on="config", suffixes=("", "_accum")
         )
         for _, row in merged.iterrows():
-            print(f"| {row['config']} | {row['quant_perplexity']:.4f} | "
-                  f"{row['delta_perplexity']:+.4f} | "
-                  f"{row['avg_qsnr_db']:.2f} dB | "
-                  f"{row['avg_qsnr_db_accum']:.2f} dB |")
+            line = (f"| {row['config']} | {row['quant_perplexity']:.4f} | "
+                    f"{row['delta_perplexity']:+.4f} | "
+                    f"{row['avg_qsnr_db']:.2f} dB | "
+                    f"{row['avg_qsnr_db_accum']:.2f} dB |")
+            part1_table.append(line)
+
+    print("\n--- MXINT Comparison Table ---")
+    print()
+    for line in part1_table:
+        print(line)
+
+    # Accumulate for report
+    report_sections.append("## Part 1: MXINT Precision Comparison (W8A8 / W4A8 / W4A4)")
+    report_sections.append("")
+    report_sections.extend(part1_table)
+    report_sections.append("")
 
     # ------------------------------------------------------------------
     # Part 2: Root Cause Analysis (Diagnose + Characterize + Visualize)
@@ -396,6 +418,36 @@ def main() -> None:
     if len(rows) > 20:
         print(f"| ... and {len(rows) - 20} more rows |")
 
+    # Accumulate Part 2 for report
+    report_sections.append("## Part 2: Root Cause Analysis")
+    report_sections.append("")
+    report_sections.append("### Top-10 Worst Layers (local QSNR)")
+    report_sections.append("")
+    report_sections.append("| Layer | QSNR (dB) |")
+    report_sections.append("|-------|-----------|")
+    for layer, qsnr in result_w4a4.top_k_qsnr(k=10, qsnr_type="local"):
+        report_sections.append(f"| {layer} | {qsnr:.2f} |")
+    report_sections.append("")
+
+    if result_w4a4.accum_qsnr_per_layer:
+        report_sections.append("### Top-10 Worst Layers (accumulated)")
+        report_sections.append("")
+        report_sections.append("| Layer | QSNR (dB) |")
+        report_sections.append("|-------|-----------|")
+        for layer, qsnr in result_w4a4.top_k_qsnr(k=10, qsnr_type="accum"):
+            report_sections.append(f"| {layer} | {qsnr:.2f} |")
+        report_sections.append("")
+
+    report_sections.append("### Per-Layer Per-Role QSNR Attribution")
+    report_sections.append("")
+    report_sections.append("| Layer | Role | QSNR (dB) | Degradation Type |")
+    report_sections.append("|-------|------|-----------|-----------------|")
+    for qsnr, layer, role, diag in rows[:20]:
+        report_sections.append(f"| {layer:<28} | {role:<6} | {qsnr:>7.2f} | {diag:<18} |")
+    if len(rows) > 20:
+        report_sections.append(f"| ... and {len(rows) - 20} more rows |")
+    report_sections.append("")
+
     # ------------------------------------------------------------------
     # Part 3: MXFP / NF4 Format Comparison
     # ------------------------------------------------------------------
@@ -461,11 +513,11 @@ def main() -> None:
     df_xfmt_local = report_xfmt.summary_dataframe(qsnr_type="local")
     df_xfmt_accum = report_xfmt.summary_dataframe(qsnr_type="accum")
 
-    print("\n--- MXFP / NF4 Comparison Table ---")
-    print()
-    print(f"| Format | PPL | ΔPPL | QSNR (local) | QSNR (accum) |")
-    print(f"|--------|-----|------|--------------|---------------|")
-    print(f"| FP32 baseline | {fp32_ppl:.4f} | — | — | — |")
+    # --- Markdown table (collect for report) ---
+    part3_table: list[str] = []
+    part3_table.append(f"| Format | PPL | ΔPPL | QSNR (local) | QSNR (accum) |")
+    part3_table.append(f"|--------|-----|------|--------------|---------------|")
+    part3_table.append(f"| FP32 baseline | {fp32_ppl:.4f} | — | — | — |")
 
     if df_xfmt_local is not None and df_xfmt_accum is not None:
         merged = df_xfmt_local.merge(
@@ -473,10 +525,21 @@ def main() -> None:
             on="config", suffixes=("", "_accum")
         )
         for _, row in merged.iterrows():
-            print(f"| {row['config']:<12} | {row['quant_perplexity']:.4f} | "
-                  f"{row['delta_perplexity']:+.4f} | "
-                  f"{row['avg_qsnr_db']:.2f} dB | "
-                  f"{row['avg_qsnr_db_accum']:.2f} dB |")
+            line = (f"| {row['config']:<12} | {row['quant_perplexity']:.4f} | "
+                    f"{row['delta_perplexity']:+.4f} | "
+                    f"{row['avg_qsnr_db']:.2f} dB | "
+                    f"{row['avg_qsnr_db_accum']:.2f} dB |")
+            part3_table.append(line)
+
+    print("\n--- MXFP / NF4 Comparison Table ---")
+    print()
+    for line in part3_table:
+        print(line)
+
+    report_sections.append("## Part 3: MXFP / NF4 Cross-Format Comparison")
+    report_sections.append("")
+    report_sections.extend(part3_table)
+    report_sections.append("")
 
     # ------------------------------------------------------------------
     # Part 4: Granularity × Sparse Cross-Sweep
@@ -532,13 +595,13 @@ def main() -> None:
 
     print("\n--- Pivot Table: PPL by Granularity × Outlier Ratio ---")
     print()
-    # Header row
+    part4_pivot: list[str] = []
     header = f"| {'Granularity':<12} |"
     for r in outlier_ratios:
         header += f" r={r:<5} |"
-    print(header)
+    part4_pivot.append(header)
     sep = f"|{'-'*14}|" + "".join(f"{'-'*9}|" for _ in outlier_ratios)
-    print(sep)
+    part4_pivot.append(sep)
 
     best_per_g: dict[str, tuple[float, float]] = {}
 
@@ -559,52 +622,86 @@ def main() -> None:
                         best_r = r
                 else:
                     row_str += f" {'N/A':>7} |"
-            print(row_str)
+            part4_pivot.append(row_str)
             best_per_g[g] = (best_r, best_ppl)
+
+    for line in part4_pivot:
+        print(line)
 
     # ---- Best per granularity ----
     print("\n--- Best Outlier Ratio per Granularity (by minimum PPL) ---")
+    part4_best: list[str] = []
     for g in granularities:
         r, ppl = best_per_g.get(g, (float("nan"), float("nan")))
-        print(f"  {g_suffix[g]:<12}  best r={r:.2f}  PPL={ppl:.4f}")
+        line = f"  {g_suffix[g]:<12}  best r={r:.2f}  PPL={ppl:.4f}"
+        part4_best.append(line)
+        print(line)
 
     # ---- Analysis ----
     print("\n--- Analysis ---")
-    # Find the per_block(32) r=0.0 baseline for comparison
-    block_baseline_ppl = float("nan")
-    if df_sparse is not None:
-        match = df_sparse[df_sparse["config"] == "block-r0.00"]
-        if not match.empty:
-            block_baseline_ppl = match.iloc[0]["quant_perplexity"]
+    part4_analysis: list[str] = []
+    if best_per_g:
+        # Find the per_block(32) r=0.0 baseline for comparison
+        block_baseline_ppl = float("nan")
+        if df_sparse is not None:
+            match = df_sparse[df_sparse["config"] == "block-r0.00"]
+            if not match.empty:
+                block_baseline_ppl = match.iloc[0]["quant_perplexity"]
 
-    tensor_best = best_per_g.get("per_tensor", (0.0, float("nan")))[1]
-    channel_best = best_per_g.get("per_channel", (0.0, float("nan")))[1]
-    block_best = best_per_g.get("per_block", (0.0, float("nan")))[1]
+        tensor_best = best_per_g.get("per_tensor", (0.0, float("nan")))[1]
+        channel_best = best_per_g.get("per_channel", (0.0, float("nan")))[1]
+        block_best = best_per_g.get("per_block", (0.0, float("nan")))[1]
 
-    print(f"  per_block(32) r=0.00 baseline PPL:  {block_baseline_ppl:.4f}")
-    print(f"  per_tensor best (r={best_per_g['per_tensor'][0]:.2f}):"
-          f" PPL={tensor_best:.4f}")
-    print(f"  per_channel best (r={best_per_g['per_channel'][0]:.2f}):"
-          f" PPL={channel_best:.4f}")
-    print(f"  per_block(32)  best (r={best_per_g['per_block'][0]:.2f}):"
-          f" PPL={block_best:.4f}")
+        part4_analysis.append(f"  per_block(32) r=0.00 baseline PPL:  {block_baseline_ppl:.4f}")
+        part4_analysis.append(f"  per_tensor best (r={best_per_g['per_tensor'][0]:.2f}): PPL={tensor_best:.4f}")
+        part4_analysis.append(f"  per_channel best (r={best_per_g['per_channel'][0]:.2f}): PPL={channel_best:.4f}")
+        part4_analysis.append(f"  per_block(32)  best (r={best_per_g['per_block'][0]:.2f}): PPL={block_best:.4f}")
 
-    can_match = (
-        tensor_best <= block_baseline_ppl * 1.05  # within 5%
-        if not (math.isnan(tensor_best) or math.isnan(block_baseline_ppl))
-        else False
-    )
-    print()
-    print(f"  Can per_tensor + sparse match per_block(32)? "
-          f"{'YES' if can_match else 'NO'}")
-    print(f"    (per_tensor best {tensor_best:.4f} vs per_block baseline"
-          f" {block_baseline_ppl:.4f};"
-          f" threshold = {block_baseline_ppl * 1.05:.4f})")
-    print()
-    print(f"  Optimal sparse degree by granularity:")
-    for g in granularities:
-        r, ppl = best_per_g.get(g, (float("nan"), float("nan")))
-        print(f"    {g_suffix[g]:<12}  r={r:.2f}  (PPL={ppl:.4f})")
+        can_match = (
+            tensor_best <= block_baseline_ppl * 1.05  # within 5%
+            if not (math.isnan(tensor_best) or math.isnan(block_baseline_ppl))
+            else False
+        )
+        part4_analysis.append("")
+        part4_analysis.append(f"  Can per_tensor + sparse match per_block(32)? "
+                              f"{'YES' if can_match else 'NO'}")
+        part4_analysis.append(f"    (per_tensor best {tensor_best:.4f} vs per_block baseline"
+                              f" {block_baseline_ppl:.4f};"
+                              f" threshold = {block_baseline_ppl * 1.05:.4f})")
+        part4_analysis.append("")
+        part4_analysis.append(f"  Optimal sparse degree by granularity:")
+        for g in granularities:
+            r, ppl = best_per_g.get(g, (float("nan"), float("nan")))
+            part4_analysis.append(f"    {g_suffix[g]:<12}  r={r:.2f}  (PPL={ppl:.4f})")
+    else:
+        part4_analysis.append("  (analysis unavailable — pandas not installed)")
+
+    for line in part4_analysis:
+        print(line)
+
+    # ---- Accumulate Part 4 for report ----
+    report_sections.append("## Part 4: Granularity × Sparse Cross-Sweep")
+    report_sections.append("")
+    report_sections.extend(part4_pivot)
+    report_sections.append("")
+    report_sections.extend(part4_best)
+    report_sections.append("")
+    report_sections.extend(part4_analysis)
+    report_sections.append("")
+
+    # ---- Conclusions placeholder ----
+    report_sections.append("## Conclusions")
+    report_sections.append("")
+    report_sections.append("[TODO: Fill in after full run]")
+    report_sections.append("")
+
+    # ---- Write consolidated report ----
+    report_dir = os.path.join(os.path.dirname(__file__), "analysis_output")
+    os.makedirs(report_dir, exist_ok=True)
+    report_path = os.path.join(report_dir, "analysis_report.md")
+    with open(report_path, "w") as f:
+        f.write("\n".join(report_sections))
+    print(f"\nReport saved to: {report_path}")
 
 
 if __name__ == "__main__":
