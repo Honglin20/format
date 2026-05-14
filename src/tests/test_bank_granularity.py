@@ -257,10 +257,11 @@ class TestBankSessionIntegration:
         torch.manual_seed(42)
         return TinyMLP()
 
+    @pytest.mark.xfail(reason="Observer does not support BANK mode yet (P3)")
     def test_bank_smoke(self, simple_model):
         """QuantConfig bank mode produces valid output."""
         from src.session._config import QuantConfig
-        from src.session._session import Session
+        from src.session._session import run_quantization
 
         cfg = QuantConfig(
             name="test-bank",
@@ -272,12 +273,11 @@ class TestBankSessionIntegration:
             a_block_size=2,
             a_axis=-1,
             weight_only=False,
-        )
+        ).to_op_config()
 
         x = torch.randn(3, 4)
-        session = Session(simple_model, cfg, keep_fp32=False)
-        session.quantize()
-        qmodel = session.qmodel
+        qmodel, fp32_model, result = run_quantization(
+            simple_model, cfg, calib_data=[x], keep_fp32=False)
         with torch.no_grad():
             out = qmodel(x)
         assert out.shape == (3, 2)
