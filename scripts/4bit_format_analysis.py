@@ -479,9 +479,132 @@ def main() -> None:
                   f"{row['avg_qsnr_db_accum']:.2f} dB |")
 
     # ------------------------------------------------------------------
-    # Part 4: Best configs + comparative summary
+    # Part 4: Granularity × Sparse Cross-Sweep
     # ------------------------------------------------------------------
-    print("\n[Part 4] Best configs + summary — TBD")
+    print("\n" + "=" * 60)
+    print("  Part 4: Granularity × Sparse Cross-Sweep")
+    print("=" * 60)
+
+    granularities = ["per_tensor", "per_channel", "per_block"]
+    outlier_ratios = [0.0, 0.01, 0.05, 0.1, 0.2]
+    block_size = 32
+
+    # Shorthand map for naming
+    g_suffix = {"per_tensor": "tensor", "per_channel": "channel", "per_block": "block"}
+
+    sparse_configs = []
+
+    for g in granularities:
+        for r in outlier_ratios:
+            name = f"{g_suffix[g]}-r{r:.2f}"
+            kw = dict(
+                name=name,
+                w_format="int4", a_format="int4",
+                w_granularity=g, a_granularity=g,
+                outlier_ratio=r,
+                quantize_nonlinear=False,
+            )
+            if g == "per_block":
+                kw["w_block_size"] = block_size
+                kw["a_block_size"] = block_size
+            sparse_configs.append(QuantConfig(**kw))
+
+    total = len(sparse_configs)
+    print(f"\n  Running {total} configs ({len(granularities)} granularities"
+          f" x {len(outlier_ratios)} outlier_ratios) ...\n")
+
+    study_sparse = Study(sparse_configs, model=model)
+    report_sparse = study_sparse.run(
+        calib_data,
+        eval_data=val_loader,
+        eval_fn=eval_fn,
+        outputs="default",
+    )
+
+    print("\n--- Summary (local QSNR) ---")
+    print(report_sparse.summary())
+
+    print("\n--- Summary (accum QSNR) ---")
+    print(report_sparse.summary(qsnr_type="accum"))
+
+    # ---- Pivot table: rows = granularity, columns = outlier_ratio, values = PPL ----
+    df_sparse = report_sparse.summary_dataframe()
+
+    print("\n--- Pivot Table: PPL by Granularity × Outlier Ratio ---")
+    print()
+    # Header row
+    header = f"| {'Granularity':<12} |"
+    for r in outlier_ratios:
+        header += f" r={r:<5} |"
+    print(header)
+    sep = f"|{'-'*14}|" + "".join(f"{'-'*9}|" for _ in outlier_ratios)
+    print(sep)
+
+    best_per_g: dict[str, tuple[float, float]] = {}
+
+    if df_sparse is not None:
+        for g in granularities:
+            suffix = g_suffix[g]
+            row_str = f"| {suffix:<12} |"
+            best_ppl = float("inf")
+            best_r = 0.0
+            for r in outlier_ratios:
+                cfg_name = f"{suffix}-r{r:.2f}"
+                match = df_sparse[df_sparse["config"] == cfg_name]
+                if not match.empty:
+                    ppl = match.iloc[0]["quant_perplexity"]
+                    row_str += f" {ppl:>7.4f} |"
+                    if ppl < best_ppl:
+                        best_ppl = ppl
+                        best_r = r
+                else:
+                    row_str += f" {'N/A':>7} |"
+            print(row_str)
+            best_per_g[g] = (best_r, best_ppl)
+
+    # ---- Best per granularity ----
+    print("\n--- Best Outlier Ratio per Granularity (by minimum PPL) ---")
+    for g in granularities:
+        r, ppl = best_per_g.get(g, (float("nan"), float("nan")))
+        print(f"  {g_suffix[g]:<12}  best r={r:.2f}  PPL={ppl:.4f}")
+
+    # ---- Analysis ----
+    print("\n--- Analysis ---")
+    # Find the per_block(32) r=0.0 baseline for comparison
+    block_baseline_ppl = float("nan")
+    if df_sparse is not None:
+        match = df_sparse[df_sparse["config"] == "block-r0.00"]
+        if not match.empty:
+            block_baseline_ppl = match.iloc[0]["quant_perplexity"]
+
+    tensor_best = best_per_g.get("per_tensor", (0.0, float("nan")))[1]
+    channel_best = best_per_g.get("per_channel", (0.0, float("nan")))[1]
+    block_best = best_per_g.get("per_block", (0.0, float("nan")))[1]
+
+    print(f"  per_block(32) r=0.00 baseline PPL:  {block_baseline_ppl:.4f}")
+    print(f"  per_tensor best (r={best_per_g['per_tensor'][0]:.2f}):"
+          f" PPL={tensor_best:.4f}")
+    print(f"  per_channel best (r={best_per_g['per_channel'][0]:.2f}):"
+          f" PPL={channel_best:.4f}")
+    print(f"  per_block(32)  best (r={best_per_g['per_block'][0]:.2f}):"
+          f" PPL={block_best:.4f}")
+
+    can_match = (
+        tensor_best <= block_baseline_ppl * 1.05  # within 5%
+        if not (math.isnan(tensor_best) or math.isnan(block_baseline_ppl))
+        else False
+    )
+    print()
+    print(f"  Can per_tensor + sparse match per_block(32)? "
+          f"{'YES' if can_match else 'NO'}")
+    print(f"    (per_tensor best {tensor_best:.4f} vs per_block baseline"
+          f" {block_baseline_ppl:.4f};"
+          f" threshold = {block_baseline_ppl * 1.05:.4f})")
+    print()
+    print(f"  Optimal sparse degree by granularity:")
+    for g in granularities:
+        r, ppl = best_per_g.get(g, (float("nan"), float("nan")))
+        print(f"    {g_suffix[g]:<12}  r={r:.2f}  (PPL={ppl:.4f})")
 
 
 if __name__ == "__main__":
