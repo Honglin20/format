@@ -393,8 +393,7 @@ class QuantConfig:
         if self.weight_only:
             return OpQuantConfig(weight=w_scheme, storage=storage)
 
-        return OpQuantConfig(input=a_scheme, weight=w_scheme, output=a_scheme,
-                            storage=storage)
+        return OpQuantConfig(input=a_scheme, weight=w_scheme, storage=storage)
 
     @classmethod
     def from_descriptor(cls, desc: Dict[str, Any]) -> "QuantConfig":

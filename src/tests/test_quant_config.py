@@ -69,9 +69,7 @@ class TestToOpConfigBasic:
         assert isinstance(result, OpQuantConfig)
         assert result.input is not None
         assert result.weight is not None
-        assert result.output is not None
-        assert result.output.format.name == "int8"
-        assert result.output.granularity.mode == GranularityMode.PER_TENSOR
+        assert result.output is None
         # Weight scheme
         assert result.weight.format.name == "int8"
         assert result.weight.granularity.mode == GranularityMode.PER_TENSOR
@@ -279,7 +277,7 @@ class TestResolveConfig:
         assert isinstance(result, OpQuantConfig)
         assert result.input is not None
         assert result.weight is not None
-        assert result.output is not None
+        assert result.output is None
         assert result.weight.format.name == "int8"
         assert result.weight.granularity.mode == GranularityMode.PER_TENSOR
         assert result.input.format.name == "int8"
