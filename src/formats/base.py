@@ -156,6 +156,10 @@ class FormatBase(ABC):
         elif mode == GranularityMode.PER_BLOCK:
             return self._quantize_per_block(x, granularity, round_mode,
                                               scale=scale, scale_storage=scale_storage)
+        elif mode == GranularityMode.BANK:
+            return self._quantize_per_bank(x, granularity, round_mode,
+                                            allow_denorm=allow_denorm,
+                                            scale=scale, scale_storage=scale_storage)
         raise ValueError(f"Unknown granularity mode: {mode}")
 
     def _quantize_per_tensor(self, x, round_mode, allow_denorm=True, scale=None,
@@ -244,6 +248,60 @@ class FormatBase(ABC):
         x_q = self.quantize_elemwise(x_norm, round_mode=round_mode,
                                      allow_denorm=allow_denorm)
         return x_q * amax
+
+    def _quantize_per_bank(self, x, granularity, round_mode, allow_denorm=True,
+                           scale=None, scale_storage="pot"):
+        """Per-bank quantization: split along bank_axis into banks.
+
+        Each bank spans ALL elements across non-bank dimensions within its
+        bank_axis segment — unlike PER_BLOCK which subdivides every dimension.
+        One amax per bank. Supports fp32 and pot scale_storage.
+        """
+        if torch.jit.is_tracing():
+            return x
+        axis = granularity.bank_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        if not (0 <= axis < x.ndim):
+            raise ValueError(
+                f"bank_axis={granularity.bank_axis} out of range "
+                f"for tensor with ndim={x.ndim}"
+            )
+
+        bank_size = granularity.bank_size
+        N_along = x.shape[axis]
+        if N_along % bank_size != 0:
+            raise ValueError(
+                f"Dimension {axis} size {N_along} not divisible "
+                f"by bank_size {bank_size}"
+            )
+
+        num_banks = N_along // bank_size
+
+        # Reshape: split axis into (num_banks, bank_size)
+        new_shape = list(x.shape)
+        new_shape[axis] = num_banks
+        new_shape.insert(axis + 1, bank_size)
+        x_r = x.reshape(new_shape)
+        # x_r shape: (..., num_banks, bank_size, ...)
+        # bank dim is at position `axis`, inner dim at `axis+1`
+
+        if scale is not None:
+            amax = scale
+        else:
+            # Reduce all dims EXCEPT the bank dim
+            dims_to_reduce = [i for i in range(x_r.ndim) if i != axis]
+            amax = torch.amax(torch.abs(x_r), dim=tuple(dims_to_reduce), keepdim=True)
+            amax = amax.clamp(min=1e-12)
+
+        if scale_storage == "pot":
+            amax = 2 ** torch.round(torch.log2(amax))
+
+        x_norm = x_r / amax
+        x_q = self.quantize_elemwise(x_norm, round_mode=round_mode,
+                                     allow_denorm=allow_denorm)
+        x_q = x_q * amax
+        return x_q.reshape(x.shape)
 
     def _per_block_norm_shift(self) -> int:
         """Extra shared-exponent shift for per-block normalization.
