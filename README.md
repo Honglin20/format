@@ -2,97 +2,84 @@
 
 基于 [microsoft/microxcaling](https://github.com/microsoft/microxcaling) 的增量式重建。将量化拆为**格式 × 粒度 × 变换**三个正交轴，一个 `QuantConfig` 控制一切。
 
-全算子覆盖（Linear/Conv/Norm/Activation/Softmax/Pool）· MX per-block 位精确等价 · 4 种校准策略 · 5 种 Transform · LSQ · ONNX 导出 · 误差分析 · 性能估算
+## 研究示例：4-bit 格式对比分析
 
-## 安装
+本分支包含对 Shakespeare GPT (1.82M params) 的完整 4-bit 格式分析，回答一个问题：**4-bit 下数据格式应该怎么选。**
 
 ```bash
-pip install -r requirements.txt
+cd microxcaling
+PYTHONPATH=. python scripts/4bit_format_analysis.py
 ```
 
-## 30 秒快速体验
+输出写入 `scripts/analysis_output/`（报告 + 可视化）。
+
+### API 使用方式
+
+脚本展示了库的两个核心入口——`Study`（多配置对比）和 `Session`（单配置深度分析）：
 
 ```python
-import torch, torch.nn as nn
-from src.session import Session, QuantConfig
+from src.session import Session, Study, QuantConfig
 
-model = nn.Sequential(nn.Linear(128, 256), nn.ReLU(), nn.Linear(256, 10))
-calib_data = [torch.randn(32, 128) for _ in range(10)]
+# QuantConfig = format × granularity × transform 三轴组合
+cfg_w8a8 = QuantConfig(name="W8A8", w_format="int8", a_format="int8",
+                       w_granularity="per_block", a_granularity="per_block",
+                       w_block_size=32, a_block_size=32)
+cfg_w4a4 = QuantConfig(name="W4A4", w_format="int4", a_format="int4",
+                       w_granularity="per_block", a_granularity="per_block",
+                       w_block_size=32, a_block_size=32)
 
-def eval_fn(m, data):
-    return {"loss": sum(m(batch).sum() for batch in data).item()}
+# ── Study API：多配置对比，一张表出结果 ──
+study = Study([cfg_w8a8, cfg_w4a4], model=model)
+report = study.run(calib_data, eval_data=val_loader, eval_fn=eval_fn)
+print(report.summary())                          # local QSNR
+print(report.summary(qsnr_type="accum"))         # end-to-end accumulated QSNR
+df = report.summary_dataframe()                  # → pandas DataFrame
 
-result = Session(model, QuantConfig(name="int8", w_format="int8")).run(
-    calib_data, eval_fn=eval_fn)
+# ── Session API：单配置深度诊断 ──
+import copy
+session = Session(model=copy.deepcopy(model), config=cfg_w4a4)
+result = session.run(calib_data, eval_data=val_loader, eval_fn=eval_fn,
+                     outputs=["accuracy", "qsnr", "distribution", "histogram"])
 
-print(result.summary())                  # local QSNR（逐 op）
-print(result.summary(qsnr_type="accum"))  # accumulated QSNR（端到端）
-print(result.accuracy_table())            # FP32/Quant/Δ 精度对比表
-for name, qsnr in result.top_k_qsnr(3, qsnr_type="accum"):
-    print(f"  {name}: {qsnr:.1f} dB")
+# 诊断：逐层逐角色 QSNR 归因（input / weight / output）
+print(result.diagnose.per_role_table(max_layers=20))
+print(result.diagnose.summary())
 
-# 换个格式只需改一个字符串
-cfg = QuantConfig(name="fp4-mx", w_format="fp4_e2m1", w_granularity="per_block",
-                  w_block_size=32, a_format="fp4_e2m1", a_granularity="per_block",
-                  a_block_size=32)
-result2 = Session(model, cfg).run(calib_data, eval_fn=eval_fn)
-print(result2.summary())
+# 表征：分布退化分类
+print(result.characterize.causal_analysis())
 
-# 多 config 对比：Study 统一 DataFrame，含 FP32 基线
-from src.session import Study
-study = Study([cfg, cfg2], model=model)
-report = study.run(calib_data, eval_fn=eval_fn)
-report.print_summary()                    # 所有 config 一张表，含 fp32_*/delta_* 列
-report.print_summary(qsnr_type="accum")   # 切换为端到端累积 QSNR
+# 可视化
+result.plot.qsnr_comparison().savefig("qsnr_comparison.png", dpi=300, bbox_inches="tight")
+result.plot.per_role_qsnr_bars().savefig("per_role_qsnr.png", dpi=300, bbox_inches="tight")
+result.plot.channel_heterogeneity("blocks.0.attn.qkv", role="weight")
+
+# ── 交叉格式对比：MXFP / NF4 ──
+QuantConfig(name="NF4-W", w_format="nf4", w_granularity="per_channel",
+            weight_only=True)
+QuantConfig(name="MXFP-4", w_format="fp4_e2m1", w_granularity="per_block",
+            w_block_size=32, a_format="fp4_e2m1", a_granularity="per_block",
+            a_block_size=32)
+
+# ── 稀疏离群值扫描 ──
+for r in [0.0, 0.01, 0.05, 0.1, 0.2]:
+    QuantConfig(name=f"sparse-r{r:.2f}", w_format="int4", a_format="int4",
+                w_granularity="per_block", a_granularity="per_block",
+                w_block_size=32, a_block_size=32, outlier_ratio=r)
 ```
+
+### 核心结论
+
+| 结论 | 数据 |
+|------|------|
+| W4A8 混合精度足够好 | PPL 8.02 vs FP32 7.95（远优于 W4A4 的 8.43） |
+| per_block 在 4-bit 下是必须的 | per_tensor 即使加 sparse 也只有 PPL 17.91 |
+| outlier_ratio=0.10 可进一步提升 | per_block W4A4 PPL 从 8.43 → 8.15 |
+| NF4 仅权重可用，激活上灾难 | NF4-W PPL 8.07 vs NF4-WA PPL 11.37 |
+| MXFP-4 略优于 MXINT-4 | 差距仅 ~0.02 PPL |
+
+详见 [`scripts/analysis_output/analysis_report.md`](scripts/analysis_output/analysis_report.md)。
 
 ## 文档导航
 
-一切从 Session 开始。以下按推荐阅读顺序排列：
-
-### Session 阅读路径
-
-1. [Session 概览](docs/guides/session/overview.md) — 量化生命周期、一键模式 vs 分步模式
-2. [QuantConfig 配置](docs/guides/session/config.md) — format × granularity × transform × calibration
-3. [精度优化方法](docs/guides/session/optimization.md) — Prescale / LSQ / GPTQ / Hadamard / SmoothQuant / Adaptive / per_layer_optimal
-4. [结果查看](docs/guides/session/result.md) — summary / accuracy_table / layer_report / top_k_qsnr
-5. [可视化](docs/guides/session/plotting.md) — 12 种内置图表
-6. [误差分析](docs/guides/session/analysis.md) — 5 种 Observer / 累积 vs 本地误差传播
-7. [Study 多配置对比](docs/guides/session/study.md) — 批量对比 · DataFrame 导出
-8. [ONNX 导出](docs/guides/session/export.md) — QDQ + MX 自定义算子
-9. [性能估算](docs/guides/session/cost.md) — Roofline 延迟 & 内存
-
-→ [Session 文档索引](docs/guides/session/INDEX.md)
-
-### 完整示例
-
-→ [系统化误差分析示例 — Transformer + AG News + int4](docs/guides/example/transformer_analysis.md)
-  ADR-010 四阶段闭环全流程演示：Diagnose → Characterize → Plan → Intervene → Verify
-
-### 参考手册
-
-| 文档 | 内容 |
-|------|------|
-| [格式选择](docs/guides/formats.md) | int8/fp8/nf4 等格式对比 & 自定义格式注册 |
-| [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block |
-| [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive |
-| [校准策略](docs/guides/calibration.md) | mse / max / percentile / kl |
-
-### 进阶主题
-
-| 文档 | 内容 |
-|------|------|
-| [自适应 Transform](docs/advanced/adaptive-transform.md) | 逐层自动选择最优变换 |
-| [LSQ 深入](docs/advanced/lsq.md) | LayerwiseScaleOptimizer 原理 |
-| [自定义格式](docs/advanced/custom-formats.md) | register_format / FormatBase 子类 |
-| [底层 API](docs/advanced/low-level-api.md) | quantize_model / OpQuantConfig |
-| [MX 位精确等价](docs/advanced/mx-equivalence.md) | 与 microsoft/microxcaling 的等价性验证 |
-| [架构决策 (ADR)](docs/architecture/INDEX.md) | 设计意图 & 技术决策 |
-
-### API 参考
-
-| 文档 | 内容 |
-|------|------|
-| [QuantConfig](docs/reference/quant-config.md) | 完整字段表（30 个字段） |
-| [Session](docs/reference/session.md) | 方法签名 & 链式 API |
-| [SessionResult](docs/reference/session-result.md) | 属性/方法速查 |
+→ [docs/INDEX.md](docs/INDEX.md) — 全部文档索引
+→ [docs/status/CURRENT.md](docs/status/CURRENT.md) — 当前进度 & 断点续传
