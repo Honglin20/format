@@ -233,3 +233,52 @@ class TestBankQuantConfig:
         )
         op_cfg = cfg.to_op_config()
         assert op_cfg.weight.granularity.outlier_ratio == 0.1
+
+
+class TestBankSessionIntegration:
+    """Session-level tests: QuantConfig with bank → qmodel end-to-end."""
+
+    @pytest.fixture
+    def simple_model(self):
+        import torch.nn as nn
+
+        class TinyMLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = nn.Linear(4, 8)
+                self.fc2 = nn.Linear(8, 2)
+
+            def forward(self, x):
+                x = self.fc1(x)
+                x = nn.functional.relu(x)
+                x = self.fc2(x)
+                return x
+
+        torch.manual_seed(42)
+        return TinyMLP()
+
+    def test_bank_smoke(self, simple_model):
+        """QuantConfig bank mode produces valid output."""
+        from src.session._config import QuantConfig
+        from src.session._session import Session
+
+        cfg = QuantConfig(
+            name="test-bank",
+            w_format="int8",
+            w_granularity="bank",
+            w_block_size=2,
+            w_axis=0,
+            a_granularity="bank",
+            a_block_size=2,
+            a_axis=-1,
+            weight_only=False,
+        )
+
+        x = torch.randn(3, 4)
+        session = Session(simple_model, cfg, keep_fp32=False)
+        session.quantize()
+        qmodel = session.qmodel
+        with torch.no_grad():
+            out = qmodel(x)
+        assert out.shape == (3, 2)
+        assert torch.isfinite(out).all()
