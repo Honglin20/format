@@ -11,7 +11,6 @@ Run:  PYTHONPATH=. python scripts/4bit_format_analysis.py
 
 from __future__ import annotations
 
-import copy
 import os
 
 import torch
