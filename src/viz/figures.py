@@ -49,18 +49,17 @@ def save_figure(fig, output_dir: str, name: str) -> str:
 
     Args:
         fig: matplotlib Figure.
-        output_dir: Output root directory. Figures saved to ``<output_dir>/figures/``.
+        output_dir: Output directory where files are saved directly.
         name: Base filename without extension.
 
     Returns:
         Path to the saved PNG file.
     """
-    fig_dir = os.path.join(output_dir, "figures")
-    os.makedirs(fig_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     for ext in ("png", "pdf"):
-        fig.savefig(os.path.join(fig_dir, f"{name}.{ext}"), dpi=300, bbox_inches="tight")
+        fig.savefig(os.path.join(output_dir, f"{name}.{ext}"), dpi=300, bbox_inches="tight")
     plt.close(fig)
-    return os.path.join(fig_dir, f"{name}.png")
+    return os.path.join(output_dir, f"{name}.png")
 
 import torch
 
@@ -274,6 +273,7 @@ def histogram_overlay(
     all_results: dict,
     *,
     output_dir: str,
+    name: str = "histogram_overlay",
 ) -> plt.Figure:
     """Three-channel histogram overlay (fp32 / quant / error).
 
@@ -288,6 +288,8 @@ def histogram_overlay(
             Reports are expected to have an ``iter_slices`` method
             yielding ``(layer, role, stage, slice_key, metrics)`` tuples.
         output_dir: Output root directory.
+        name: Base filename (without extension) for the saved figure.
+            Defaults to ``"histogram_overlay"``.
 
     Returns:
         matplotlib Figure.
@@ -365,7 +367,7 @@ def histogram_overlay(
     fig.suptitle("Activation Histograms (fp32 / quant / error) — "
                  "Most Sensitive Layers", fontsize=13)
     fig.tight_layout()
-    save_figure(fig, output_dir, "histogram_overlay")
+    save_figure(fig, output_dir, name)
     return fig
 
 

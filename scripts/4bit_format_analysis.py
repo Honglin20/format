@@ -11,6 +11,7 @@ Run:  PYTHONPATH=. python scripts/4bit_format_analysis.py
 
 from __future__ import annotations
 
+import math
 import os
 
 import torch
@@ -240,11 +241,10 @@ def main() -> None:
 
     print("\n--- Per-Layer Per-Role Distribution Metrics ---")
     printed = 0
+    target = 20
     for layer, roles in sorted(result_w4a4.observers_data.items()):
-        if printed >= 20:
-            break
         for role in ("input", "weight", "output"):
-            if printed >= 20:
+            if printed >= target:
                 break
             qsnr = result_w4a4.qsnr_by_role.get(role, {}).get(layer)
             if qsnr is None:
@@ -255,6 +255,8 @@ def main() -> None:
                 diag = "unknown"
             print(f"  {layer:<30} {role:<8} {qsnr:>7.1f} dB  [{diag}]")
             printed += 1
+        if printed >= target:
+            break
 
     # ---- Step 4: W8A8 comparison ----
     print("\n[4/6] W8A8 Comparison Session")
@@ -272,7 +274,7 @@ def main() -> None:
         calib_data,
         eval_data=val_loader,
         eval_fn=eval_fn,
-        outputs=["accuracy", "qsnr"],
+        outputs=["accuracy", "qsnr", "distribution", "histogram"],
     )
 
     w4a4_ppl = (
@@ -335,19 +337,40 @@ def main() -> None:
             except Exception as exc:
                 print(f"      (skipped {role}: {exc})")
 
-    # 5d: Histogram overlay via viz.figures
-    print("  (d) Histogram overlay")
+    # 5d: Histogram overlay — separate plots for W4A4 and W8A8
+    print("  (d) Histogram overlay (8bit vs 4bit comparison)")
     try:
         from src.viz.figures import histogram_overlay
 
-        all_results = {
+        # W4A4 histogram (most quantization-sensitive layers)
+        print("      [W4A4]")
+        w4a4_results = {
             "part_1": {
                 "MXINT-W4A4-detail": {"report": result_w4a4.report},
             },
         }
-        fig = histogram_overlay(all_results, output_dir=analysis_dir)
+        fig = histogram_overlay(
+            w4a4_results, output_dir=analysis_dir, name="histogram_overlay_w4a4",
+        )
         plt.close(fig)
-        print(f"      -> {analysis_dir}/histogram_overlay.png")
+        print(f"      -> {analysis_dir}/histogram_overlay_w4a4.png")
+
+        # W8A8 histogram (for comparison with W4A4)
+        print("      [W8A8]")
+        w8a8_results = {
+            "part_1": {
+                "MXINT-W8A8-detail": {"report": result_w8a8.report},
+            },
+        }
+        fig = histogram_overlay(
+            w8a8_results, output_dir=analysis_dir, name="histogram_overlay_w8a8",
+        )
+        plt.close(fig)
+        print(f"      -> {analysis_dir}/histogram_overlay_w8a8.png")
+
+        print("      Note: Compare histogram_overlay_w4a4.png and")
+        print("            histogram_overlay_w8a8.png side by side to")
+        print("            visualize 8bit vs 4bit distribution differences.")
     except Exception as exc:
         print(f"      (skipped: {exc})")
 
@@ -360,7 +383,7 @@ def main() -> None:
     rows = []
     for role in ("input", "weight", "output"):
         for layer, qsnr in result_w4a4.qsnr_by_role.get(role, {}).items():
-            if qsnr is not None and qsnr == qsnr and qsnr != float("-inf"):
+            if qsnr is not None and not math.isnan(qsnr) and qsnr != float("-inf"):
                 try:
                     diag = result_w4a4.characterize.classify(layer, role)
                 except Exception:
