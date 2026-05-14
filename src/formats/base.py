@@ -104,7 +104,8 @@ class FormatBase(ABC):
         )
 
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
-                 scale=None, scale_storage="pot"):
+                 scale=None, scale_storage="pot", mask=None, scale_o=None,
+                 outlier_format=None):
         """Quantize tensor x to this format.
 
         Dispatches by granularity mode.  Subclasses may override to provide
@@ -115,12 +116,12 @@ class FormatBase(ABC):
             granularity: GranularitySpec controlling scale sharing.
             round_mode: "nearest" | "floor" | "even" | "dither"
             allow_denorm: If False, flush subnormal values to zero (float formats only).
-            scale: Optional pre-computed scale tensor.  If provided, skips
-                on-the-fly scale computation and uses this directly.
-            scale_storage: "pot" (default) or "fp32".  When "pot", the amax
-                is rounded to the nearest power of 2 before normalization.
-                Per_block is inherently POT (MX shared exponents); scale_storage
-                has no effect there.
+            scale: Optional pre-computed scale tensor (normal-group amax when sparse).
+            scale_storage: "pot" (default) or "fp32".
+            mask: Optional pre-computed boolean mask for static sparse.
+                  True = outlier.  Requires scale and scale_o.
+            scale_o: Optional pre-computed scale for outlier group (static sparse).
+            outlier_format: If set, outlier group uses this format instead of self.
 
         Returns:
             Quantized tensor with same shape as x.
@@ -133,30 +134,42 @@ class FormatBase(ABC):
         mode = granularity.mode
         if mode == GranularityMode.PER_TENSOR:
             if granularity.outlier_ratio > 0.0:
-                if scale is not None:
-                    raise NotImplementedError(
-                        "Static scale with sparse (outlier_ratio > 0) is not yet supported. "
-                        "Use scale=None (dynamic) or outlier_ratio=0."
-                    )
+                if mask is not None:
+                    return self._quantize_static_sparse(
+                        x, mask, scale, scale_o, round_mode, allow_denorm,
+                        scale_storage, outlier_format=outlier_format)
+                # Dynamic sparse — scale is ignored (recomputed via topk).
+                # Calibrated scales pass through here when modules have
+                # _output_scale buffers but no static sparse mask yet.
                 return self._quantize_per_tensor_sparse(
-                    x, granularity, round_mode, allow_denorm, scale_storage=scale_storage)
+                    x, granularity, round_mode, allow_denorm,
+                    scale_storage=scale_storage, outlier_format=outlier_format)
             return self._quantize_per_tensor(x, round_mode, allow_denorm, scale=scale,
                                               scale_storage=scale_storage)
         elif mode == GranularityMode.PER_CHANNEL:
             if granularity.outlier_ratio > 0.0:
-                if scale is not None:
-                    raise NotImplementedError(
-                        "Static scale with sparse (outlier_ratio > 0) is not yet supported. "
-                        "Use scale=None (dynamic) or outlier_ratio=0."
-                    )
+                if mask is not None:
+                    return self._quantize_static_sparse(
+                        x, mask, scale, scale_o, round_mode, allow_denorm,
+                        scale_storage, outlier_format=outlier_format)
                 return self._quantize_per_channel_sparse(
-                    x, granularity, round_mode, allow_denorm, scale_storage=scale_storage)
+                    x, granularity, round_mode, allow_denorm,
+                    scale_storage=scale_storage, outlier_format=outlier_format)
             return self._quantize_per_channel(x, granularity, round_mode, allow_denorm,
                                               scale=scale, scale_storage=scale_storage)
         elif mode == GranularityMode.PER_BLOCK:
+            if granularity.outlier_ratio > 0.0 and mask is not None:
+                return self._quantize_static_sparse(
+                    x, mask, scale, scale_o, round_mode, allow_denorm,
+                    scale_storage, outlier_format=outlier_format)
             return self._quantize_per_block(x, granularity, round_mode,
                                               scale=scale, scale_storage=scale_storage)
         elif mode == GranularityMode.BANK:
+            if granularity.outlier_ratio > 0.0 and mask is not None:
+                return self._quantize_per_bank_static_sparse(
+                    x, mask, scale, scale_o, granularity, round_mode,
+                    allow_denorm=allow_denorm, scale_storage=scale_storage,
+                    outlier_format=outlier_format)
             return self._quantize_per_bank(x, granularity, round_mode,
                                             allow_denorm=allow_denorm,
                                             scale=scale, scale_storage=scale_storage)
@@ -393,13 +406,113 @@ class FormatBase(ABC):
 
         return A
 
+    def _quantize_static_sparse(self, x, mask, amax_n, amax_o, round_mode,
+                                 allow_denorm=True, scale_storage="pot",
+                                 outlier_format=None):
+        """Static sparse quantization with pre-computed mask and scales.
+
+        Works for all granularity modes — mask and scale shapes are
+        broadcasting-compatible with x (determined by caller).
+
+        Args:
+            x: Input tensor.
+            mask: Boolean mask, True = outlier. Same shape as x.
+            amax_n: Normal group amax (shape matches granularity).
+            amax_o: Outlier group amax (shape matches granularity).
+            round_mode: Quantization rounding mode.
+            allow_denorm: Allow denormal values in output.
+            scale_storage: "pot" or "fp32" for scale rounding.
+            outlier_format: If set, quantize outlier group with this format.
+
+        Returns:
+            Quantized tensor with same shape as x.
+        """
+        amax_o = amax_o.clamp(min=1e-12)
+        amax_n = amax_n.clamp(min=1e-12)
+
+        if scale_storage == "pot":
+            amax_o = 2 ** torch.round(torch.log2(amax_o))
+            amax_n = 2 ** torch.round(torch.log2(amax_n))
+
+        # Outlier group — mask True elements
+        x_o = x * mask.float()
+        x_o_norm = x_o / amax_o
+        q_fmt = outlier_format if outlier_format is not None else self
+        x_q_o = q_fmt.quantize_elemwise(x_o_norm, round_mode=round_mode,
+                                         allow_denorm=allow_denorm)
+        x_q = x_q_o * amax_o * mask.float()
+
+        # Normal group — mask False elements
+        x_n = x * (~mask).float()
+        x_n_norm = x_n / amax_n
+        x_q_n = self.quantize_elemwise(x_n_norm, round_mode=round_mode,
+                                        allow_denorm=allow_denorm)
+        x_q = x_q + x_q_n * amax_n * (~mask).float()
+
+        # Preserve special values
+        x_q[x == float("Inf")] = float("Inf")
+        x_q[x == -float("Inf")] = -float("Inf")
+        x_q[x == float("NaN")] = float("NaN")
+
+        return x_q
+
+    def _quantize_per_bank_static_sparse(self, x, mask, amax_n, amax_o, granularity,
+                                          round_mode, allow_denorm=True, scale_storage="pot",
+                                          outlier_format=None):
+        """BANK static sparse: reshape to expose bank dim, then common static path.
+
+        Reshapes x and mask to (..., num_banks, bank_size) so that per-bank
+        amax tensors broadcast correctly with the reshaped tensor.
+        """
+        axis = granularity.bank_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        bank_size = granularity.bank_size
+        N_along = x.shape[axis]
+        if N_along % bank_size != 0:
+            raise ValueError(
+                f"Dimension {axis} size {N_along} not divisible "
+                f"by bank_size {bank_size}"
+            )
+
+        num_banks = N_along // bank_size
+
+        # Reshape: split axis into (num_banks, bank_size)
+        new_shape = list(x.shape)
+        new_shape[axis] = num_banks
+        new_shape.insert(axis + 1, bank_size)
+        x_r = x.reshape(new_shape)
+        mask_r = mask.reshape(new_shape)
+
+        # Ensure amax tensors are broadcastable with x_r.
+        # x_r has bank dim at `axis` and bank_size dim at `axis+1`.
+        # amax should have size 1 on all dims except `axis` where it has num_banks.
+        # Scalars (ndim==0) broadcast naturally — skip reshape.
+        target_shape = [1] * x_r.ndim
+        target_shape[axis] = num_banks
+        if amax_n.ndim > 0 and (amax_n.ndim != x_r.ndim or amax_n.shape != torch.Size(target_shape)):
+            amax_n = amax_n.reshape(target_shape)
+        if amax_o.ndim > 0 and (amax_o.ndim != x_r.ndim or amax_o.shape != torch.Size(target_shape)):
+            amax_o = amax_o.reshape(target_shape)
+
+        result = self._quantize_static_sparse(
+            x_r, mask_r, amax_n, amax_o, round_mode,
+            allow_denorm=allow_denorm, scale_storage=scale_storage,
+            outlier_format=outlier_format,
+        )
+        return result.reshape(x.shape)
+
     def _quantize_per_tensor_sparse(self, x, granularity, round_mode,
-                                     allow_denorm=True, scale_storage="pot"):
+                                     allow_denorm=True, scale_storage="pot",
+                                     outlier_format=None):
         """Per-tensor quantization with outlier/normal split.
 
         Splits the tensor into top-k outliers (by magnitude) and normals.
         Each group gets its own per-tensor amax.  Degenerates to standard
         per_tensor when k >= numel.
+
+        If ``outlier_format`` is set, the outlier group is quantized with
+        that format instead of ``self``.
         """
         # Float formats: sparse normalization is redundant with the format's
         # native dynamic range; delegate to non-sparse direct elemwise path.
@@ -432,11 +545,12 @@ class FormatBase(ABC):
 
         # Quantize each group separately
         x_q = torch.zeros_like(x)
+        q_fmt = outlier_format if outlier_format is not None else self
 
         # Outlier group
         x_o = x * mask.float()
         x_o_norm = x_o / amax_o
-        x_q_o = self.quantize_elemwise(
+        x_q_o = q_fmt.quantize_elemwise(
             x_o_norm, round_mode=round_mode, allow_denorm=allow_denorm)
         x_q = x_q + x_q_o * amax_o * mask.float()
 
@@ -455,12 +569,16 @@ class FormatBase(ABC):
         return x_q
 
     def _quantize_per_channel_sparse(self, x, granularity, round_mode,
-                                      allow_denorm=True, scale_storage="pot"):
+                                      allow_denorm=True, scale_storage="pot",
+                                      outlier_format=None):
         """Per-channel quantization with per-channel outlier/normal split.
 
         Within each channel, the top-k elements by magnitude (outliers) and
         the remaining elements (normals) each get their own per-channel amax.
         Degenerates to standard per_channel when k >= elements_per_channel.
+
+        If ``outlier_format`` is set, the outlier group is quantized with
+        that format instead of ``self``.
         """
         axis = granularity.channel_axis
         if axis < 0:
@@ -514,11 +632,12 @@ class FormatBase(ABC):
 
         # Quantize each group
         x_t_q = torch.zeros_like(x_t)
+        q_fmt = outlier_format if outlier_format is not None else self
 
         x_t_o = x_t * mask.float()
         x_t_n = x_t * (~mask).float()
 
-        x_t_q_o = self.quantize_elemwise(
+        x_t_q_o = q_fmt.quantize_elemwise(
             x_t_o / amax_o, round_mode=round_mode, allow_denorm=allow_denorm)
         x_t_q = x_t_q_o * amax_o * mask.float()
 

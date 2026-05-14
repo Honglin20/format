@@ -3,7 +3,7 @@ QuantScheme: format + granularity + transform + round_mode — the three-axis
 tensor-level quantization strategy.
 """
 from dataclasses import dataclass, field
-from typing import Union
+from typing import Optional, Union
 
 from ..formats.base import FormatBase, _VALID_ROUND_MODES
 from .granularity import GranularitySpec
@@ -40,6 +40,8 @@ class QuantScheme:
     transform: TransformBase = field(default_factory=IdentityTransform)
     round_mode: str = "nearest"
     scale_storage: str = "pot"
+    outlier_format: Optional[FormatBase] = None
+    """If set, outlier group uses this format instead of the main format."""
 
     def __post_init__(self):
         # Coerce string format to FormatBase (supports factory methods accepting str)
@@ -72,6 +74,14 @@ class QuantScheme:
         if self.scale_storage not in _VALID_SCALE_STORAGES:
             raise ValueError(
                 f"Invalid scale_storage {self.scale_storage!r}. Must be one of {_VALID_SCALE_STORAGES}"
+            )
+
+        # Coerce string outlier_format to FormatBase
+        if isinstance(self.outlier_format, str):
+            object.__setattr__(self, "outlier_format", _resolve_format(self.outlier_format))
+        if self.outlier_format is not None and not isinstance(self.outlier_format, FormatBase):
+            raise TypeError(
+                f"outlier_format must be FormatBase or str, got {type(self.outlier_format).__name__}"
             )
 
     @staticmethod

@@ -190,6 +190,8 @@ class QuantConfig:
 
     # ---- Sparse (outlier bank) ----
     outlier_ratio: float = 0.0              # ∈ [0, 1). >0: split each granularity group into outliers + normals
+    outlier_format: Optional[str] = None    # Format for outlier group (None = use main format)
+    a_outlier_format: Optional[str] = None  # Activation-only override (None = follow outlier_format)
 
     # ---- Mode ----
     weight_only: bool = False
@@ -304,6 +306,32 @@ class QuantConfig:
             raise ValueError(
                 f"outlier_ratio must be in [0, 1], got {self.outlier_ratio}"
             )
+        if self.outlier_format is not None:
+            if not isinstance(self.outlier_format, str):
+                raise TypeError(
+                    f"outlier_format must be a string, got {type(self.outlier_format).__name__}"
+                )
+            try:
+                FormatBase.from_str(self.outlier_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown outlier_format {self.outlier_format!r}: {e}"
+                ) from None
+        if self.a_outlier_format is not None:
+            if not isinstance(self.a_outlier_format, str):
+                raise TypeError(
+                    f"a_outlier_format must be a string, got {type(self.a_outlier_format).__name__}"
+                )
+            try:
+                FormatBase.from_str(self.a_outlier_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown a_outlier_format {self.a_outlier_format!r}: {e}"
+                ) from None
+            if self.weight_only:
+                raise ValueError(
+                    "a_outlier_format cannot be set when weight_only=True"
+                )
 
     def to_op_config(self) -> OpQuantConfig:
         """Convert this user-facing config to internal :class:`OpQuantConfig`.
@@ -331,17 +359,23 @@ class QuantConfig:
         a_tx = _make_activation_transform(self.transform, self.sq_alpha)
 
         # ---- QuantScheme ----
+        w_outlier_fmt = FormatBase.from_str(self.outlier_format) if self.outlier_format is not None else None
+        a_outlier_fmt_raw = self.a_outlier_format if self.a_outlier_format is not None else self.outlier_format
+        a_outlier_fmt = FormatBase.from_str(a_outlier_fmt_raw) if a_outlier_fmt_raw is not None else None
+
         w_scheme = QuantScheme(
             format=w_fmt,
             granularity=w_gran,
             transform=w_tx,
             scale_storage=self.scale_storage,
+            outlier_format=w_outlier_fmt,
         )
         a_scheme = QuantScheme(
             format=a_fmt,
             granularity=a_gran,
             transform=a_tx,
             scale_storage=self.scale_storage,
+            outlier_format=a_outlier_fmt,
         )
 
         # ---- Storage scheme (element-wise) ----
@@ -359,7 +393,8 @@ class QuantConfig:
         if self.weight_only:
             return OpQuantConfig(weight=w_scheme, storage=storage)
 
-        return OpQuantConfig(input=a_scheme, weight=w_scheme, storage=storage)
+        return OpQuantConfig(input=a_scheme, weight=w_scheme, output=a_scheme,
+                            storage=storage)
 
     @classmethod
     def from_descriptor(cls, desc: Dict[str, Any]) -> "QuantConfig":
@@ -445,6 +480,20 @@ class QuantConfig:
         prescale_pot = desc.get("pre_scale_pot", False)
 
         outlier_ratio = desc.get("outlier_ratio", 0.0)
+        outlier_format = desc.get("outlier_format")
+        if outlier_format is not None and not isinstance(outlier_format, str):
+            raise TypeError(
+                f"'outlier_format' must be a string, got {type(outlier_format).__name__}"
+            )
+        a_outlier_format = desc.get("a_outlier_format")
+        if a_outlier_format is not None and not isinstance(a_outlier_format, str):
+            raise TypeError(
+                f"'a_outlier_format' must be a string, got {type(a_outlier_format).__name__}"
+            )
+        if weight_only and a_outlier_format is not None:
+            raise ValueError(
+                "'a_outlier_format' cannot be used with 'weight_only=True'"
+            )
 
         # Storage: support legacy keys "bfloat"/"fp" for backward compat
         _sbits = desc.get("storage_bits", 0)
@@ -506,6 +555,8 @@ class QuantConfig:
             prescale_init=prescale_init,
             prescale_pot=prescale_pot,
             outlier_ratio=outlier_ratio,
+            outlier_format=outlier_format,
+            a_outlier_format=a_outlier_format,
         )
 
 

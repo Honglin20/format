@@ -43,7 +43,7 @@ _quantize_elemwise_core = _elemwise_core
 # QuantScheme-driven unified entry point
 # ---------------------------------------------------------------------------
 
-def quantize(x, scheme=None, allow_denorm=True, scale=None):
+def quantize(x, scheme=None, allow_denorm=True, scale=None, mask=None, scale_o=None):
     """Quantize tensor x using a QuantScheme (format + granularity + transform).
 
     This is the primary entry point for tensor-level quantization.
@@ -53,15 +53,19 @@ def quantize(x, scheme=None, allow_denorm=True, scale=None):
         scheme: QuantScheme specifying format, granularity, transform, and round_mode.
             If None, input is returned unchanged (no quantization path).
         allow_denorm: If False, flush subnormal values to zero (float formats only).
-        scale: Optional pre-computed scale tensor.  If provided, the format
-            uses this scale instead of computing one from ``x``.  Only
-            meaningful for PER_CHANNEL and PER_BLOCK granularity.
+        scale: Optional pre-computed scale tensor (normal-group amax when sparse).
+        mask: Optional pre-computed boolean mask for static sparse. True = outlier.
+        scale_o: Optional pre-computed scale for outlier group (static sparse).
 
     Returns:
         Quantized tensor with same shape as x.
     """
     if scheme is None:
         return x
+    if not isinstance(x, torch.Tensor):
+        raise TypeError(
+            f"quantize() expects a Tensor, got {type(x).__name__}: {x!r}"
+        )
     # Set re-entrancy guard so Tensor dunder patches don't intercept
     # internal tensor arithmetic inside format/granularity logic.
     _enter_quantize()
@@ -69,7 +73,9 @@ def quantize(x, scheme=None, allow_denorm=True, scale=None):
         x_t = scheme.transform.forward(x)
         x_q = scheme.format.quantize(x_t, scheme.granularity, scheme.round_mode,
                                       allow_denorm=allow_denorm, scale=scale,
-                                      scale_storage=scheme.scale_storage)
+                                      scale_storage=scheme.scale_storage,
+                                      mask=mask, scale_o=scale_o,
+                                      outlier_format=scheme.outlier_format)
         return scheme.transform.inverse(x_q)
     finally:
         _exit_quantize()
