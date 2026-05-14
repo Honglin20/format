@@ -11,6 +11,7 @@ Run:  PYTHONPATH=. python scripts/4bit_format_analysis.py
 
 from __future__ import annotations
 
+import copy
 import os
 
 import torch
@@ -20,6 +21,7 @@ from scripts.transformer_quant_study import (
     make_dataloaders,
     eval_fn,
 )
+from src.session import Study, QuantConfig
 
 
 def main() -> None:
@@ -104,9 +106,68 @@ def main() -> None:
     print()
 
     # ------------------------------------------------------------------
-    # Part 1: Uniform W4A4 — sweep over granularity (per-block, per-channel, per-tensor)
+    # Part 1: MXINT Precision Comparison (W8A8 / W4A8 / W4A4)
     # ------------------------------------------------------------------
-    print("\n[Part 1] Uniform W4A4 — TBD")
+    print("\n" + "=" * 60)
+    print("  Part 1: MXINT Precision Comparison (W8A8 / W4A8 / W4A4)")
+    print("=" * 60)
+
+    mxint_configs = [
+        QuantConfig(
+            name="MXINT-W8A8",
+            w_format="int8", a_format="int8",
+            w_granularity="per_block", a_granularity="per_block",
+            w_block_size=32, a_block_size=32,
+            quantize_nonlinear=False,
+        ),
+        QuantConfig(
+            name="MXINT-W4A8",
+            w_format="int4", a_format="int8",
+            w_granularity="per_block", a_granularity="per_block",
+            w_block_size=32, a_block_size=32,
+            quantize_nonlinear=False,
+        ),
+        QuantConfig(
+            name="MXINT-W4A4",
+            w_format="int4", a_format="int4",
+            w_granularity="per_block", a_granularity="per_block",
+            w_block_size=32, a_block_size=32,
+            quantize_nonlinear=False,
+        ),
+    ]
+
+    study = Study(mxint_configs, model=copy.deepcopy(model))
+    report = study.run(
+        calib_data,
+        eval_data=val_loader,
+        eval_fn=eval_fn,
+        outputs="default",
+    )
+
+    print("\n--- Summary (local QSNR) ---")
+    report.print_summary()
+
+    print("\n--- Summary (accum QSNR) ---")
+    report.print_summary(qsnr_type="accum")
+
+    # --- Markdown table ---
+    df_local = report.summary_dataframe(qsnr_type="local")
+    df_accum = report.summary_dataframe(qsnr_type="accum")
+
+    print("\n--- MXINT Comparison Table ---")
+    print()
+    print(f"| Config | PPL | ΔPPL | QSNR (local) | QSNR (accum) |")
+    print(f"|--------|-----|------|--------------|---------------|")
+    print(f"| FP32 baseline | {fp32_ppl:.4f} | — | — | — |")
+
+    if df_local is not None and df_accum is not None:
+        for idx in range(len(df_local)):
+            config = df_local.iloc[idx]["config"]
+            ppl = df_local.iloc[idx]["quant_perplexity"]
+            dppl = df_local.iloc[idx]["delta_perplexity"]
+            qsnr_local = df_local.iloc[idx]["avg_qsnr_db"]
+            qsnr_accum = df_accum.iloc[idx]["avg_qsnr_db"]
+            print(f"| {config} | {ppl:.4f} | {dppl:+.4f} | {qsnr_local:.2f} | {qsnr_accum:.2f} |")
 
     # ------------------------------------------------------------------
     # Part 2: W4A4 with Hadamard / SmoothQuant transforms
