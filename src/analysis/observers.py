@@ -257,6 +257,8 @@ class HistogramObserver(SliceAwareObserver):
             "fp32_hist": torch.histc(fp32, bins=self.n_bins).cpu(),
             "quant_hist": torch.histc(quant, bins=self.n_bins).cpu(),
             "err_hist": torch.histc(fp32 - quant, bins=self.n_bins).cpu(),
+            "fp32_min": fp32.min().item(),
+            "fp32_max": fp32.max().item(),
         }
 
 

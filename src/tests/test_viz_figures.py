@@ -187,13 +187,16 @@ class TestSessionPlotHistogramOverlay:
         )
 
     @staticmethod
-    def _make_hist_metrics(fp32_hist, quant_hist, err_hist=None):
+    def _make_hist_metrics(fp32_hist, quant_hist, err_hist=None,
+                           fp32_min=-1.0, fp32_max=1.0):
         """Helper to construct HistogramObserver-style metrics dict."""
         import numpy as np
 
         d = {
             "fp32_hist": np.asarray(fp32_hist, dtype=np.float64),
             "quant_hist": np.asarray(quant_hist, dtype=np.float64),
+            "fp32_min": float(fp32_min),
+            "fp32_max": float(fp32_max),
         }
         if err_hist is not None:
             d["err_hist"] = np.asarray(err_hist, dtype=np.float64)
@@ -328,6 +331,52 @@ class TestSessionPlotHistogramOverlay:
         result = self._make_result(observers_data, qsnr_by_role)
         with pytest.raises(ValueError, match="Histogram data not available"):
             result.plot.histogram_overlay(role="weight")
+
+    def test_xaxis_shows_value_range(self):
+        """X-axis labels show actual value range from fp32_min/fp32_max."""
+        import numpy as np
+
+        hist = np.array([0, 10, 50, 30, 10, 0], dtype=np.float64)
+        observers_data = self._make_observers_data([
+            ("L1", "input", self._make_hist_metrics(
+                hist, hist * 0.90, fp32_min=-2.5, fp32_max=3.0)),
+        ])
+        qsnr_by_role = {"input": {"L1": 30.0}}
+
+        result = self._make_result(observers_data, qsnr_by_role)
+        fig = result.plot.histogram_overlay()
+
+        ax = fig.get_axes()[0]
+        xlabel = ax.get_xlabel()
+        assert xlabel == "Value", f"Expected 'Value' xlabel, got '{xlabel}'"
+
+        # xticklabels should be near the min/max range, not bin indices
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        vals = [float(l) for l in labels]
+        assert min(vals) >= -2.5
+        assert max(vals) <= 3.0
+
+    def test_error_uses_twin_axis(self):
+        """Error channel uses twin Y-axis (right side)."""
+        import numpy as np
+
+        hist = np.array([0, 10, 50, 30, 10, 0], dtype=np.float64)
+        err = np.array([0, 2, 8, 5, 1, 0], dtype=np.float64)
+        observers_data = self._make_observers_data([
+            ("L1", "input", self._make_hist_metrics(hist, hist * 0.90, err)),
+        ])
+        qsnr_by_role = {"input": {"L1": 30.0}}
+
+        result = self._make_result(observers_data, qsnr_by_role)
+        fig = result.plot.histogram_overlay()
+
+        # Should have a twin axis for error
+        ax = fig.get_axes()[0]
+        assert ax.get_ylabel() == "Count"
+        # twinx creates a second axes sharing the same x
+        twin_axes = [a for a in fig.get_axes() if a is not ax]
+        assert len(twin_axes) == 1
+        assert twin_axes[0].get_ylabel() == "Error count"
 
 
 class TestTransformHeatmap:

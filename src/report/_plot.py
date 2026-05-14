@@ -1823,10 +1823,14 @@ class SessionPlotAccessor:
                     continue
                 key = f"{layer} [{r}]"
                 hist_data = {}
-                for k in ("fp32_hist", "quant_hist", "err_hist"):
+                for k in ("fp32_hist", "quant_hist", "err_hist",
+                          "fp32_min", "fp32_max"):
                     v = metrics.get(k)
                     if v is not None:
-                        hist_data[k] = np.asarray(v) if not isinstance(v, np.ndarray) else v
+                        if k in ("fp32_min", "fp32_max"):
+                            hist_data[k] = float(v)
+                        else:
+                            hist_data[k] = np.asarray(v) if not isinstance(v, np.ndarray) else v
                 if "fp32_hist" not in hist_data or "quant_hist" not in hist_data:
                     continue
                 layer_hists[key] = hist_data
@@ -1865,22 +1869,50 @@ class SessionPlotAccessor:
         fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
 
         for ax, (layer_key, hist_data) in zip(axes[0], top_layers):
-            for channel, color, label in [
-                ("fp32_hist", "#3498db", "fp32"),
-                ("quant_hist", "#e74c3c", "quant"),
-                ("err_hist", "#95a5a6", "error"),
-            ]:
-                counts = hist_data.get(channel)
-                if counts is None or not isinstance(counts, np.ndarray):
-                    continue
-                bin_centers = np.arange(len(counts))
-                ax.fill_between(bin_centers, counts, alpha=0.35, color=color,
-                                label=label, step="mid")
-                ax.plot(bin_centers, counts, color=color, linewidth=0.8)
+            # ── fp32: blue fill ──
+            fp32_counts = hist_data.get("fp32_hist")
+            if fp32_counts is not None and isinstance(fp32_counts, np.ndarray):
+                ax.fill_between(np.arange(len(fp32_counts)), fp32_counts,
+                                alpha=0.25, color="#3498db", label="fp32", step="mid")
+
+            # ── quant: red dashed outline (no fill, visible even when overlapped) ──
+            quant_counts = hist_data.get("quant_hist")
+            if quant_counts is not None and isinstance(quant_counts, np.ndarray):
+                ax.plot(np.arange(len(quant_counts)), quant_counts,
+                        color="#e74c3c", linewidth=1.2, linestyle="--", label="quant")
+
+            # ── x-axis: actual value range from observer data ──
+            fp32_min = hist_data.get("fp32_min")
+            fp32_max = hist_data.get("fp32_max")
+            if fp32_min is not None and fp32_max is not None:
+                n_bins = len(fp32_counts) if fp32_counts is not None else len(quant_counts)
+                edges = np.linspace(fp32_min, fp32_max, n_bins + 1)
+                # Show ~5 ticks along the value range
+                tick_idx = np.linspace(0, n_bins - 1, min(5, n_bins)).astype(int)
+                ax.set_xticks(tick_idx)
+                ax.set_xticklabels([f"{edges[i]:.3g}" for i in tick_idx], fontsize=7)
+                ax.set_xlabel("Value")
+            else:
+                ax.set_xlabel("Bin")
+
+            # ── error: twin axis (right Y) so small errors are visible ──
+            err_counts = hist_data.get("err_hist")
+            if err_counts is not None and isinstance(err_counts, np.ndarray) and err_counts.sum() > 0:
+                ax2 = ax.twinx()
+                ax2.fill_between(np.arange(len(err_counts)), err_counts,
+                                 alpha=0.3, color="#95a5a6", label="error", step="mid")
+                ax2.set_ylabel("Error count", fontsize=7)
+                ax2.tick_params(axis="y", labelsize=6)
+                # Merge legends from both axes
+                handles1, labels1 = ax.get_legend_handles_labels()
+                handles2, labels2 = ax2.get_legend_handles_labels()
+                ax2.legend(handles1 + handles2, labels1 + labels2,
+                           fontsize=7, loc="upper right")
+            else:
+                ax.legend(fontsize=7, loc="upper right")
+
             ax.set_title(layer_key, fontsize=9)
-            ax.set_xlabel("Bin")
             ax.set_ylabel("Count")
-            ax.legend(fontsize=7, loc="upper right")
             ax.grid(True, alpha=0.3)
 
         role_label = "" if role is None else f" ({role})"
