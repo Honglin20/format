@@ -928,9 +928,37 @@ class StudyPlotAccessor:
         fig.tight_layout()
         return fig
 
+    # ── Kurtosis analysis ───────────────────────────────────────────────
+
+    def kurtosis_analysis(self, roles=("input", "weight", "output")) -> plt.Figure:
+        """Kurtosis distribution, QSNR relationship, and top-layer ranking.
+
+        Three-panel figure: kurtosis histogram with reference lines,
+        kurtosis vs QSNR scatter by role, and top-15 (layer, role) ranked
+        by kurtosis.
+
+        Args:
+            roles: Tensor roles to include (default input/weight/output).
+
+        Returns:
+            matplotlib Figure with 1×3 panels.
+        """
+        df = self._report.to_dataframe()
+        if df is None or df.empty or "kurtosis" not in df.columns:
+            raise ValueError(
+                "Kurtosis data not available — DistributionObserver was not active. "
+                + _how_to("distribution", "qsnr")
+            )
+
+        role_df = df[df["role"].isin(roles)]
+        if role_df.empty:
+            raise ValueError(f"No data for roles {list(roles)}.")
+
+        return _render_kurtosis_analysis(role_df, roles)
+
     # ── Per-layer role distribution histogram ──────────────────────────
 
-    def per_layer_role_histogram(self, k: int = 5) -> plt.Figure:
+    def per_layer_role_histogram(self, k: int = 5, log_y: bool = False) -> plt.Figure:
         """Per-layer, per-role fp32 value distribution for worst-QSNR layers.
 
         For the *k* layers with the lowest QSNR, plots the fp32 value
@@ -943,6 +971,7 @@ class StudyPlotAccessor:
 
         Args:
             k: Number of worst-QSNR layers to show (default 5).
+            log_y: If True, use log scale for histogram y-axis.
 
         Returns:
             matplotlib Figure with *k* rows × 3 columns.
@@ -1070,6 +1099,8 @@ class StudyPlotAccessor:
                     ax.set_ylabel("Count", fontsize=7)
                 ax.tick_params(labelsize=6)
                 ax.grid(True, alpha=0.2)
+                if log_y and key in layer_role_hists:
+                    ax.set_yscale("log")
 
         fig.suptitle("Per-Layer fp32 Value Distribution — Worst-QSNR Layers",
                      fontsize=12, y=1.01)
@@ -1484,9 +1515,37 @@ class SessionPlotAccessor:
         fig.tight_layout()
         return fig
 
+    # ── Kurtosis analysis ───────────────────────────────────────────────
+
+    def kurtosis_analysis(self, roles=("input", "weight", "output")) -> plt.Figure:
+        """Kurtosis distribution, QSNR relationship, and top-layer ranking.
+
+        Three-panel figure: kurtosis histogram with reference lines,
+        kurtosis vs QSNR scatter by role, and top-15 (layer, role) ranked
+        by kurtosis.
+
+        Args:
+            roles: Tensor roles to include (default input/weight/output).
+
+        Returns:
+            matplotlib Figure with 1×3 panels.
+        """
+        df = self._build_df()
+        if df is False or df.empty or "kurtosis" not in df.columns:
+            raise ValueError(
+                "Kurtosis data not available — DistributionObserver was not active. "
+                + _how_to("distribution", "qsnr")
+            )
+
+        role_df = df[df["role"].isin(roles)]
+        if role_df.empty:
+            raise ValueError(f"No data for roles {list(roles)}.")
+
+        return _render_kurtosis_analysis(role_df, roles)
+
     # ── Per-layer role distribution histogram ───────────────────────────────
 
-    def per_layer_role_histogram(self, k: int = 5) -> plt.Figure:
+    def per_layer_role_histogram(self, k: int = 5, log_y: bool = False) -> plt.Figure:
         """Per-layer, per-role fp32 value distribution for worst-QSNR layers."""
         import torch as _torch
 
@@ -1576,6 +1635,8 @@ class SessionPlotAccessor:
                     ax.set_ylabel("Count", fontsize=7)
                 ax.tick_params(labelsize=6)
                 ax.grid(True, alpha=0.2)
+                if log_y and key in layer_role_hists:
+                    ax.set_yscale("log")
 
         fig.suptitle("Per-Layer fp32 Value Distribution — Worst-QSNR Layers", fontsize=12, y=1.01)
         fig.tight_layout()
@@ -1622,11 +1683,16 @@ class SessionPlotAccessor:
 
     # ── Distribution ───────────────────────────────────────────────────
 
-    def layer_histogram(self, layer: str, role: str = "weight") -> plt.Figure:
+    def layer_histogram(self, layer: str, role: str = "weight", log_y: bool = False) -> plt.Figure:
         """Histogram overlay: fp32 vs quantised distribution for a layer/role.
 
         Requires HistogramObserver data (``outputs=["histogram"]``).
         Falls back to a text placeholder when histogram data is absent.
+
+        Args:
+            layer: Module name.
+            role: ``"input"`` / ``"weight"`` / ``"output"``.
+            log_y: If True, use log scale for the y-axis (counts).
         """
         hist_data = self._get_histogram_data(layer, role)
         if hist_data is None:
@@ -1682,6 +1748,10 @@ class SessionPlotAccessor:
         ax2.set_ylabel("Count", fontsize=8)
         ax2.grid(alpha=0.2)
 
+        if log_y:
+            ax1.set_yscale("log")
+            ax2.set_yscale("log")
+
         fig.tight_layout()
         return fig
 
@@ -1710,6 +1780,108 @@ class SessionPlotAccessor:
         ax.set_title(f"Per-Channel QSNR: {layer} ({role})  —  "
                      f"{len(per_ch_qsnr)} channels")
         ax.grid(axis="x", alpha=0.3)
+        fig.tight_layout()
+        return fig
+
+    # ── Histogram overlay ──────────────────────────────────────────────────
+
+    def histogram_overlay(self, top_k: int = 5) -> plt.Figure:
+        """Three-channel histogram overlay (fp32 / quant / error).
+
+        Extracts histogram data from ``HistogramObserver`` (keys:
+        ``fp32_hist``, ``quant_hist``, ``err_hist``) and renders the most
+        quantization-sensitive (layer, role) pairs as overlaid semi-transparent
+        bar charts. Sensitivity is determined by QSNR (lower = more sensitive),
+        with a fallback to activation magnitude when no QSNR data is available.
+
+        Requires ``outputs=["histogram", "qsnr"]`` (or ``"all"``) in
+        :meth:`Session.run`.
+
+        Args:
+            top_k: Number of most-sensitive (layer, role) pairs to display.
+
+        Returns:
+            matplotlib Figure.
+        """
+        _np = np
+
+        # Collect histogram data and QSNR from all (layer, role) pairs
+        layer_hists: dict = {}
+        layer_error: dict = {}  # QSNR for sensitivity ranking
+
+        for layer in sorted(self._result.observers_data.keys()):
+            for role in ("input", "weight", "output"):
+                metrics = self._get_histogram_data(layer, role)
+                if metrics is None:
+                    continue
+                fp32_hist = metrics.get("fp32_hist")
+                quant_hist = metrics.get("quant_hist")
+                if fp32_hist is None or quant_hist is None:
+                    continue
+                key = f"{layer} [{role}]"
+                hist_data = {}
+                for k in ("fp32_hist", "quant_hist", "err_hist"):
+                    v = metrics.get(k)
+                    if v is not None:
+                        hist_data[k] = np.asarray(v) if not isinstance(v, np.ndarray) else v
+                if "fp32_hist" not in hist_data or "quant_hist" not in hist_data:
+                    continue
+                layer_hists[key] = hist_data
+
+                # Get QSNR from per-role data
+                qsnr = None
+                role_dict = self._result.qsnr_by_role.get(role, {})
+                if layer in role_dict:
+                    qsnr = role_dict[layer]
+                if qsnr is not None and not (math.isnan(qsnr) if isinstance(qsnr, float) else False):
+                    layer_error[key] = qsnr
+
+        if not layer_hists:
+            raise ValueError(
+                "Histogram data not available. "
+                "Run Session with outputs=[\"histogram\"] (or \"all\") "
+                "to enable HistogramObserver."
+            )
+
+        # Rank by sensitivity: lowest QSNR first (most quantization-sensitive)
+        if layer_error:
+            top_layers = sorted(
+                layer_hists.items(),
+                key=lambda x: layer_error.get(x[0], float("inf")),
+            )[:top_k]
+        else:
+            print("  Warning: No QSNR data for sensitivity ranking, "
+                  "falling back to histogram magnitude")
+            top_layers = sorted(
+                layer_hists.items(),
+                key=lambda x: x[1].get("fp32_hist", _np.array(0)).sum(),
+                reverse=True,
+            )[:top_k]
+
+        n = len(top_layers)
+        fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
+
+        for ax, (layer_key, hist_data) in zip(axes[0], top_layers):
+            for channel, color, label in [
+                ("fp32_hist", "#3498db", "fp32"),
+                ("quant_hist", "#e74c3c", "quant"),
+                ("err_hist", "#95a5a6", "error"),
+            ]:
+                counts = hist_data.get(channel)
+                if counts is None or not isinstance(counts, np.ndarray):
+                    continue
+                bin_centers = np.arange(len(counts))
+                ax.fill_between(bin_centers, counts, alpha=0.35, color=color,
+                                label=label, step="mid")
+                ax.plot(bin_centers, counts, color=color, linewidth=0.8)
+            ax.set_title(layer_key, fontsize=9)
+            ax.set_xlabel("Bin")
+            ax.set_ylabel("Count")
+            ax.legend(fontsize=7, loc="upper right")
+            ax.grid(True, alpha=0.3)
+
+        fig.suptitle("Activation Histograms (fp32 / quant / error) — "
+                     "Most Sensitive Layers", fontsize=13)
         fig.tight_layout()
         return fig
 
@@ -1763,3 +1935,104 @@ def _fmt_bits(fmt_name: str) -> int:
     """
     m = re.search(r"(\d+)", str(fmt_name))
     return int(m.group(1)) if m else 32
+
+
+def _render_kurtosis_analysis(df, roles=("input", "weight", "output")) -> plt.Figure:
+    """Shared kurtosis analysis rendering for StudyPlotAccessor and SessionPlotAccessor.
+
+    Args:
+        df: DataFrame with columns ``kurtosis``, ``qsnr_db``, ``role``, ``layer``.
+        roles: Roles to include.
+
+    Returns:
+        matplotlib Figure with 1×3 panels.
+    """
+    role_colors = {"input": "#0072B2", "weight": "#D55E00", "output": "#009E73"}
+    fallback = plt.cm.tab10.colors
+
+    kurt_vals = df["kurtosis"].dropna().tolist()
+    if not kurt_vals:
+        raise ValueError("No valid kurtosis values found.")
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+
+    # -- Panel 1: kurtosis histogram ---------------------------------------
+    ax = axes[0]
+    counts, bins, _ = ax.hist(kurt_vals, bins=40, color="#3498db", alpha=0.7,
+                               edgecolor="white")
+    y_max = counts.max()
+    for threshold, label, style in [
+        (3.0, "normal (3)", "dashed"),
+        (6.0, "heavy-tailed (6)", "solid"),
+        (10.0, "extreme (10)", "dotted"),
+    ]:
+        ax.axvline(x=threshold, color="black", linestyle=style,
+                   linewidth=1.0, alpha=0.6)
+        ax.text(threshold, y_max * 0.92, label,
+                rotation=90, va="top", ha="right", fontsize=7,
+                color="black", alpha=0.7)
+    ax.set_xlabel("Kurtosis")
+    ax.set_ylabel("Count (layers × roles)")
+    ax.set_title("Kurtosis Distribution\n(vertical lines: normal / heavy / extreme)")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.set_xscale("log")
+
+    # -- Panel 2: kurtosis vs QSNR scatter --------------------------------
+    ax = axes[1]
+    for role in roles:
+        role_df = df[df["role"] == role]
+        if role_df.empty:
+            continue
+        color = role_colors.get(role, fallback[0])
+        has_qsnr = "qsnr_db" in df.columns
+        if has_qsnr:
+            ax.scatter(role_df["kurtosis"], role_df["qsnr_db"],
+                      label=role, color=color, alpha=0.7, s=35)
+        else:
+            ax.scatter(role_df["kurtosis"], [0] * len(role_df),
+                      label=role, color=color, alpha=0.7, s=35)
+
+    ax.axvline(x=3.0, color="gray", linestyle="--", linewidth=1.0, alpha=0.6,
+               label="k=3 (normal)")
+    ax.axvline(x=6.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6,
+               label="k=6 (heavy-tailed)")
+    ax.set_xlabel("Kurtosis")
+    ax.set_ylabel("QSNR (dB)" if "qsnr_db" in df.columns else "(no QSNR)")
+    ax.set_title("Kurtosis vs QSNR by Role")
+    ax.legend(fontsize=7, loc="upper right")
+    ax.grid(True, alpha=0.3)
+    ax.set_xscale("log")
+
+    # -- Panel 3: top-15 (layer, role) ranked by kurtosis -----------------
+    ax = axes[2]
+    top_n = min(15, len(df))
+    ranked = df.nlargest(top_n, "kurtosis")
+    labels = []
+    kv = []
+    colors_list = []
+    for _, row in ranked.iterrows():
+        short = _short_layer_name(row["layer"])[:18]
+        labels.append(f"{short}|{row['role'][:3]}")
+        kv.append(row["kurtosis"])
+        colors_list.append(role_colors.get(row["role"], fallback[0]))
+
+    y_pos = range(len(labels))
+    ax.barh(y_pos, kv, color=colors_list, alpha=0.7, edgecolor="white")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.invert_yaxis()
+    ax.axvline(x=3.0, color="black", linestyle="--", linewidth=1.0, alpha=0.5)
+    ax.axvline(x=6.0, color="black", linestyle="-", linewidth=1.0, alpha=0.5)
+    ax.set_xlabel("Kurtosis")
+    ax.set_title(f"Top-{top_n} by Kurtosis (layer | role)")
+    ax.grid(True, alpha=0.3, axis="x")
+
+    from matplotlib.patches import Patch
+    legend_patches = [Patch(color=c, label=r) for r, c in role_colors.items()
+                      if r in roles]
+    ax.legend(handles=legend_patches, fontsize=7, loc="lower right")
+
+    fig.suptitle("Kurtosis Analysis — Distribution, QSNR Relationship, Top Layers",
+                 fontsize=13)
+    fig.tight_layout()
+    return fig
