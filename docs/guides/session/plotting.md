@@ -83,6 +83,7 @@ results/
 | `correlation_heatmap()` | `"distribution"` + `"qsnr"` | — |
 | `cost_decomposition()` | — | cost 已执行 |
 | `role_distribution_comparison()` | `"distribution"` | — |
+| `histogram_overlay(top_k, role)` | `"histogram"` + `"qsnr"` | QSNR 可选，缺失时按幅度排序 |
 | `error_propagation(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认，需 hook + observer 数据） |
 | `accumulated_vs_local(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认，需 hook + observer 数据） |
 
@@ -198,6 +199,35 @@ fig = report.plot.role_distribution_comparison()
 ```
 
 **所需 observer**: `"distribution"`（需 `skewness`、`kurtosis`、`norm_entropy`）
+
+---
+
+### 直方图叠加 `histogram_overlay(top_k, role)` <small>Session only</small>
+
+三通道半透明叠加直方图（fp32 蓝 / quant 红 / error 灰），展示最受量化影响的 `(layer, role)` 对。按 QSNR 排序（最低 = 最敏感），无 QSNR 数据时回退为按激活幅度排序：
+
+```python
+result = Session(model, cfg).run(
+    calib_data, eval_fn=eval_fn,
+    outputs=["histogram", "qsnr"],
+)
+
+# 全部 role 混合展示，取 top-5
+fig = result.plot.histogram_overlay(top_k=5)
+
+# 只看 weight 的直方图
+fig = result.plot.histogram_overlay(top_k=5, role="weight")
+
+# 只看到 activation input
+fig = result.plot.histogram_overlay(top_k=5, role="input")
+
+# 只看到 activation output
+fig = result.plot.histogram_overlay(top_k=5, role="output")
+```
+
+`role` 可选值：`"input"` / `"weight"` / `"output"` / `None`（默认，全部 role）。
+
+**所需 observer**: `"histogram"` + `"qsnr"`（QSNR 用于排序，缺失时回退为幅度排序）
 
 ---
 

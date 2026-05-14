@@ -292,6 +292,43 @@ class TestSessionPlotHistogramOverlay:
         assert "L3" in axes[0].get_title()
         assert "L2" in axes[1].get_title()
 
+    def test_role_filter_single_role(self):
+        """role='weight' only collects weight histograms."""
+        import numpy as np
+
+        hist = np.array([0, 10, 50, 30, 10, 0], dtype=np.float64)
+        observers_data = self._make_observers_data([
+            ("L1", "input", self._make_hist_metrics(hist, hist * 0.90)),
+            ("L1", "weight", self._make_hist_metrics(hist, hist * 0.80)),
+            ("L1", "output", self._make_hist_metrics(hist, hist * 0.70)),
+        ])
+        qsnr_by_role = {
+            "input": {"L1": 30.0},
+            "weight": {"L1": 20.0},
+            "output": {"L1": 10.0},
+        }
+
+        result = self._make_result(observers_data, qsnr_by_role)
+        fig = result.plot.histogram_overlay(role="weight")
+
+        axes = fig.get_axes()
+        assert len(axes) == 1
+        assert "[weight]" in axes[0].get_title()
+
+    def test_role_filter_no_matching_data(self):
+        """role with no histogram data raises ValueError."""
+        import numpy as np
+
+        hist = np.array([0, 10, 50, 30, 10, 0], dtype=np.float64)
+        observers_data = self._make_observers_data([
+            ("L1", "input", self._make_hist_metrics(hist, hist * 0.90)),
+        ])
+        qsnr_by_role = {"input": {"L1": 30.0}}
+
+        result = self._make_result(observers_data, qsnr_by_role)
+        with pytest.raises(ValueError, match="Histogram data not available"):
+            result.plot.histogram_overlay(role="weight")
+
 
 class TestTransformHeatmap:
     def test_renders_without_error(self):

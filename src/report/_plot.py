@@ -1785,7 +1785,7 @@ class SessionPlotAccessor:
 
     # ── Histogram overlay ──────────────────────────────────────────────────
 
-    def histogram_overlay(self, top_k: int = 5) -> plt.Figure:
+    def histogram_overlay(self, top_k: int = 5, role: str | None = None) -> plt.Figure:
         """Three-channel histogram overlay (fp32 / quant / error).
 
         Extracts histogram data from ``HistogramObserver`` (keys:
@@ -1799,26 +1799,29 @@ class SessionPlotAccessor:
 
         Args:
             top_k: Number of most-sensitive (layer, role) pairs to display.
+            role: Filter by tensor role. One of ``"input"``, ``"weight"``,
+                ``"output"``, or ``None`` for all roles.
 
         Returns:
             matplotlib Figure.
         """
         _np = np
+        roles = ("input", "weight", "output") if role is None else (role,)
 
-        # Collect histogram data and QSNR from all (layer, role) pairs
+        # Collect histogram data and QSNR from matching (layer, role) pairs
         layer_hists: dict = {}
         layer_error: dict = {}  # QSNR for sensitivity ranking
 
         for layer in sorted(self._result.observers_data.keys()):
-            for role in ("input", "weight", "output"):
-                metrics = self._get_histogram_data(layer, role)
+            for r in roles:
+                metrics = self._get_histogram_data(layer, r)
                 if metrics is None:
                     continue
                 fp32_hist = metrics.get("fp32_hist")
                 quant_hist = metrics.get("quant_hist")
                 if fp32_hist is None or quant_hist is None:
                     continue
-                key = f"{layer} [{role}]"
+                key = f"{layer} [{r}]"
                 hist_data = {}
                 for k in ("fp32_hist", "quant_hist", "err_hist"):
                     v = metrics.get(k)
@@ -1830,7 +1833,7 @@ class SessionPlotAccessor:
 
                 # Get QSNR from per-role data
                 qsnr = None
-                role_dict = self._result.qsnr_by_role.get(role, {})
+                role_dict = self._result.qsnr_by_role.get(r, {})
                 if layer in role_dict:
                     qsnr = role_dict[layer]
                 if qsnr is not None and not (math.isnan(qsnr) if isinstance(qsnr, float) else False):
@@ -1880,7 +1883,8 @@ class SessionPlotAccessor:
             ax.legend(fontsize=7, loc="upper right")
             ax.grid(True, alpha=0.3)
 
-        fig.suptitle("Activation Histograms (fp32 / quant / error) — "
+        role_label = "" if role is None else f" ({role})"
+        fig.suptitle(f"Activation Histograms (fp32 / quant / error){role_label} — "
                      "Most Sensitive Layers", fontsize=13)
         fig.tight_layout()
         return fig
