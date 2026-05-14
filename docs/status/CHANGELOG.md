@@ -5,6 +5,50 @@
 
 ---
 
+## ADR-012: BANK 粒度 + Sparse 静态量化 + 可配置 Outlier Format ✅ (2026-05-15)
+
+**四阶段实现，每阶段独立 review:**
+
+| Phase | 内容 | 关键文件 | 测试 |
+|-------|------|---------|------|
+| P1 | BANK 粒度 | `granularity.py`, `base.py` (_quantize_per_bank), `_config.py` (QuantConfig bank), `pipeline.py` (_compute_bank_amax) | 27 tests |
+| P2 | compute_sparse_mask() | `quantize/_sparse_mask.py` — per-sample group top-k + cross-sample voting | 13 tests |
+| P3 | 静态 sparse 全 mode | `base.py` dispatch: mask!=None → static path; scale-without-mask → dynamic fallthrough | 27 tests |
+| P4 | 可配置 outlier_format | `quant_scheme.py` (outlier_format field), `_config.py` (outlier_format/a_outlier_format), `base.py` all sparse methods accept outlier_format | 17 tests |
+
+**设计文档**: `docs/architecture/012-bank-sparse-static-outlier-format.md`
+**验证文档**: `docs/verification/020-bank-granularity.md`, `docs/verification/021-sparse-mask-voting.md`
+
+**核心架构决策:**
+- BANK 为独立 `GranularityMode`，非 PER_BLOCK 特例（scale 类型和 reduction 语义不同）
+- `compute_sparse_mask()` 与 FormatBase 量化 dispatch 解耦，单一职责
+- Static sparse: 校准期 pre-compute mask + scales，推理期无 topk 排序开销
+- `outlier_format` 放在 QuantScheme（三轴之一），沿用 `a_format` 的 override 模式
+- Scale-without-mask 优雅 fallthrough 到 dynamic sparse（不抛异常）
+
+**Review 修复 (14d8a54):**
+- `_mask_per_block` group size: block_size → 完整 block tile 元素数
+- PER_BLOCK static sparse: raise NotImplementedError（非静默错误）
+- BANK amax reshape: 元素数验证 + axis bounds check
+- Calibration: 非整除维度 warning
+
+**Commit 历史:**
+| Commit | 内容 |
+|--------|------|
+| `40494bc` | GranularityMode.BANK + bank_size/bank_axis |
+| `1c6e88a` | _quantize_per_bank + BANK dispatch |
+| `a0bc748` | QuantConfig bank support |
+| `33bf717` | Session integration test |
+| `3ad0b02` | E2E regression verified |
+| `f6eb5cd` | compute_sparse_mask + per-mode helpers |
+| `927d8c0` | Static sparse paths + outlier_format (P3+P4) |
+| `7b7ea11` | Revert output=a_scheme (separate concern) |
+| `14d8a54` | Code review fixes |
+
+**全量测试**: 2,499 passed | **E2E 回归**: MNIST + Transformer 通过
+
+---
+
 ## Sparse (outlier_ratio) 泛化 ✅ (2026-05-13)
 
 **实现内容**: 将 `outlier_ratio` 从仅 PER_BLOCK 扩展到所有 granularity 模式。
