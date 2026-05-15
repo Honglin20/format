@@ -51,4 +51,29 @@ cfg = QuantConfig(w_format="fp4_e2m1", w_granularity="per_block",
 | per_channel | C 个 amax | 2C 个 amax |
 | per_block | 每 block 1 个 shared exp | 每 block 2 个 shared exp |
 
-> 详见 [ADR-011: Sparse 泛化](../../architecture/011-sparse-generalization.md)
+> 详见 [ADR-011: Sparse 泛化](../architecture/011-sparse-generalization.md)
+
+## Group Sparse 格式分配（ADR-013）
+
+与上述 per-element sparse 不同，group sparse 在**粒度组**边界上分配格式：某些 channel（或 block、bank）整体用高精度格式，其余用低精度格式。这比 per-element sparse 更结构化、更利于硬件加速。
+
+```python
+# 30% channel 用 int8 高精度，其余用 int4
+cfg = QuantConfig(w_format="int4", w_granularity="per_channel",
+                  group_format="int8", group_ratio=0.3)
+
+# BANK 模式：50% bank 用 fp8
+cfg = QuantConfig(w_format="int4", w_granularity="bank", w_block_size=16,
+                  group_format="fp8_e4m3", group_ratio=0.5)
+```
+
+| 粒度 | group 数 | group_mask 形状 | 行为 |
+|------|---------|----------------|------|
+| per_tensor | 1 | `()` scalar | 退化：全用 group_format |
+| per_channel | C | `(C,)` | 整个 channel 统一 H 或 L |
+| per_block | B | block-group shape | 整个 block 统一 H 或 L |
+| bank | G | `(num_banks,)` | 整个 bank 统一 H 或 L |
+
+`group_format` 和 `outlier_format` 互斥：同一配置中只能使用一种 sparse 模式。
+
+> 详见 [ADR-013: Group Sparse](../../architecture/013-group-sparse-format-assignment.md)

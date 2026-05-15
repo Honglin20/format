@@ -104,7 +104,7 @@ result.plot.per_layer_role_histogram(k=5) # 最差 k 层 × 三 role 直方图�
 |------|------|
 | [格式选择](docs/guides/formats.md) | int8/fp8/nf4 等格式对比 & 自定义格式注册 |
 | [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block |
-| [Sparse Outlier](docs/guides/sparse-outlier.md) | 离群点隔离量化 — 原理、效果与 ratio 选择 |
+| [Sparse Outlier](docs/guides/sparse-outlier.md) | 离群点隔离量化 — per-element sparse 与 group sparse 两种模式 |
 | [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive |
 | [校准策略](docs/guides/calibration.md) | mse / max / percentile / kl |
 
