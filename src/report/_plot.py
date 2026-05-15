@@ -219,11 +219,17 @@ class StudyPlotAccessor:
 
     # ── QSNR comparison ─────────────────────────────────────────────────
 
-    def qsnr_comparison(self) -> plt.Figure:
+    def qsnr_comparison(self, qsnr_cap=None, skip_activations: bool = True, op_types=None) -> plt.Figure:
         """Per-layer QSNR overlay for all configs.
 
         One line per config. Layers are aligned by name across configs so
         that the same layer in different configs shares an x-position.
+
+        Args:
+            qsnr_cap: If set, clip QSNR values to this maximum.
+            skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
+            op_types: Operator types to include, e.g. ``["linear", "conv"]``.
+                ``None`` = all types.
 
         Returns:
             matplotlib Figure. The caller is responsible for ``show()`` or
@@ -232,6 +238,9 @@ class StudyPlotAccessor:
         Raises:
             ValueError: If ``qsnr_db`` is not available (QSNRObserver not active).
         """
+        from src.analysis._error_provenance import is_activation_layer
+        from src.viz._layer_classify import filter_layers_by_type
+
         df = self._report.to_dataframe()
         if df is None or df.empty or "qsnr_db" not in df.columns:
             raise ValueError(
@@ -241,6 +250,10 @@ class StudyPlotAccessor:
 
         # Collect union of all layer names across configs
         all_layers = list(dict.fromkeys(df["layer"]))  # preserve order, deduplicate
+        if skip_activations:
+            all_layers = [n for n in all_layers if not is_activation_layer(n)]
+        if op_types:
+            all_layers = filter_layers_by_type(all_layers, op_types)
         configs = sorted(df["config"].unique())
 
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -251,6 +264,8 @@ class StudyPlotAccessor:
             # Average QSNR across roles per layer, then map to layer order
             per_layer = cfg_df.groupby("layer")["qsnr_db"].mean()
             values = [per_layer.get(l, float("nan")) for l in all_layers]
+            if qsnr_cap is not None:
+                values = [min(v, qsnr_cap) if v == v else v for v in values]
             ax.plot(x_positions, values, marker="o", label=cfg, linewidth=2)
 
         short_names = [_short_layer_name(l) for l in all_layers]
@@ -956,9 +971,250 @@ class StudyPlotAccessor:
 
         return _render_kurtosis_analysis(role_df, roles)
 
+    # ── Histogram overlay ──────────────────────────────────────────────
+
+    def histogram_overlay(
+        self,
+        top_k: int = 5,
+        role: str | None = None,
+        layer: str | None = None,
+        op_types: list | None = None,
+        qsnr_type: str = "local",
+    ) -> plt.Figure:
+        """Three-channel histogram overlay across all study configs.
+
+        Two modes:
+
+        - **Top-K mode** (default): most sensitive (layer, role) pairs.
+        - **Single-layer mode** (``layer="fc1"``): input/weight/output for
+          one layer.
+
+        Args:
+            top_k: Number of most-sensitive pairs (top-K mode).
+            role: Filter by tensor role. ``None`` = all.
+            layer: Specific layer name → single-layer mode.
+            op_types: Operator types to include, e.g. ``["linear"]``.
+            qsnr_type: ``"local"`` or ``"accum"`` for ranking/labelling.
+
+        Returns:
+            matplotlib Figure.
+        """
+        import torch as _torch
+        from src.viz._layer_classify import filter_layers_by_type
+
+        if qsnr_type not in ("local", "accum"):
+            raise ValueError(f"qsnr_type must be 'local' or 'accum', got {qsnr_type!r}")
+
+        roles = ("input", "weight", "output") if role is None else (role,)
+        if qsnr_type == "accum" and role is None:
+            roles = ("output",)
+
+        # Collect histogram data and QSNR across all results
+        layer_hists: dict = {}
+        layer_error: dict = {}
+
+        for part_name, part_results in self._report._results.items():
+            for r in part_results:
+                accum_lookup = _build_accum_qsnr_lookup(r) if qsnr_type == "accum" else {}
+                obs = r.observers_data
+                if not obs:
+                    continue
+                for lname, roles_dict in obs.items():
+                    if op_types and filter_layers_by_type([lname], op_types) == []:
+                        continue
+                    for role_str, stages in roles_dict.items():
+                        if role_str not in roles:
+                            continue
+                        key = f"{lname} [{role_str}]"
+                        if key in layer_hists:
+                            continue
+                        for _stage, slices in stages.items():
+                            for _slice_key, metrics in slices.items():
+                                if "fp32_hist" not in metrics or "quant_hist" not in metrics:
+                                    continue
+                                entry = {}
+                                for k in ("fp32_hist", "quant_hist", "err_hist",
+                                          "fp32_min", "fp32_max"):
+                                    v = metrics.get(k)
+                                    if v is not None:
+                                        if k in ("fp32_min", "fp32_max"):
+                                            entry[k] = float(v)
+                                        elif isinstance(v, _torch.Tensor):
+                                            entry[k] = v.cpu().float().numpy()
+                                        elif not isinstance(v, np.ndarray):
+                                            entry[k] = np.asarray(v)
+                                        else:
+                                            entry[k] = v
+                                if "fp32_hist" in entry and "quant_hist" in entry:
+                                    layer_hists[key] = entry
+
+                                # QSNR for ranking
+                                if qsnr_type == "accum":
+                                    qsnr = accum_lookup.get(lname)
+                                else:
+                                    qsnr = metrics.get("qsnr_db")
+                                if qsnr is not None and not (math.isnan(qsnr) if isinstance(qsnr, float) else False):
+                                    layer_error[key] = qsnr
+
+        if layer is not None:
+            return self._histogram_single_layer_study(layer, layer_hists, layer_error)
+
+        if not layer_hists:
+            raise ValueError("Histogram data not available. Run with outputs=[\"histogram\"].")
+
+        if layer_error:
+            top_layers = sorted(
+                layer_hists.items(),
+                key=lambda x: layer_error.get(x[0], float("inf")),
+            )[:top_k]
+        else:
+            top_layers = sorted(
+                layer_hists.items(),
+                key=lambda x: x[1].get("fp32_hist", np.array(0)).sum(),
+                reverse=True,
+            )[:top_k]
+
+        n = len(top_layers)
+        fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
+        for ax, (lk, hd) in zip(axes[0], top_layers):
+            _render_hist_subplot(ax, hd)
+            q_label = f"  local={layer_error.get(lk, float('nan')):.1f}dB" if layer_error else ""
+            ax.set_title(f"{lk}{q_label}", fontsize=9)
+
+        role_label = "" if role is None else f" ({role})"
+        q_label2 = "accum" if qsnr_type == "accum" else "local"
+        fig.suptitle(f"Activation Histograms (fp32 / quant / error){role_label} — "
+                     f"Most Sensitive Layers ({q_label2} QSNR)", fontsize=13)
+        fig.tight_layout()
+        return fig
+
+    def _histogram_single_layer_study(self, layer: str, layer_hists: dict,
+                                      layer_error: dict) -> plt.Figure:
+        """Single-layer mode for StudyPlotAccessor."""
+        roles = ("input", "weight", "output")
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4), squeeze=False)
+        short = _short_layer_name(layer)
+
+        for col_idx, r in enumerate(roles):
+            ax = axes[0, col_idx]
+            key = f"{layer} [{r}]"
+            hd = layer_hists.get(key)
+            if hd is not None:
+                _render_hist_subplot(ax, hd)
+                qsnr = layer_error.get(key)
+                q_str = f"local={qsnr:.1f}dB" if qsnr is not None else ""
+                ax.set_title(f"{short}\n{r}  {q_str}", fontsize=9)
+            else:
+                ax.text(0.5, 0.5, "no histogram data", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=9, color="gray")
+                ax.set_title(f"{short}\n{r}", fontsize=9)
+
+        fig.suptitle(f"Activation Histograms — {short}", fontsize=13)
+        fig.tight_layout()
+        return fig
+
+    # ── Per-layer role QSNR line ─────────────────────────────────────
+
+    def per_layer_role_qsnr_line(
+        self,
+        role: str = "output",
+        qsnr_type: str = "local",
+        op_types: list | None = None,
+        skip_activations: bool = True,
+        qsnr_cap=None,
+    ) -> plt.Figure:
+        """Per-layer QSNR line chart comparing configs for a single role.
+
+        One line per config. Layers are aligned by name union across configs.
+
+        Args:
+            role: Tensor role to plot (``"input"`` / ``"weight"`` /
+                ``"output"``). In accum mode, only ``"output"`` is
+                meaningful.
+            qsnr_type: ``"local"`` (observer) or ``"accum"`` (hook).
+            op_types: Operator types to include, e.g. ``["linear"]``.
+            skip_activations: If True (default), exclude activation layers.
+            qsnr_cap: If set, clip QSNR values to this maximum.
+
+        Returns:
+            matplotlib Figure.
+        """
+        from src.analysis._error_provenance import is_activation_layer
+        from src.viz._layer_classify import filter_layers_by_type
+
+        if role not in _VALID_PLOT_ROLES:
+            raise ValueError(f"Invalid role {role!r}.")
+        if qsnr_type not in ("local", "accum"):
+            raise ValueError(f"qsnr_type must be 'local' or 'accum', got {qsnr_type!r}")
+
+        # Collect per-result QSNR
+        config_data: dict = {}
+        for part_name, part_results in self._report._results.items():
+            for r in part_results:
+                label = f"{part_name}/{r.name}" if part_name else r.name
+
+                if qsnr_type == "accum":
+                    lookup = _build_accum_qsnr_lookup(r)
+                    qsnr_dict = lookup
+                else:
+                    qsnr_dict = r.qsnr_by_role.get(role, {})
+                    if not qsnr_dict:
+                        # Fallback to qsnr_per_layer for output
+                        if role == "output" and r.qsnr_per_layer:
+                            qsnr_dict = r.qsnr_per_layer
+
+                if not qsnr_dict:
+                    continue
+
+                config_data[label] = qsnr_dict
+
+        if not config_data:
+            raise ValueError(
+                f"No QSNR data for role={role!r}. " + _how_to("qsnr")
+            )
+
+        # Union of all layer names
+        all_layers = list(dict.fromkeys(
+            n for qd in config_data.values() for n in qd
+        ))
+        if skip_activations:
+            all_layers = [n for n in all_layers if not is_activation_layer(n)]
+        if op_types:
+            all_layers = filter_layers_by_type(all_layers, op_types)
+
+        if not all_layers:
+            raise ValueError("No layers remaining after filtering.")
+
+        fig, ax = plt.subplots(figsize=(max(12, len(all_layers) * 0.3), 6))
+        x = np.arange(len(all_layers))
+        colors = plt.cm.tab10(np.linspace(0, 1, max(len(config_data), 1)))
+
+        for idx, (label, qsnr_dict) in enumerate(config_data.items()):
+            vals = [qsnr_dict.get(n, float("nan")) for n in all_layers]
+            if qsnr_cap is not None:
+                vals = [min(v, qsnr_cap) if v == v else v for v in vals]
+            color = colors[idx % len(colors)]
+            ax.plot(x, vals, "o-", color=color, linewidth=1.5, markersize=5,
+                    label=label)
+
+        short_names = [_short_layer_name(n) for n in all_layers]
+        ax.set_xticks(x)
+        ax.set_xticklabels(short_names, rotation=45, ha="right", fontsize=7)
+        ax.set_ylabel("QSNR (dB)")
+        q_label = "accum" if qsnr_type == "accum" else "local"
+        ax.set_title(f"Per-Layer QSNR — {role} role ({q_label})")
+        ax.legend(fontsize=7)
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        return fig
+
     # ── Per-layer role distribution histogram ──────────────────────────
 
-    def per_layer_role_histogram(self, k: int = 5, log_y: bool = False) -> plt.Figure:
+    def per_layer_role_histogram(
+        self, k: int = 5, log_y: bool = False,
+        op_types: list | None = None,
+        qsnr_type: str = "local",
+    ) -> plt.Figure:
         """Per-layer, per-role fp32 value distribution for worst-QSNR layers.
 
         For the *k* layers with the lowest QSNR, plots the fp32 value
@@ -984,6 +1240,7 @@ class StudyPlotAccessor:
         roles = ("input", "weight", "output")
 
         # Collect histogram data from raw observer buffers
+        # key → {fp32_hist, quant_hist, err_hist, fp32_min, fp32_max}
         layer_role_hists: dict = {}
         layer_role_dist: dict = {}  # DistributionObserver fallback
 
@@ -1008,7 +1265,21 @@ class StudyPlotAccessor:
                                     elif not isinstance(h, np.ndarray):
                                         h = np.asarray(h)
                                     if len(h) > 0:
-                                        layer_role_hists[key] = h
+                                        entry = {"fp32_hist": h}
+                                        for ch in ("quant_hist", "err_hist"):
+                                            v = metrics.get(ch)
+                                            if v is not None:
+                                                if isinstance(v, _torch.Tensor):
+                                                    v = v.cpu().float().numpy()
+                                                elif not isinstance(v, np.ndarray):
+                                                    v = np.asarray(v)
+                                                if len(v) > 0:
+                                                    entry[ch] = v
+                                        for bound in ("fp32_min", "fp32_max"):
+                                            v = metrics.get(bound)
+                                            if v is not None:
+                                                entry[bound] = float(v)
+                                        layer_role_hists[key] = entry
                                 if key not in layer_role_dist:
                                     dkeys = ("mean", "std", "skewness",
                                              "kurtosis", "min", "max")
@@ -1023,16 +1294,44 @@ class StudyPlotAccessor:
                 + _how_to("histogram", "distribution")
             )
 
-        # Rank layers by QSNR from dataframe
+        # Rank layers by QSNR
+        from src.viz._layer_classify import filter_layers_by_type
+
+        accum_avg: dict = {}
+        if qsnr_type == "accum":
+            accum_sums: dict = {}
+            accum_counts: dict = {}
+            for part_results in self._report._results.values():
+                for r in part_results:
+                    lookup = _build_accum_qsnr_lookup(r)
+                    for lname, val in lookup.items():
+                        accum_sums[lname] = accum_sums.get(lname, 0.0) + val
+                        accum_counts[lname] = accum_counts.get(lname, 0) + 1
+            for lname in accum_sums:
+                accum_avg[lname] = accum_sums[lname] / accum_counts[lname]
+
         df = self._report.to_dataframe()
         bottom_k: list = []
-        if df is not None and not df.empty and "qsnr_db" in df.columns:
+        if qsnr_type == "accum" and accum_avg:
+            ranked = sorted(accum_avg, key=lambda l: accum_avg[l])
+            if op_types:
+                ranked = filter_layers_by_type(ranked, op_types)
+            all_layers_set = set(
+                l for l, r in set(layer_role_hists.keys()) | set(layer_role_dist.keys())
+            )
+            bottom_k = [l for l in ranked if l in all_layers_set][:k]
+        elif df is not None and not df.empty and "qsnr_db" in df.columns:
             layer_qsnr = df.groupby("layer")["qsnr_db"].mean()
-            bottom_k = layer_qsnr.nsmallest(k).index.tolist()
+            ranked = layer_qsnr.nsmallest(len(layer_qsnr)).index.tolist()
+            if op_types:
+                ranked = filter_layers_by_type(ranked, op_types)
+            bottom_k = ranked[:k]
         else:
             all_layers = sorted(set(
                 l for l, r in set(layer_role_hists.keys()) | set(layer_role_dist.keys())
             ))
+            if op_types:
+                all_layers = filter_layers_by_type(all_layers, op_types)
             bottom_k = all_layers[:k]
 
         if not bottom_k:
@@ -1058,12 +1357,48 @@ class StudyPlotAccessor:
                 key = (layer, role)
 
                 if key in layer_role_hists:
-                    counts = layer_role_hists[key]
-                    bin_centers = np.arange(len(counts))
-                    ax.fill_between(bin_centers, counts, alpha=0.5,
-                                    color="#3498db", step="mid")
-                    ax.plot(bin_centers, counts, color="#3498db",
-                           linewidth=0.6)
+                    entry = layer_role_hists[key]
+                    fp32_counts = entry.get("fp32_hist")
+                    quant_counts = entry.get("quant_hist")
+                    err_counts = entry.get("err_hist")
+                    n_bins = len(fp32_counts) if fp32_counts is not None else 64
+                    x_bins = np.arange(n_bins)
+
+                    # fp32: blue fill (matching histogram_overlay)
+                    if fp32_counts is not None:
+                        ax.fill_between(x_bins, fp32_counts, alpha=0.25,
+                                        color="#3498db", label="fp32", step="mid")
+
+                    # quant: red dashed outline
+                    if quant_counts is not None:
+                        ax.plot(x_bins, quant_counts, color="#e74c3c",
+                                linewidth=1.2, linestyle="--", label="quant")
+
+                    # x-axis: real value range
+                    lo = entry.get("fp32_min")
+                    hi = entry.get("fp32_max")
+                    if lo is not None and hi is not None:
+                        edges = np.linspace(lo, hi, n_bins + 1)
+                        tick_idx = np.linspace(0, n_bins - 1, min(5, n_bins)).astype(int)
+                        ax.set_xticks(tick_idx)
+                        ax.set_xticklabels([f"{edges[i]:.3g}" for i in tick_idx], fontsize=6)
+                        ax.set_xlabel("Value", fontsize=7)
+                    else:
+                        ax.set_xlabel("Bin", fontsize=7)
+
+                    # error: twin axis so small errors are visible
+                    if err_counts is not None and err_counts.sum() > 0:
+                        ax2 = ax.twinx()
+                        ax2.fill_between(x_bins, err_counts, alpha=0.3,
+                                         color="#95a5a6", label="error", step="mid")
+                        ax2.set_ylabel("Error", fontsize=6)
+                        ax2.tick_params(axis="y", labelsize=5)
+                        handles1, labels1 = ax.get_legend_handles_labels()
+                        handles2, labels2 = ax2.get_legend_handles_labels()
+                        ax2.legend(handles1 + handles2, labels1 + labels2,
+                                  fontsize=5, loc="upper right")
+                    else:
+                        ax.legend(fontsize=5, loc="upper right")
                 elif key in layer_role_dist:
                     d = layer_role_dist[key]
                     lines = [
@@ -1084,16 +1419,20 @@ class StudyPlotAccessor:
 
                 # QSNR label per (layer, role)
                 qsnr_str = ""
-                if df is not None and not df.empty and "qsnr_db" in df.columns:
+                if qsnr_type == "accum":
+                    aq = accum_avg.get(layer)
+                    if aq is not None:
+                        qsnr_str = f"accum={aq:.1f}dB"
+                elif df is not None and not df.empty and "qsnr_db" in df.columns:
                     sub = df[(df["layer"] == layer) & (df["role"] == role)]
                     if not sub.empty:
                         vals = sub["qsnr_db"].dropna()
                         if not vals.empty:
-                            qsnr_str = f"QSNR={vals.mean():.1f}dB"
+                            qsnr_str = f"local={vals.mean():.1f}dB"
 
                 short = _short_layer_name(layer)
                 ax.set_title(f"{short}\n{role} {qsnr_str}", fontsize=7)
-                if row_idx == n_rows - 1:
+                if row_idx == n_rows - 1 and key not in layer_role_hists:
                     ax.set_xlabel("Bin", fontsize=7)
                 if col_idx == 0:
                     ax.set_ylabel("Count", fontsize=7)
@@ -1169,12 +1508,21 @@ class SessionPlotAccessor:
 
     # ── QSNR comparison ─────────────────────────────────────────────────────
 
-    def qsnr_comparison(self) -> plt.Figure:
+    def qsnr_comparison(self, qsnr_cap=None, skip_activations: bool = True, op_types=None) -> plt.Figure:
         """Per-layer QSNR line chart for a single config.
+
+        Args:
+            qsnr_cap: If set, clip QSNR values to this maximum.
+            skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
+            op_types: Operator types to include, e.g. ``["linear", "conv"]``.
+                ``None`` = all types.
 
         Returns:
             matplotlib Figure.
         """
+        from src.analysis._error_provenance import is_activation_layer
+        from src.viz._layer_classify import filter_layers_by_type
+
         qsnr = self._result.qsnr_per_layer
         if not qsnr:
             raise ValueError(
@@ -1183,7 +1531,13 @@ class SessionPlotAccessor:
             )
 
         layers = list(qsnr.keys())
-        values = list(qsnr.values())
+        if skip_activations:
+            layers = [n for n in layers if not is_activation_layer(n)]
+        if op_types:
+            layers = filter_layers_by_type(layers, op_types)
+        values = [qsnr[n] for n in layers]
+        if qsnr_cap is not None:
+            values = [min(v, qsnr_cap) for v in values]
         short_names = [_short_layer_name(l) for l in layers]
 
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -1545,8 +1899,19 @@ class SessionPlotAccessor:
 
     # ── Per-layer role distribution histogram ───────────────────────────────
 
-    def per_layer_role_histogram(self, k: int = 5, log_y: bool = False) -> plt.Figure:
-        """Per-layer, per-role fp32 value distribution for worst-QSNR layers."""
+    def per_layer_role_histogram(
+        self, k: int = 5, log_y: bool = False,
+        op_types: list | None = None,
+        qsnr_type: str = "local",
+    ) -> plt.Figure:
+        """Per-layer, per-role fp32 value distribution for worst-QSNR layers.
+
+        Args:
+            k: Number of worst-QSNR layers to show.
+            log_y: Use log scale for histogram y-axis.
+            op_types: Operator types to include, e.g. ``["linear"]``.
+            qsnr_type: ``"local"`` or ``"accum"`` for ranking and labels.
+        """
         import torch as _torch
 
         roles = ("input", "weight", "output")
@@ -1571,7 +1936,21 @@ class SessionPlotAccessor:
                                 elif not isinstance(h, np.ndarray):
                                     h = np.asarray(h)
                                 if len(h) > 0:
-                                    layer_role_hists[key] = h
+                                    entry = {"fp32_hist": h}
+                                    for ch in ("quant_hist", "err_hist"):
+                                        v = metrics.get(ch)
+                                        if v is not None:
+                                            if isinstance(v, _torch.Tensor):
+                                                v = v.cpu().float().numpy()
+                                            elif not isinstance(v, np.ndarray):
+                                                v = np.asarray(v)
+                                            if len(v) > 0:
+                                                entry[ch] = v
+                                    for bound in ("fp32_min", "fp32_max"):
+                                        v = metrics.get(bound)
+                                        if v is not None:
+                                            entry[bound] = float(v)
+                                    layer_role_hists[key] = entry
                             if key not in layer_role_dist:
                                 dkeys = ("mean", "std", "skewness", "kurtosis", "min", "max")
                                 d = {dk: metrics[dk] for dk in dkeys if dk in metrics}
@@ -1582,13 +1961,24 @@ class SessionPlotAccessor:
             raise ValueError("No histogram or distribution data. " + _how_to("histogram", "distribution"))
 
         # Rank layers by QSNR
-        qsnr = self._result.qsnr_per_layer
+        from src.viz._layer_classify import filter_layers_by_type
+
+        accum_lookup = _build_accum_qsnr_lookup(self._result) if qsnr_type == "accum" else {}
+        if qsnr_type == "accum":
+            qsnr = accum_lookup
+        else:
+            qsnr = self._result.qsnr_per_layer
+
+        all_layers_set = set(l for l, r in set(layer_role_hists.keys()) | set(layer_role_dist.keys()))
         if qsnr:
-            sorted_layers = sorted(qsnr, key=lambda l: qsnr[l])
-            all_layers_set = set(l for l, r in set(layer_role_hists.keys()) | set(layer_role_dist.keys()))
+            sorted_layers = sorted(qsnr, key=lambda l: qsnr.get(l, float("inf")))
+            if op_types:
+                sorted_layers = filter_layers_by_type(sorted_layers, op_types)
             bottom_k = [l for l in sorted_layers if l in all_layers_set][:k]
         else:
-            all_layers = sorted(set(l for l, r in set(layer_role_hists.keys()) | set(layer_role_dist.keys())))
+            all_layers = sorted(all_layers_set)
+            if op_types:
+                all_layers = filter_layers_by_type(all_layers, op_types)
             bottom_k = all_layers[:k]
 
         if not bottom_k:
@@ -1608,10 +1998,48 @@ class SessionPlotAccessor:
                 ax = axes[row_idx, col_idx]
                 key = (layer, role)
                 if key in layer_role_hists:
-                    counts = layer_role_hists[key]
-                    bin_centers = np.arange(len(counts))
-                    ax.fill_between(bin_centers, counts, alpha=0.5, color="#3498db", step="mid")
-                    ax.plot(bin_centers, counts, color="#3498db", linewidth=0.6)
+                    entry = layer_role_hists[key]
+                    fp32_counts = entry.get("fp32_hist")
+                    quant_counts = entry.get("quant_hist")
+                    err_counts = entry.get("err_hist")
+                    n_bins = len(fp32_counts) if fp32_counts is not None else 64
+                    x_bins = np.arange(n_bins)
+
+                    # fp32: blue fill (matching histogram_overlay)
+                    if fp32_counts is not None:
+                        ax.fill_between(x_bins, fp32_counts, alpha=0.25,
+                                        color="#3498db", label="fp32", step="mid")
+
+                    # quant: red dashed outline
+                    if quant_counts is not None:
+                        ax.plot(x_bins, quant_counts, color="#e74c3c",
+                                linewidth=1.2, linestyle="--", label="quant")
+
+                    # x-axis: real value range
+                    lo = entry.get("fp32_min")
+                    hi = entry.get("fp32_max")
+                    if lo is not None and hi is not None:
+                        edges = np.linspace(lo, hi, n_bins + 1)
+                        tick_idx = np.linspace(0, n_bins - 1, min(5, n_bins)).astype(int)
+                        ax.set_xticks(tick_idx)
+                        ax.set_xticklabels([f"{edges[i]:.3g}" for i in tick_idx], fontsize=6)
+                        ax.set_xlabel("Value", fontsize=7)
+                    else:
+                        ax.set_xlabel("Bin", fontsize=7)
+
+                    # error: twin axis so small errors are visible
+                    if err_counts is not None and err_counts.sum() > 0:
+                        ax2 = ax.twinx()
+                        ax2.fill_between(x_bins, err_counts, alpha=0.3,
+                                         color="#95a5a6", label="error", step="mid")
+                        ax2.set_ylabel("Error", fontsize=6)
+                        ax2.tick_params(axis="y", labelsize=5)
+                        handles1, labels1 = ax.get_legend_handles_labels()
+                        handles2, labels2 = ax2.get_legend_handles_labels()
+                        ax2.legend(handles1 + handles2, labels1 + labels2,
+                                  fontsize=5, loc="upper right")
+                    else:
+                        ax.legend(fontsize=5, loc="upper right")
                 elif key in layer_role_dist:
                     d = layer_role_dist[key]
                     lines = [f"mean={d.get('mean', 0):.2g}", f"std={d.get('std', 0):.2g}",
@@ -1624,12 +2052,17 @@ class SessionPlotAccessor:
                             ha="center", va="center", fontsize=9, color="gray")
 
                 qsnr_str = ""
-                qsnr_val = self._result.qsnr_per_layer.get(layer)
-                if qsnr_val is not None and qsnr_val == qsnr_val:
-                    qsnr_str = f"QSNR={qsnr_val:.1f}dB"
+                if qsnr_type == "accum":
+                    qsnr_val = accum_lookup.get(layer)
+                    if qsnr_val is not None:
+                        qsnr_str = f"accum={qsnr_val:.1f}dB"
+                else:
+                    qsnr_val = self._result.qsnr_per_layer.get(layer)
+                    if qsnr_val is not None and qsnr_val == qsnr_val:
+                        qsnr_str = f"local={qsnr_val:.1f}dB"
                 short = _short_layer_name(layer)
                 ax.set_title(f"{short}\n{role} {qsnr_str}", fontsize=7)
-                if row_idx == n_rows - 1:
+                if row_idx == n_rows - 1 and key not in layer_role_hists:
                     ax.set_xlabel("Bin", fontsize=7)
                 if col_idx == 0:
                     ax.set_ylabel("Count", fontsize=7)
@@ -1644,42 +2077,94 @@ class SessionPlotAccessor:
 
     # ── Error propagation (new viz) ──────────────────────────────────────
 
-    def propagation_dag(self) -> plt.Figure:
-        """Horizontal bar chart: local QSNR per layer with accum markers."""
+    def propagation_dag(self, *, qsnr_cap=None, skip_activations=True) -> plt.Figure:
+        """Horizontal bar chart: local QSNR per layer with accum markers.
+
+        Args:
+            qsnr_cap: If set, clip QSNR values to this maximum.
+            skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
+        """
         from src.viz._propagation import plot_propagation_dag
-        return plot_propagation_dag(self._result)
+        return plot_propagation_dag(self._result, qsnr_cap=qsnr_cap,
+                                    skip_activations=skip_activations)
 
-    def error_waterfall(self) -> plt.Figure:
-        """Waterfall chart: accumulated QSNR dropping layer by layer."""
+    def error_waterfall(self, *, qsnr_cap=60.0, skip_activations=True) -> plt.Figure:
+        """Waterfall chart: accumulated QSNR dropping layer by layer.
+
+        Args:
+            qsnr_cap: Clip accumulated QSNR values to this maximum (default 60).
+            skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
+        """
         from src.viz._propagation import plot_error_waterfall
-        return plot_error_waterfall(self._result)
+        return plot_error_waterfall(self._result, qsnr_cap=qsnr_cap,
+                                    skip_activations=skip_activations)
 
-    def local_vs_accum_scatter(self) -> plt.Figure:
-        """Scatter: local vs accumulated QSNR with headroom colouring."""
+    def local_vs_accum_scatter(self, *, qsnr_cap=None, skip_activations=True) -> plt.Figure:
+        """Scatter: local vs accumulated QSNR with headroom colouring.
+
+        Args:
+            qsnr_cap: If set, clip QSNR values to this maximum.
+            skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
+        """
         from src.viz._propagation import plot_local_vs_accum_scatter
-        return plot_local_vs_accum_scatter(self._result)
+        return plot_local_vs_accum_scatter(self._result, qsnr_cap=qsnr_cap,
+                                           skip_activations=skip_activations)
 
     # ── Per-role ────────────────────────────────────────────────────────
 
-    def per_role_qsnr_bars(self, max_layers: int = 30, sort_by: str = "worst") -> plt.Figure:
+    def per_role_qsnr_bars(self, max_layers: int = 30, sort_by: str = "worst",
+                           qsnr_cap=None, skip_activations: bool = True) -> plt.Figure:
         """Grouped bar chart: input / weight / output QSNR per layer.
 
         Args:
             max_layers: Maximum number of layers to display.
             sort_by: ``"worst"`` — sort by the lowest QSNR across all roles.
                      ``"depth"`` — keep model order.
+            qsnr_cap: If set, clip QSNR values to this maximum.
+            skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
         """
         from src.viz._per_role import plot_per_role_qsnr_bars
-        return plot_per_role_qsnr_bars(self._result, max_layers=max_layers, sort_by=sort_by)
+        return plot_per_role_qsnr_bars(self._result, max_layers=max_layers,
+                                       sort_by=sort_by, qsnr_cap=qsnr_cap,
+                                       skip_activations=skip_activations)
 
-    def depth_decay(self, role: str = "output") -> plt.Figure:
+    def depth_decay(self, role: str = "output", *, qsnr_cap=None,
+                    skip_activations: bool = True) -> plt.Figure:
         """QSNR vs depth line plot for a single role.
 
         Args:
             role: ``"input"`` / ``"weight"`` / ``"output"``.
+            qsnr_cap: If set, clip QSNR values to this maximum.
+            skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
         """
         from src.viz._per_role import plot_depth_decay
-        return plot_depth_decay(self._result, role=role)
+        return plot_depth_decay(self._result, role=role, qsnr_cap=qsnr_cap,
+                                skip_activations=skip_activations)
+
+    def per_layer_role_qsnr_line(
+        self,
+        qsnr_type: str = "local",
+        op_types: list | None = None,
+        skip_activations: bool = True,
+        qsnr_cap=None,
+    ) -> plt.Figure:
+        """Per-layer QSNR line chart with one line per role (local) or output only (accum).
+
+        Args:
+            qsnr_type: ``"local"`` → input/weight/output lines.
+                       ``"accum"`` → output line only.
+            op_types: Operator types to include, e.g. ``["linear"]``.
+            skip_activations: If True (default), exclude activation layers.
+            qsnr_cap: If set, clip QSNR values to this maximum.
+        """
+        from src.viz._per_role import plot_per_layer_role_qsnr_line
+        return plot_per_layer_role_qsnr_line(
+            self._result,
+            qsnr_type=qsnr_type,
+            op_types=op_types,
+            skip_activations=skip_activations,
+            qsnr_cap=qsnr_cap,
+        )
 
     # ── Distribution ───────────────────────────────────────────────────
 
@@ -1785,43 +2270,69 @@ class SessionPlotAccessor:
 
     # ── Histogram overlay ──────────────────────────────────────────────────
 
-    def histogram_overlay(self, top_k: int = 5, role: str | None = None) -> plt.Figure:
+    def histogram_overlay(
+        self,
+        top_k: int = 5,
+        role: str | None = None,
+        layer: str | None = None,
+        op_types: list | None = None,
+        qsnr_type: str = "local",
+    ) -> plt.Figure:
         """Three-channel histogram overlay (fp32 / quant / error).
 
-        Extracts histogram data from ``HistogramObserver`` (keys:
-        ``fp32_hist``, ``quant_hist``, ``err_hist``) and renders the most
-        quantization-sensitive (layer, role) pairs as overlaid semi-transparent
-        bar charts. Sensitivity is determined by QSNR (lower = more sensitive),
-        with a fallback to activation magnitude when no QSNR data is available.
+        Two modes:
 
-        Requires ``outputs=["histogram", "qsnr"]`` (or ``"all"``) in
-        :meth:`Session.run`.
+        - **Top-K mode** (default, ``layer=None``): shows the most
+          quantization-sensitive (layer, role) pairs ranked by QSNR.
+        - **Single-layer mode** (``layer="fc1"``): shows the input / weight /
+          output histograms for one specific layer in three subplots.
+
+        Requires ``outputs=["histogram", "qsnr"]`` (or ``"all"``).
 
         Args:
-            top_k: Number of most-sensitive (layer, role) pairs to display.
-            role: Filter by tensor role. One of ``"input"``, ``"weight"``,
-                ``"output"``, or ``None`` for all roles.
+            top_k: Number of most-sensitive (layer, role) pairs (top-K mode).
+            role: Filter by tensor role (top-K mode). ``None`` = all roles.
+            layer: Specific layer name → single-layer mode.
+            op_types: Operator types to include, e.g. ``["linear", "conv"]``.
+                ``None`` = all types.
+            qsnr_type: ``"local"`` (observer) or ``"accum"`` (hook) for
+                ranking and labelling. Accum only applies to output role.
 
         Returns:
             matplotlib Figure.
         """
-        _np = np
+        from src.viz._layer_classify import filter_layers_by_type
+
+        if qsnr_type not in ("local", "accum"):
+            raise ValueError(f"qsnr_type must be 'local' or 'accum', got {qsnr_type!r}")
+
+        if layer is not None:
+            return self._histogram_single_layer(layer, op_types, qsnr_type)
+
         roles = ("input", "weight", "output") if role is None else (role,)
 
-        # Collect histogram data and QSNR from matching (layer, role) pairs
-        layer_hists: dict = {}
-        layer_error: dict = {}  # QSNR for sensitivity ranking
+        # In accum mode only output role has data
+        if qsnr_type == "accum" and role is None:
+            roles = ("output",)
 
-        for layer in sorted(self._result.observers_data.keys()):
+        accum_lookup = _build_accum_qsnr_lookup(self._result) if qsnr_type == "accum" else {}
+
+        # Collect histogram data and QSNR
+        layer_hists: dict = {}
+        layer_error: dict = {}
+
+        for lname in sorted(self._result.observers_data.keys()):
+            if op_types and filter_layers_by_type([lname], op_types) == []:
+                continue
             for r in roles:
-                metrics = self._get_histogram_data(layer, r)
+                metrics = self._get_histogram_data(lname, r)
                 if metrics is None:
                     continue
                 fp32_hist = metrics.get("fp32_hist")
                 quant_hist = metrics.get("quant_hist")
                 if fp32_hist is None or quant_hist is None:
                     continue
-                key = f"{layer} [{r}]"
+                key = f"{lname} [{r}]"
                 hist_data = {}
                 for k in ("fp32_hist", "quant_hist", "err_hist",
                           "fp32_min", "fp32_max"):
@@ -1835,11 +2346,12 @@ class SessionPlotAccessor:
                     continue
                 layer_hists[key] = hist_data
 
-                # Get QSNR from per-role data
-                qsnr = None
-                role_dict = self._result.qsnr_by_role.get(r, {})
-                if layer in role_dict:
-                    qsnr = role_dict[layer]
+                # Get QSNR for ranking
+                if qsnr_type == "accum":
+                    qsnr = accum_lookup.get(lname)
+                else:
+                    role_dict = self._result.qsnr_by_role.get(r, {})
+                    qsnr = role_dict.get(lname)
                 if qsnr is not None and not (math.isnan(qsnr) if isinstance(qsnr, float) else False):
                     layer_error[key] = qsnr
 
@@ -1850,7 +2362,7 @@ class SessionPlotAccessor:
                 "to enable HistogramObserver."
             )
 
-        # Rank by sensitivity: lowest QSNR first (most quantization-sensitive)
+        # Rank by sensitivity: lowest QSNR first
         if layer_error:
             top_layers = sorted(
                 layer_hists.items(),
@@ -1861,7 +2373,7 @@ class SessionPlotAccessor:
                   "falling back to histogram magnitude")
             top_layers = sorted(
                 layer_hists.items(),
-                key=lambda x: x[1].get("fp32_hist", _np.array(0)).sum(),
+                key=lambda x: x[1].get("fp32_hist", np.array(0)).sum(),
                 reverse=True,
             )[:top_k]
 
@@ -1869,55 +2381,77 @@ class SessionPlotAccessor:
         fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
 
         for ax, (layer_key, hist_data) in zip(axes[0], top_layers):
-            # ── fp32: blue fill ──
-            fp32_counts = hist_data.get("fp32_hist")
-            if fp32_counts is not None and isinstance(fp32_counts, np.ndarray):
-                ax.fill_between(np.arange(len(fp32_counts)), fp32_counts,
-                                alpha=0.25, color="#3498db", label="fp32", step="mid")
+            _render_hist_subplot(ax, hist_data)
 
-            # ── quant: red dashed outline (no fill, visible even when overlapped) ──
-            quant_counts = hist_data.get("quant_hist")
-            if quant_counts is not None and isinstance(quant_counts, np.ndarray):
-                ax.plot(np.arange(len(quant_counts)), quant_counts,
-                        color="#e74c3c", linewidth=1.2, linestyle="--", label="quant")
-
-            # ── x-axis: actual value range from observer data ──
-            fp32_min = hist_data.get("fp32_min")
-            fp32_max = hist_data.get("fp32_max")
-            if fp32_min is not None and fp32_max is not None:
-                n_bins = len(fp32_counts) if fp32_counts is not None else len(quant_counts)
-                edges = np.linspace(fp32_min, fp32_max, n_bins + 1)
-                # Show ~5 ticks along the value range
-                tick_idx = np.linspace(0, n_bins - 1, min(5, n_bins)).astype(int)
-                ax.set_xticks(tick_idx)
-                ax.set_xticklabels([f"{edges[i]:.3g}" for i in tick_idx], fontsize=7)
-                ax.set_xlabel("Value")
-            else:
-                ax.set_xlabel("Bin")
-
-            # ── error: twin axis (right Y) so small errors are visible ──
-            err_counts = hist_data.get("err_hist")
-            if err_counts is not None and isinstance(err_counts, np.ndarray) and err_counts.sum() > 0:
-                ax2 = ax.twinx()
-                ax2.fill_between(np.arange(len(err_counts)), err_counts,
-                                 alpha=0.3, color="#95a5a6", label="error", step="mid")
-                ax2.set_ylabel("Error count", fontsize=7)
-                ax2.tick_params(axis="y", labelsize=6)
-                # Merge legends from both axes
-                handles1, labels1 = ax.get_legend_handles_labels()
-                handles2, labels2 = ax2.get_legend_handles_labels()
-                ax2.legend(handles1 + handles2, labels1 + labels2,
-                           fontsize=7, loc="upper right")
-            else:
-                ax.legend(fontsize=7, loc="upper right")
-
-            ax.set_title(layer_key, fontsize=9)
-            ax.set_ylabel("Count")
-            ax.grid(True, alpha=0.3)
+            # Title with QSNR
+            q_label = f"  local={layer_error.get(layer_key, float('nan')):.1f}dB" if layer_error else ""
+            ax.set_title(f"{layer_key}{q_label}", fontsize=9)
 
         role_label = "" if role is None else f" ({role})"
+        q_label2 = "accum" if qsnr_type == "accum" else "local"
         fig.suptitle(f"Activation Histograms (fp32 / quant / error){role_label} — "
-                     "Most Sensitive Layers", fontsize=13)
+                     f"Most Sensitive Layers ({q_label2} QSNR)", fontsize=13)
+        fig.tight_layout()
+        return fig
+
+    def _histogram_single_layer(
+        self, layer: str, op_types: list | None, qsnr_type: str
+    ) -> plt.Figure:
+        """Single-layer mode: input / weight / output histograms in 1×3 grid."""
+        accum_lookup = _build_accum_qsnr_lookup(self._result)
+        roles = ("input", "weight", "output")
+
+        hist_data_per_role: dict = {}
+        for r in roles:
+            metrics = self._get_histogram_data(layer, r)
+            if metrics is None:
+                hist_data_per_role[r] = None
+                continue
+            fp32_hist = metrics.get("fp32_hist")
+            quant_hist = metrics.get("quant_hist")
+            if fp32_hist is None or quant_hist is None:
+                hist_data_per_role[r] = None
+                continue
+            entry = {}
+            for k in ("fp32_hist", "quant_hist", "err_hist", "fp32_min", "fp32_max"):
+                v = metrics.get(k)
+                if v is not None:
+                    if k in ("fp32_min", "fp32_max"):
+                        entry[k] = float(v)
+                    else:
+                        entry[k] = np.asarray(v) if not isinstance(v, np.ndarray) else v
+            hist_data_per_role[r] = entry
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4), squeeze=False)
+        short = _short_layer_name(layer)
+
+        for col_idx, r in enumerate(roles):
+            ax = axes[0, col_idx]
+            hd = hist_data_per_role.get(r)
+            if hd is not None:
+                _render_hist_subplot(ax, hd)
+
+                # Build QSNR title line
+                local_q = None
+                role_dict = self._result.qsnr_by_role.get(r, {})
+                if layer in role_dict:
+                    local_q = role_dict[layer]
+                accum_q = accum_lookup.get(layer) if r == "output" else None
+
+                parts = []
+                if local_q is not None and not (math.isnan(local_q) if isinstance(local_q, float) else False):
+                    parts.append(f"local={local_q:.1f}dB")
+                if accum_q is not None:
+                    parts.append(f"accum={accum_q:.1f}dB")
+
+                q_str = "  ".join(parts) if parts else ""
+                ax.set_title(f"{short}\n{r}  {q_str}", fontsize=9)
+            else:
+                ax.text(0.5, 0.5, "no histogram data", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=9, color="gray")
+                ax.set_title(f"{short}\n{r}", fontsize=9)
+
+        fig.suptitle(f"Activation Histograms — {short}", fontsize=13)
         fig.tight_layout()
         return fig
 
@@ -1956,6 +2490,77 @@ class SessionPlotAccessor:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
+def _build_accum_qsnr_lookup(result) -> dict:
+    """Map observer layer names to accum QSNR values via prefix matching.
+
+    Uses the same matching logic as
+    :meth:`SessionResult.correlate_hook_observer`: an observer key matches
+    a hook key if they are equal or the observer key starts with the hook
+    key followed by a dot.
+    """
+    accum = result.accum_qsnr_per_layer
+    if not accum:
+        return {}
+    hook_keys = sorted(accum.keys(), key=len, reverse=True)
+    obs_keys = set(result.observers_data.keys())
+    lookup: dict = {}
+    for obs in obs_keys:
+        for hk in hook_keys:
+            if obs == hk or obs.startswith(hk + "."):
+                lookup[obs] = accum[hk]
+                break
+    return lookup
+
+
+def _render_hist_subplot(ax, hist_data: dict) -> None:
+    """Render fp32 fill + quant dashed outline + error twin-axis on *ax*."""
+    fp32_counts = hist_data.get("fp32_hist")
+    quant_counts = hist_data.get("quant_hist")
+    err_counts = hist_data.get("err_hist")
+
+    n_bins = (
+        len(fp32_counts) if fp32_counts is not None
+        else len(quant_counts) if quant_counts is not None
+        else 64
+    )
+    x_bins = np.arange(n_bins)
+
+    if fp32_counts is not None and isinstance(fp32_counts, np.ndarray):
+        ax.fill_between(x_bins, fp32_counts, alpha=0.25,
+                        color="#3498db", label="fp32", step="mid")
+
+    if quant_counts is not None and isinstance(quant_counts, np.ndarray):
+        ax.plot(x_bins, quant_counts, color="#e74c3c",
+                linewidth=1.2, linestyle="--", label="quant")
+
+    fp32_min = hist_data.get("fp32_min")
+    fp32_max = hist_data.get("fp32_max")
+    if fp32_min is not None and fp32_max is not None:
+        edges = np.linspace(fp32_min, fp32_max, n_bins + 1)
+        tick_idx = np.linspace(0, n_bins - 1, min(5, n_bins)).astype(int)
+        ax.set_xticks(tick_idx)
+        ax.set_xticklabels([f"{edges[i]:.3g}" for i in tick_idx], fontsize=7)
+        ax.set_xlabel("Value")
+    else:
+        ax.set_xlabel("Bin")
+
+    if err_counts is not None and isinstance(err_counts, np.ndarray) and err_counts.sum() > 0:
+        ax2 = ax.twinx()
+        ax2.fill_between(x_bins, err_counts, alpha=0.3,
+                         color="#95a5a6", label="error", step="mid")
+        ax2.set_ylabel("Error count", fontsize=7)
+        ax2.tick_params(axis="y", labelsize=6)
+        handles1, labels1 = ax.get_legend_handles_labels()
+        handles2, labels2 = ax2.get_legend_handles_labels()
+        ax2.legend(handles1 + handles2, labels1 + labels2,
+                   fontsize=7, loc="upper right")
+    else:
+        ax.legend(fontsize=7, loc="upper right")
+
+    ax.set_ylabel("Count")
+    ax.grid(True, alpha=0.3)
+
 
 def _short_layer_name(name: str) -> str:
     """Shorten a full module path for x-axis labels."""
