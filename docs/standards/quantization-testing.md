@@ -91,3 +91,38 @@ def test_quantize_2():
 量化测试同样受 **测试层级原则** 约束：最终提交的测试必须通过 `Session` / `Study` / `QuantConfig` / `resolve_config` 等高层用户接口调用。底层 API（`FormatBase.quantize()`、`_quantize_elemwise_core` 等）仅限开发调试，不允许留在最终测试代码中。
 
 详见 [`principles/testing-layer.md`](../principles/testing-layer.md)。
+
+## 端到端回归覆盖（新增功能必执行）
+
+新增任何涉及 `quantize()`、`FormatBase`、`QuantScheme`、`Session` 的功能（如新 granularity mode、新 format、group_sparse、outlier_sparse、transform），必须通过**端到端集成测试**验证，不允许仅依赖单元测试。
+
+### 覆盖维度清单
+
+| 维度 | 覆盖点 | 最小要求 |
+|------|--------|---------|
+| **Granularity** | PER_TENSOR, PER_CHANNEL, PER_BLOCK, BANK | 每种 mode 至少 1 条 Session/Study API 测试 |
+| **Ratio 边界** | 0.01（最小比）、0.5（中等）、1.0（全 H） | 至少 3 个边界值 |
+| **形状多样性** | 1D（bias/norm weight）、2D（Linear weight）、4D（Conv weight） | 每种至少 1 条 |
+| **最小通道数** | C=2 或 num_banks=1（退化场景） | 至少 1 条 |
+| **Format 组合** | int+int、int+float、float+int | 至少 3 种组合 |
+| **Transform** | hadamard、smoothquant、prescale | 每种与 group_sparse 交互至少 1 条 |
+| **高层 API** | Session.run()、Study.run() | 两种 API 各至少 1 条 |
+| **全流程** | eval_fn + eval_data + observer outputs (qsnr/distribution/histogram) | 至少 1 条完整流程 |
+| **Scale 安全** | 传递 shape 不匹配的 scale（原始 bug 触发场景） | 直接 quantize() 安全网测试 |
+| **Weight-only** | weight_only=True | 至少 1 条 |
+| **quantize_nonlinear** | True / False | 两种各至少 1 条 |
+
+### 测试文件命名
+
+```
+src/tests/test_<feature>_e2e.py  — 端到端集成测试（Session / Study API）
+src/tests/test_<feature>.py      — 单元测试（QuantScheme / FormatBase 直接调用）
+```
+
+### 回归门（bug 修复后必须执行）
+
+修复涉及量化路径的 bug 后，必须：
+1. 编写直接触发该 bug 的失败测试（使用高层 API）
+2. 确认修复后测试通过
+3. 在 E2E 测试文件中添加覆盖该 bug 场景的测试用例
+4. 运行完整 E2E 回归门：`PYTHONPATH=. python scripts/mnist_hadamard_study.py` + `python scripts/transformer_agnews_study.py`

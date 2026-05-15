@@ -33,6 +33,7 @@
 |------|------|------|--------|
 | MNIST | `scripts/mnist_hadamard_study.py` | 3-layer MLP (784→512→128→10) | MNIST 手写数字 |
 | Transformer | `scripts/transformer_agnews_study.py` | 2-layer Transformer (d=128, nhead=4) | AG News 4 分类 |
+| Batch Independence | `scripts/verify_batch_independence.py` | 1-2 layer MLP (8→4→2) | Random (16 samples) |
 
 - 预训练权重在 `scripts/weights/` 下，可用 `*_eval.py` 脚本加载跳过训练直接跑 Study
 - 合理性判据（基于当前 baseline，2026-05-11）：
@@ -40,6 +41,10 @@
   - int8-pc: |quant - fp32| < 0.02
   - int4-pb32: |quant - fp32| < 0.05
   - Hadamard 和 SmoothQuant 在 MNIST/Transformer 上退化均在 ~1% 以内（2026-05-12 修复后）
+  - verify_batch_independence.py: 全部 6 项 PASS
+- E2E 回归模式库: `docs/verification/e2e-regression-patterns.md`（曾导致回归的 bug 模式，修改 calibration/quantize 前对照检查）
+- **特性级 E2E 测试（新增功能必执行）**: 任何新增 format / granularity mode / transform / sparse 机制，必须有对应的 `src/tests/test_<feature>_e2e.py`，覆盖全部 granularity × ratio 边界 × 形状多样性 × format 组合 × Session + Study API。标准 → `docs/standards/quantization-testing.md`
+- **Bug 修复回归门**: 修复量化路径 bug 后，必须在 E2E 测试文件中添加直接触发该 bug 的测试用例，确认修复有效并固化。禁止只修代码不加测试。
 
 ---
 
@@ -113,6 +118,8 @@ x_q = quantize(x, scheme)
 | 新增公共 API | `docs/standards/api-design.md` |
 | 子任务做完了，准备收尾 | `docs/principles/review-gate.md` → `docs/workflow/subtask-lifecycle.md` |
 | 修改了 transform/format/quantize | `scripts/mnist_hadamard_study.py` + `scripts/transformer_agnews_study.py` → 跑两个 E2E Study，审视结果
+| 修改了 calibration / sparse | `scripts/verify_batch_independence.py` + `docs/verification/e2e-regression-patterns.md` → 对照回归模式库
+| 排查 E2E 回归 | `docs/verification/e2e-regression-patterns.md` → 对照已知回归模式逐个排查
 | 提交代码 | `docs/workflow/branching-commits.md` |
 | 排查历史缺陷 | `docs/reviews/INDEX.md` |
 | 查公式定义 | `docs/reference/INDEX.md` |
@@ -131,6 +138,7 @@ x_q = quantize(x, scheme)
 - **E2E 回归 (MNIST)**: `PYTHONPATH=. python scripts/mnist_hadamard_study.py`（MLP + int4/int8 + hadamard/sq）
 - **E2E 回归 (Transformer)**: `PYTHONPATH=. python scripts/transformer_agnews_study.py`（Transformer + AG News + int4/int8 + hadamard/sq）
 - **E2E 回归 (eval only)**: `PYTHONPATH=. python scripts/transformer_agnews_eval.py`（跳过训练，加载预训练权重直接跑 Study）
+- **E2E Batch Independence**: `python scripts/verify_batch_independence.py`（static sparse mask 不泄露 batch 维度，6 项检查）
 
 ---
 

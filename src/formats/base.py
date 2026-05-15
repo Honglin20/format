@@ -851,6 +851,13 @@ class FormatBase(ABC):
 
         if scale is not None:
             amax = scale
+            # Reshape to expected amax shape: (C, 1, ...) or (..., 1, C)
+            # depending on axis. This handles common calibration shapes
+            # like (C,) → (C, 1) for 2D tensors with axis=0.
+            if amax.numel() == C:
+                target_shape = [1] * x.ndim
+                target_shape[axis] = C
+                amax = amax.reshape(target_shape)
         else:
             dims_to_reduce = [i for i in range(x.ndim) if i != axis]
             amax = torch.amax(torch.abs(x), dim=tuple(dims_to_reduce), keepdim=True)
@@ -864,9 +871,9 @@ class FormatBase(ABC):
             h_mask = group_mask.view(amax.shape)
         else:
             scores = amax.flatten()
-            k = max(1, int(C * group_ratio))
+            k = max(1, int(scores.numel() * group_ratio))
             _, top_indices = torch.topk(scores, k)
-            h_mask = torch.zeros(C, dtype=torch.bool, device=x.device)
+            h_mask = torch.zeros(scores.numel(), dtype=torch.bool, device=x.device)
             h_mask.scatter_(0, top_indices, True)
             h_mask = h_mask.view(amax.shape)
 
@@ -989,6 +996,11 @@ class FormatBase(ABC):
 
         if scale is not None:
             amax = scale
+            # Reshape to expected amax shape: (1, ..., num_banks) for bank_axis
+            if amax.numel() == num_banks:
+                target_shape = [1] * x_r.ndim
+                target_shape[axis] = num_banks
+                amax = amax.reshape(target_shape)
         else:
             dims_to_reduce = [i for i in range(x_r.ndim) if i != axis]
             amax = torch.amax(torch.abs(x_r), dim=tuple(dims_to_reduce), keepdim=True)
@@ -1002,9 +1014,9 @@ class FormatBase(ABC):
             h_mask = group_mask.view(amax.shape)
         else:
             scores = amax.flatten()
-            k = max(1, int(num_banks * group_ratio))
+            k = max(1, int(scores.numel() * group_ratio))
             _, top_indices = torch.topk(scores, k)
-            h_mask = torch.zeros(num_banks, dtype=torch.bool, device=x.device)
+            h_mask = torch.zeros(scores.numel(), dtype=torch.bool, device=x.device)
             h_mask.scatter_(0, top_indices, True)
             h_mask = h_mask.view(amax.shape)
 
