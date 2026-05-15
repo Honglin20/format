@@ -274,26 +274,42 @@ def histogram_overlay(
     all_results: dict,
     *,
     output_dir: str,
+    log_y: bool = False,
+    op_types: list | None = None,
+    layer: str | None = None,
 ) -> plt.Figure:
     """Three-channel histogram overlay (fp32 / quant / error).
 
+    Two modes:
+
+    - **Top-K mode** (default, ``layer=None``): most quantization-sensitive
+      (layer, role) pairs, ranked by QSNR (lowest first).
+    - **Single-layer mode** (``layer="fc1"``): input / weight / output
+      histograms for one specific layer in a 1×3 grid.
+
     Extracts histogram data from ``HistogramObserver`` (keys: ``fp32_hist``,
-    ``quant_hist``, ``err_hist``) and renders the most quantization-sensitive
-    (layer, role) pairs as overlaid semi-transparent bar charts. Sensitivity
-    is determined by QSNR (lower = more quantization-sensitive), with a
-    fallback to activation magnitude when no QSNR data is available.
+    ``quant_hist``, ``err_hist``) via ``report.iter_slices()``.
 
     Args:
         all_results: Nested dict of ``{part: {config: {"report": ...}}}``.
             Reports are expected to have an ``iter_slices`` method
             yielding ``(layer, role, stage, slice_key, metrics)`` tuples.
         output_dir: Output root directory.
+        log_y: If True, use log scale for the y-axis (counts).
+        op_types: Operator types to include, e.g. ``["linear", "conv"]``.
+            ``None`` = all types.
+        layer: Specific layer name → single-layer mode (1×3 grid).
 
     Returns:
         matplotlib Figure.
     """
+    from src.viz._layer_classify import filter_layers_by_type
+
+    _roles = ("input", "weight", "output")
+
+    # ── Collect data ─────────────────────────────────────────────────────
     layer_hists: Dict[str, dict] = {}
-    layer_error: Dict[str, float] = {}  # QSNR for sensitivity ranking
+    layer_error: Dict[str, float] = {}
 
     for part_name, part_data in all_results.items():
         if not part_name.startswith("part_") or not isinstance(part_data, dict):
@@ -304,13 +320,32 @@ def histogram_overlay(
             report = config_data["report"]
             if not hasattr(report, "iter_slices"):
                 continue
-            for layer, role, stage, slice_key, metrics in report.iter_slices():
-                key = f"{layer} [{role}]"
+            for lname, role, stage, slice_key, metrics in report.iter_slices():
+                # Operator type filter
+                if op_types and filter_layers_by_type([lname], op_types) == []:
+                    continue
+                # Single-layer filter
+                if layer is not None and lname != layer:
+                    continue
+                # Role filter for top-K mode
+                if layer is None and role not in _roles:
+                    continue
+
+                key = f"{lname} [{role}]"
                 if key not in layer_hists and "fp32_hist" in metrics and "quant_hist" in metrics:
-                    layer_hists[key] = {
-                        k: _to_numpy(metrics.get(k))
-                        for k in ("fp32_hist", "quant_hist", "err_hist")
-                    }
+                    entry = {}
+                    for k in ("fp32_hist", "quant_hist", "err_hist",
+                              "fp32_min", "fp32_max"):
+                        v = metrics.get(k)
+                        if v is not None:
+                            if k in ("fp32_min", "fp32_max"):
+                                entry[k] = float(v)
+                            else:
+                                arr = _to_numpy(v)
+                                if arr is not None:
+                                    entry[k] = arr
+                    if "fp32_hist" in entry and "quant_hist" in entry:
+                        layer_hists[key] = entry
                 if key not in layer_error and "qsnr_db" in metrics:
                     layer_error[key] = metrics["qsnr_db"]
 
@@ -320,7 +355,29 @@ def histogram_overlay(
             + _how("HistogramObserver")
         )
 
-    # Rank by sensitivity: lowest QSNR first (most quantization-sensitive)
+    # ── Single-layer mode ────────────────────────────────────────────────
+    if layer is not None:
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), squeeze=False)
+        for col, role in enumerate(_roles):
+            ax = axes[0, col]
+            key = f"{layer} [{role}]"
+            hist_data = layer_hists.get(key)
+            if hist_data is None:
+                ax.text(0.5, 0.5, f"No data for {role}", ha="center",
+                        va="center", transform=ax.transAxes, fontsize=10)
+                ax.set_title(f"{layer}\n{role}", fontsize=9)
+                continue
+            _render_hist_subplot_standalone(ax, hist_data, log_y)
+            qsnr_val = layer_error.get(key, float("nan"))
+            qsnr_str = f"QSNR={qsnr_val:.1f}dB" if not math.isnan(qsnr_val) else ""
+            short = layer.replace("module.", "").replace("Quantized", "")[:25]
+            ax.set_title(f"{short}\n{role} {qsnr_str}", fontsize=9)
+        fig.suptitle(f"Histogram Overlay — {layer}", fontsize=12, y=1.01)
+        fig.tight_layout()
+        save_figure(fig, output_dir, f"histogram_overlay_{layer}")
+        return fig
+
+    # ── Top-K mode ───────────────────────────────────────────────────────
     if layer_error:
         top_layers = sorted(
             layer_hists.items(),
@@ -344,23 +401,10 @@ def histogram_overlay(
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False)
 
     for ax, (layer_key, hist_data) in zip(axes[0], top_layers):
-        for channel, color, label in [
-            ("fp32_hist", "#3498db", "fp32"),
-            ("quant_hist", "#e74c3c", "quant"),
-            ("err_hist", "#95a5a6", "error"),
-        ]:
-            counts = hist_data.get(channel)
-            if counts is None or not isinstance(counts, np.ndarray):
-                continue
-            bin_centers = np.arange(len(counts))
-            ax.fill_between(bin_centers, counts, alpha=0.35, color=color,
-                            label=label, step="mid")
-            ax.plot(bin_centers, counts, color=color, linewidth=0.8)
-        ax.set_title(layer_key, fontsize=9)
-        ax.set_xlabel("Bin")
-        ax.set_ylabel("Count")
-        ax.legend(fontsize=7, loc="upper right")
-        ax.grid(True, alpha=0.3)
+        _render_hist_subplot_standalone(ax, hist_data, log_y)
+        qsnr_val = layer_error.get(layer_key, float("nan"))
+        qsnr_str = f" (QSNR={qsnr_val:.1f}dB)" if not math.isnan(qsnr_val) else ""
+        ax.set_title(f"{layer_key}{qsnr_str}", fontsize=9)
 
     fig.suptitle("Activation Histograms (fp32 / quant / error) — "
                  "Most Sensitive Layers", fontsize=13)
@@ -1365,6 +1409,7 @@ def per_layer_role_histogram(
     k: int = 5,
     output_dir: str,
     roles: tuple = ("input", "weight", "output"),
+    log_y: bool = False,
 ) -> plt.Figure:
     """Per-layer, per-role fp32 value distribution histograms for worst-QSNR layers.
 
@@ -1381,11 +1426,13 @@ def per_layer_role_histogram(
         k: Number of worst-QSNR layers to show (default 5).
         output_dir: Output root directory.
         roles: Roles to display (default ``("input", "weight", "output")``).
+        log_y: If True, use log scale for the y-axis (counts).
 
     Returns:
         matplotlib Figure.
     """
-    layer_role_hists: Dict[tuple, np.ndarray] = {}
+    # key → {fp32_hist, quant_hist, err_hist, fp32_min, fp32_max}
+    layer_role_hists: Dict[tuple, dict] = {}
     layer_role_qsnr: Dict[tuple, float] = {}
     layer_role_dist: Dict[tuple, dict] = {}  # DistributionObserver fallback
 
@@ -1403,9 +1450,18 @@ def per_layer_role_histogram(
                     continue
                 key = (layer, role)
                 if key not in layer_role_hists and "fp32_hist" in metrics:
-                    h = _to_numpy(metrics["fp32_hist"])
-                    if h is not None and len(h) > 0:
-                        layer_role_hists[key] = h
+                    fp32 = _to_numpy(metrics["fp32_hist"])
+                    if fp32 is not None and len(fp32) > 0:
+                        entry = {"fp32_hist": fp32}
+                        for ch in ("quant_hist", "err_hist"):
+                            v = _to_numpy(metrics.get(ch))
+                            if v is not None and len(v) > 0:
+                                entry[ch] = v
+                        for bound in ("fp32_min", "fp32_max"):
+                            v = metrics.get(bound)
+                            if v is not None:
+                                entry[bound] = float(v)
+                        layer_role_hists[key] = entry
                 if key not in layer_role_qsnr and "qsnr_db" in metrics:
                     layer_role_qsnr[key] = metrics["qsnr_db"]
                 if key not in layer_role_dist:
@@ -1455,11 +1511,48 @@ def per_layer_role_histogram(
             key = (layer, role)
 
             if key in layer_role_hists:
-                counts = layer_role_hists[key]
-                bin_centers = np.arange(len(counts))
-                ax.fill_between(bin_centers, counts, alpha=0.5, color="#3498db",
-                                step="mid")
-                ax.plot(bin_centers, counts, color="#3498db", linewidth=0.6)
+                entry = layer_role_hists[key]
+                fp32_counts = entry.get("fp32_hist")
+                quant_counts = entry.get("quant_hist")
+                err_counts = entry.get("err_hist")
+                n_bins = len(fp32_counts) if fp32_counts is not None else 64
+                x_bins = np.arange(n_bins)
+
+                # fp32: blue fill (matching histogram_overlay)
+                if fp32_counts is not None:
+                    ax.fill_between(x_bins, fp32_counts, alpha=0.25,
+                                    color="#3498db", label="fp32", step="mid")
+
+                # quant: red dashed outline
+                if quant_counts is not None:
+                    ax.plot(x_bins, quant_counts, color="#e74c3c",
+                            linewidth=1.2, linestyle="--", label="quant")
+
+                # x-axis: real value range
+                lo = entry.get("fp32_min")
+                hi = entry.get("fp32_max")
+                if lo is not None and hi is not None:
+                    edges = np.linspace(lo, hi, n_bins + 1)
+                    tick_idx = np.linspace(0, n_bins - 1, min(5, n_bins)).astype(int)
+                    ax.set_xticks(tick_idx)
+                    ax.set_xticklabels([f"{edges[i]:.3g}" for i in tick_idx], fontsize=6)
+                    ax.set_xlabel("Value", fontsize=7)
+                else:
+                    ax.set_xlabel("Bin", fontsize=7)
+
+                # error: twin axis so small errors are visible
+                if err_counts is not None and err_counts.sum() > 0:
+                    ax2 = ax.twinx()
+                    ax2.fill_between(x_bins, err_counts, alpha=0.3,
+                                     color="#95a5a6", label="error", step="mid")
+                    ax2.set_ylabel("Error", fontsize=6)
+                    ax2.tick_params(axis="y", labelsize=5)
+                    handles1, labels1 = ax.get_legend_handles_labels()
+                    handles2, labels2 = ax2.get_legend_handles_labels()
+                    ax2.legend(handles1 + handles2, labels1 + labels2,
+                              fontsize=5, loc="upper right")
+                else:
+                    ax.legend(fontsize=5, loc="upper right")
             elif key in layer_role_dist:
                 d = layer_role_dist[key]
                 lines = [
@@ -1479,12 +1572,14 @@ def per_layer_role_histogram(
             qsnr_str = f"QSNR={qsnr_val:.1f}dB" if not math.isnan(qsnr_val) else ""
             short_layer = layer.replace("module.", "").replace("Quantized", "")[:25]
             ax.set_title(f"{short_layer}\n{role} {qsnr_str}", fontsize=7)
-            if row_idx == n_rows - 1:
+            if row_idx == n_rows - 1 and key not in layer_role_hists:
                 ax.set_xlabel("Bin", fontsize=7)
             if col_idx == 0:
                 ax.set_ylabel("Count", fontsize=7)
             ax.tick_params(labelsize=6)
             ax.grid(True, alpha=0.2)
+            if log_y and key in layer_role_hists:
+                ax.set_yscale("log")
 
     fig.suptitle("Per-Layer fp32 Value Distribution — Worst-QSNR Layers",
                  fontsize=12, y=1.01)
@@ -1502,6 +1597,7 @@ def smoothquant_distrib_comparison(
     *,
     k: int = 5,
     output_dir: str,
+    log_y: bool = False,
 ) -> plt.Figure:
     """Before/after SmoothQuant distribution comparison for top-k improved layers.
 
@@ -1513,6 +1609,7 @@ def smoothquant_distrib_comparison(
         sq_comparison: :class:`SmoothQuantDistribComparison` result.
         k: Number of top-improved layers to show (default 5).
         output_dir: Output root directory.
+        log_y: If True, use log scale for histogram y-axis (counts).
 
     Returns:
         matplotlib Figure.
@@ -1597,11 +1694,159 @@ def smoothquant_distrib_comparison(
         ax_hist.set_ylabel("Count", fontsize=7)
         ax_hist.tick_params(labelsize=6)
         ax_hist.grid(True, alpha=0.3)
+        if log_y and (raw_hist is not None or smooth_hist is not None):
+            ax_hist.set_yscale("log")
 
     fig.suptitle("SmoothQuant Distribution Impact — Top Improved Layers",
                  fontsize=13)
     fig.tight_layout()
     save_figure(fig, output_dir, "smoothquant_distrib_comparison")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 20 — Kurtosis analysis
+# ---------------------------------------------------------------------------
+
+def kurtosis_analysis(
+    all_results: dict,
+    *,
+    output_dir: str,
+    roles: tuple = ("input", "weight", "output"),
+) -> plt.Figure:
+    """Kurtosis distribution and its relationship to QSNR.
+
+    Three-panel figure:
+    1. Histogram of kurtosis values across all (layer, role) pairs
+       with reference lines at normal (3), heavy-tailed (6), extreme (10).
+    2. Kurtosis vs QSNR scatter, colour-coded by role, with reference
+       lines at kurtosis=3 (normal) and kurtosis=6 (heavy-tailed threshold).
+    3. Top-15 (layer, role) pairs ranked by kurtosis as a grouped bar chart.
+
+    Interpretation:
+    - High QSNR + high kurtosis → safe to quantise aggressively.
+    - Low QSNR + high kurtosis → heavy tails are the root cause → try SmoothQuant.
+    - Low QSNR + normal kurtosis → root cause is elsewhere → check outlier ratio.
+
+    Args:
+        all_results: Nested dict ``{part: {config: {"report": ...}}}``.
+            Reports are expected to have an ``iter_slices`` method.
+        output_dir: Output root directory.
+        roles: Tensor roles to include (default input/weight/output).
+
+    Returns:
+        matplotlib Figure.
+    """
+    data_points: list = []
+    for part_name, part_data in all_results.items():
+        if not isinstance(part_data, dict):
+            continue
+        for config_name, config_data in part_data.items():
+            if not isinstance(config_data, dict) or "report" not in config_data:
+                continue
+            report = config_data["report"]
+            if not hasattr(report, "iter_slices"):
+                continue
+            for layer, role, stage, slice_key, metrics in report.iter_slices():
+                if role not in roles or "kurtosis" not in metrics:
+                    continue
+                data_points.append({
+                    "layer": layer,
+                    "role": role,
+                    "kurtosis": metrics["kurtosis"],
+                    "excess_kurtosis": metrics.get("excess_kurtosis", metrics["kurtosis"] - 3.0),
+                    "qsnr_db": metrics.get("qsnr_db", float("nan")),
+                    "skewness": metrics.get("skewness", float("nan")),
+                })
+
+    if not data_points:
+        raise ValueError(
+            "Kurtosis data not available. "
+            + _how("DistributionObserver") + " " + _how("QSNRObserver")
+        )
+
+    kurt_vals = [d["kurtosis"] for d in data_points]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+    role_colors = {"input": "#0072B2", "weight": "#D55E00", "output": "#009E73"}
+
+    # -- Panel 1: kurtosis histogram ---------------------------------------
+    ax = axes[0]
+    counts, bins, _ = ax.hist(kurt_vals, bins=40, color="#3498db", alpha=0.7,
+                               edgecolor="white")
+    y_max = counts.max()
+    for threshold, label, style in [
+        (3.0, "normal (3)", "dashed"),
+        (6.0, "heavy-tailed (6)", "solid"),
+        (10.0, "extreme (10)", "dotted"),
+    ]:
+        ax.axvline(x=threshold, color="black", linestyle=style,
+                   linewidth=1.0, alpha=0.6)
+        ax.text(threshold, y_max * 0.92, label,
+                rotation=90, va="top", ha="right", fontsize=7,
+                color="black", alpha=0.7)
+    ax.set_xlabel("Kurtosis")
+    ax.set_ylabel("Count (layers × roles)")
+    ax.set_title("Kurtosis Distribution\n(vertical lines: normal / heavy / extreme)")
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.set_xscale("log")
+
+    # -- Panel 2: kurtosis vs QSNR scatter --------------------------------
+    ax = axes[1]
+    for role in roles:
+        role_pts = [d for d in data_points if d["role"] == role]
+        if not role_pts:
+            continue
+        xs = [d["kurtosis"] for d in role_pts]
+        ys = [d["qsnr_db"] for d in role_pts]
+        color = role_colors.get(role, FALLBACK_CYCLE[0])
+        ax.scatter(xs, ys, label=role, color=color, alpha=0.7, s=35)
+
+    ax.axvline(x=3.0, color="gray", linestyle="--", linewidth=1.0, alpha=0.6,
+               label="k=3 (normal)")
+    ax.axvline(x=6.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6,
+               label="k=6 (heavy-tailed)")
+    ax.set_xlabel("Kurtosis")
+    ax.set_ylabel("QSNR (dB)")
+    ax.set_title("Kurtosis vs QSNR by Role")
+    ax.legend(fontsize=7, loc="upper right")
+    ax.grid(True, alpha=0.3)
+    ax.set_xscale("log")
+
+    # -- Panel 3: top-15 (layer, role) ranked by kurtosis -----------------
+    ax = axes[2]
+    top_n = 15
+    ranked = sorted(data_points, key=lambda d: d["kurtosis"], reverse=True)[:top_n]
+    labels = []
+    kv = []
+    colors_list = []
+    for d in ranked:
+        short = d["layer"].replace("module.", "").replace("Quantized", "")[:18]
+        labels.append(f"{short}|{d['role'][:3]}")
+        kv.append(d["kurtosis"])
+        colors_list.append(role_colors.get(d["role"], FALLBACK_CYCLE[0]))
+
+    y_pos = range(len(labels))
+    ax.barh(y_pos, kv, color=colors_list, alpha=0.7, edgecolor="white")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.invert_yaxis()
+    ax.axvline(x=3.0, color="black", linestyle="--", linewidth=1.0, alpha=0.5)
+    ax.axvline(x=6.0, color="black", linestyle="-", linewidth=1.0, alpha=0.5)
+    ax.set_xlabel("Kurtosis")
+    ax.set_title(f"Top-{top_n} by Kurtosis (layer | role)")
+    ax.grid(True, alpha=0.3, axis="x")
+
+    # Legend for role colors
+    from matplotlib.patches import Patch
+    legend_patches = [Patch(color=c, label=r) for r, c in role_colors.items()
+                      if r in roles]
+    ax.legend(handles=legend_patches, fontsize=7, loc="lower right")
+
+    fig.suptitle("Kurtosis Analysis — Distribution, QSNR Relationship, Top Layers",
+                 fontsize=13)
+    fig.tight_layout()
+    save_figure(fig, output_dir, "kurtosis_analysis")
     return fig
 
 
@@ -1618,3 +1863,59 @@ def _to_numpy(value):
     if value is None:
         return None
     return np.asarray(value)
+
+
+def _render_hist_subplot_standalone(ax, hist_data: dict, log_y: bool = False) -> None:
+    """Render fp32 fill + quant dashed outline + error twin-axis on *ax*.
+
+    Mirrors ``_render_hist_subplot`` in ``src/report/_plot.py`` to avoid a
+    circular import from the standalone figures module.
+    """
+    fp32_counts = hist_data.get("fp32_hist")
+    quant_counts = hist_data.get("quant_hist")
+    err_counts = hist_data.get("err_hist")
+
+    n_bins = (
+        len(fp32_counts) if fp32_counts is not None
+        else len(quant_counts) if quant_counts is not None
+        else 64
+    )
+    x_bins = np.arange(n_bins)
+
+    if fp32_counts is not None and isinstance(fp32_counts, np.ndarray):
+        ax.fill_between(x_bins, fp32_counts, alpha=0.25,
+                        color="#3498db", label="fp32", step="mid")
+
+    if quant_counts is not None and isinstance(quant_counts, np.ndarray):
+        ax.plot(x_bins, quant_counts, color="#e74c3c",
+                linewidth=1.2, linestyle="--", label="quant")
+
+    fp32_min = hist_data.get("fp32_min")
+    fp32_max = hist_data.get("fp32_max")
+    if fp32_min is not None and fp32_max is not None:
+        edges = np.linspace(fp32_min, fp32_max, n_bins + 1)
+        tick_idx = np.linspace(0, n_bins - 1, min(5, n_bins)).astype(int)
+        ax.set_xticks(tick_idx)
+        ax.set_xticklabels([f"{edges[i]:.3g}" for i in tick_idx], fontsize=7)
+        ax.set_xlabel("Value")
+    else:
+        ax.set_xlabel("Bin")
+
+    if err_counts is not None and isinstance(err_counts, np.ndarray) and err_counts.sum() > 0:
+        ax2 = ax.twinx()
+        ax2.fill_between(x_bins, err_counts, alpha=0.3,
+                         color="#95a5a6", label="error", step="mid")
+        ax2.set_ylabel("Error count", fontsize=7)
+        ax2.tick_params(axis="y", labelsize=6)
+        handles1, labels1 = ax.get_legend_handles_labels()
+        handles2, labels2 = ax2.get_legend_handles_labels()
+        ax2.legend(handles1 + handles2, labels1 + labels2,
+                   fontsize=6, loc="upper right")
+    else:
+        ax.legend(fontsize=7, loc="upper right")
+
+    ax.set_ylabel("Count")
+    ax.grid(True, alpha=0.3)
+    ax.tick_params(labelsize=7)
+    if log_y:
+        ax.set_yscale("log")
