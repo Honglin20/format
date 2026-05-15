@@ -44,7 +44,8 @@ class LinearFunction(torch.autograd.Function):
     def forward(ctx, x, w, b, cfg: OpQuantConfig, name=None, emit_fn=None,
                 output_scale=None, input_scale=None,
                 output_mask=None, output_scale_o=None,
-                input_mask=None, input_scale_o=None):
+                input_mask=None, input_scale_o=None,
+                weight_importance=None, input_sq_activation_mask=None):
         ctx.emit_fn = emit_fn
         x_raw, w_raw = x, w
 
@@ -57,7 +58,8 @@ class LinearFunction(torch.autograd.Function):
         x_post_storage = x
         if cfg.input is not None:
             x = quantize(x, cfg.input, scale=input_scale,
-                         mask=input_mask, scale_o=input_scale_o)
+                         mask=input_mask, scale_o=input_scale_o,
+                         sq_activation_mask=input_sq_activation_mask)
             if emit_fn: emit_fn("input", 1, "input_pre_quant", x_raw, x, cfg.input)
 
         # weight: storage → compute
@@ -67,7 +69,7 @@ class LinearFunction(torch.autograd.Function):
             if emit_fn: emit_fn("weight", 0, "weight_pre_quant", w_raw, w, cfg.storage)
         w_post_storage = w
         if cfg.weight is not None:
-            w = quantize(w, cfg.weight)
+            w = quantize(w, cfg.weight, importance=weight_importance)
             if emit_fn: emit_fn("weight", 1, "weight_pre_quant", w_raw, w, cfg.weight)
 
         # bias: storage → compute
@@ -214,12 +216,13 @@ class LinearFunction(torch.autograd.Function):
             if cfg.grad_bias is not None:
                 grad_b = quantize(grad_b, cfg.grad_bias)
 
-        return grad_x, grad_w, grad_b, None, None, None, None, None, None, None, None, None
+        return grad_x, grad_w, grad_b, None, None, None, None, None, None, None, None, None, None, None
 
     @staticmethod
     def symbolic(g, x, w, b, cfg, name, emit_fn, output_scale=None, input_scale=None,
                  output_mask=None, output_scale_o=None,
-                 input_mask=None, input_scale_o=None):
+                 input_mask=None, input_scale_o=None,
+                 weight_importance=None, input_sq_activation_mask=None):
         from src.onnx.helpers import _emit_quantize_node
         from src.session._context import _export_scales_var, _onnx_current_scale_var
 
@@ -300,9 +303,14 @@ class QuantizedLinear(ObservableMixin, nn.Linear):
             if hasattr(self, "_input_mask") else None
         input_scale_o = self.get_buffer("_input_scale_o") \
             if hasattr(self, "_input_scale_o") else None
+        weight_importance = self.get_buffer("_sq_importance") \
+            if hasattr(self, "_sq_importance") else None
+        sq_activation_mask = self.get_buffer("_sq_activation_mask") \
+            if hasattr(self, "_sq_activation_mask") else None
         return LinearFunction.apply(
             x, self.weight, self.bias, self.cfg, self._analysis_name, emit_fn,
             output_scale, input_scale,
             output_mask, output_scale_o,
             input_mask, input_scale_o,
+            weight_importance, sq_activation_mask,
         )

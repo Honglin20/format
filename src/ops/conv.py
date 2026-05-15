@@ -62,7 +62,8 @@ class ConvFunction(torch.autograd.Function):
                 cfg: OpQuantConfig, name=None, emit_fn=None,
                 output_scale=None, input_scale=None,
                 output_mask=None, output_scale_o=None,
-                input_mask=None, input_scale_o=None):
+                input_mask=None, input_scale_o=None,
+                weight_importance=None, input_sq_activation_mask=None):
         ctx.has_bias = bias is not None
         ctx.stride = stride
         ctx.padding = padding
@@ -90,7 +91,8 @@ class ConvFunction(torch.autograd.Function):
         input_post_storage = input
         if cfg.input is not None:
             input = quantize(input, cfg.input, scale=input_scale,
-                             mask=input_mask, scale_o=input_scale_o)
+                             mask=input_mask, scale_o=input_scale_o,
+                             sq_activation_mask=input_sq_activation_mask)
             if emit_fn: emit_fn("input", 1, "input_pre_quant", input_raw, input, cfg.input)
 
         # weight: storage → compute
@@ -100,7 +102,7 @@ class ConvFunction(torch.autograd.Function):
             if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
         weight_post_storage = weight
         if cfg.weight is not None:
-            weight = quantize(weight, cfg.weight)
+            weight = quantize(weight, cfg.weight, importance=weight_importance)
             if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, weight, cfg.weight)
 
         # bias: storage → compute
@@ -239,13 +241,14 @@ class ConvFunction(torch.autograd.Function):
 
         return (grad_input, grad_weight, grad_bias,
                 None, None, None, None, None, None, None, None,
-                None, None, None, None, None)
+                None, None, None, None, None, None, None)
 
     @staticmethod
     def symbolic(g, input, weight, bias, stride, padding, dilation, groups,
                  cfg, name, emit_fn, output_scale=None, input_scale=None,
                  output_mask=None, output_scale_o=None,
-                 input_mask=None, input_scale_o=None):
+                 input_mask=None, input_scale_o=None,
+                 weight_importance=None, input_sq_activation_mask=None):
         from src.onnx.helpers import _emit_quantize_node
         from src.session._context import _export_scales_var, _onnx_current_scale_var
 
@@ -331,6 +334,10 @@ class QuantizedConv2d(ObservableMixin, nn.Conv2d):
             if hasattr(self, "_input_mask") else None
         input_scale_o = self.get_buffer("_input_scale_o") \
             if hasattr(self, "_input_scale_o") else None
+        weight_importance = self.get_buffer("_sq_importance") \
+            if hasattr(self, "_sq_importance") else None
+        sq_activation_mask = self.get_buffer("_sq_activation_mask") \
+            if hasattr(self, "_sq_activation_mask") else None
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
@@ -338,6 +345,7 @@ class QuantizedConv2d(ObservableMixin, nn.Conv2d):
             output_scale, input_scale,
             output_mask, output_scale_o,
             input_mask, input_scale_o,
+            weight_importance, sq_activation_mask,
         )
 
 
@@ -370,6 +378,10 @@ class QuantizedConv1d(ObservableMixin, nn.Conv1d):
             if hasattr(self, "_input_mask") else None
         input_scale_o = self.get_buffer("_input_scale_o") \
             if hasattr(self, "_input_scale_o") else None
+        weight_importance = self.get_buffer("_sq_importance") \
+            if hasattr(self, "_sq_importance") else None
+        sq_activation_mask = self.get_buffer("_sq_activation_mask") \
+            if hasattr(self, "_sq_activation_mask") else None
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
@@ -377,6 +389,7 @@ class QuantizedConv1d(ObservableMixin, nn.Conv1d):
             output_scale, input_scale,
             output_mask, output_scale_o,
             input_mask, input_scale_o,
+            weight_importance, sq_activation_mask,
         )
 
 
@@ -409,6 +422,10 @@ class QuantizedConv3d(ObservableMixin, nn.Conv3d):
             if hasattr(self, "_input_mask") else None
         input_scale_o = self.get_buffer("_input_scale_o") \
             if hasattr(self, "_input_scale_o") else None
+        weight_importance = self.get_buffer("_sq_importance") \
+            if hasattr(self, "_sq_importance") else None
+        sq_activation_mask = self.get_buffer("_sq_activation_mask") \
+            if hasattr(self, "_sq_activation_mask") else None
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
@@ -416,6 +433,7 @@ class QuantizedConv3d(ObservableMixin, nn.Conv3d):
             output_scale, input_scale,
             output_mask, output_scale_o,
             input_mask, input_scale_o,
+            weight_importance, sq_activation_mask,
         )
 
 
@@ -441,7 +459,8 @@ class ConvTransposeFunction(torch.autograd.Function):
                 dilation, groups, cfg: OpQuantConfig, name=None, emit_fn=None,
                 output_scale=None, input_scale=None,
                 output_mask=None, output_scale_o=None,
-                input_mask=None, input_scale_o=None):
+                input_mask=None, input_scale_o=None,
+                weight_importance=None, input_sq_activation_mask=None):
         ctx.has_bias = bias is not None
         ctx.stride = stride
         ctx.padding = padding
@@ -463,7 +482,8 @@ class ConvTransposeFunction(torch.autograd.Function):
         input_post_storage = input
         if cfg.input is not None:
             input = quantize(input, cfg.input, scale=input_scale,
-                             mask=input_mask, scale_o=input_scale_o)
+                             mask=input_mask, scale_o=input_scale_o,
+                             sq_activation_mask=input_sq_activation_mask)
             if emit_fn: emit_fn("input", 1, "input_pre_quant", input_raw, input, cfg.input)
 
         # weight: storage → compute (use weight_raw for all fp32 references)
@@ -472,7 +492,7 @@ class ConvTransposeFunction(torch.autograd.Function):
             if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
         weight_post_storage = weight
         if cfg.weight is not None:
-            weight = quantize(weight, cfg.weight)
+            weight = quantize(weight, cfg.weight, importance=weight_importance)
             if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, weight, cfg.weight)
 
         # bias: storage → compute
@@ -625,13 +645,14 @@ class ConvTransposeFunction(torch.autograd.Function):
 
         return (grad_input, grad_weight, grad_bias,
                 None, None, None, None, None, None, None, None, None,
-                None, None, None, None, None)
+                None, None, None, None, None, None, None)
 
     @staticmethod
     def symbolic(g, input, weight, bias, stride, padding, output_padding,
                  dilation, groups, cfg, name, emit_fn, output_scale=None,
                  input_scale=None, output_mask=None, output_scale_o=None,
-                 input_mask=None, input_scale_o=None):
+                 input_mask=None, input_scale_o=None,
+                 weight_importance=None, input_sq_activation_mask=None):
         from src.onnx.helpers import _emit_quantize_node
         from src.session._context import _export_scales_var, _onnx_current_scale_var
 
@@ -723,6 +744,10 @@ class QuantizedConvTranspose2d(ObservableMixin, nn.ConvTranspose2d):
             if hasattr(self, "_input_mask") else None
         input_scale_o = self.get_buffer("_input_scale_o") \
             if hasattr(self, "_input_scale_o") else None
+        weight_importance = self.get_buffer("_sq_importance") \
+            if hasattr(self, "_sq_importance") else None
+        sq_activation_mask = self.get_buffer("_sq_activation_mask") \
+            if hasattr(self, "_sq_activation_mask") else None
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
@@ -731,6 +756,7 @@ class QuantizedConvTranspose2d(ObservableMixin, nn.ConvTranspose2d):
             output_scale, input_scale,
             output_mask, output_scale_o,
             input_mask, input_scale_o,
+            weight_importance, sq_activation_mask,
         )
 
 
@@ -768,6 +794,10 @@ class QuantizedConvTranspose1d(ObservableMixin, nn.ConvTranspose1d):
             if hasattr(self, "_input_mask") else None
         input_scale_o = self.get_buffer("_input_scale_o") \
             if hasattr(self, "_input_scale_o") else None
+        weight_importance = self.get_buffer("_sq_importance") \
+            if hasattr(self, "_sq_importance") else None
+        sq_activation_mask = self.get_buffer("_sq_activation_mask") \
+            if hasattr(self, "_sq_activation_mask") else None
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
@@ -776,6 +806,7 @@ class QuantizedConvTranspose1d(ObservableMixin, nn.ConvTranspose1d):
             output_scale, input_scale,
             output_mask, output_scale_o,
             input_mask, input_scale_o,
+            weight_importance, sq_activation_mask,
         )
 
 
@@ -813,6 +844,10 @@ class QuantizedConvTranspose3d(ObservableMixin, nn.ConvTranspose3d):
             if hasattr(self, "_input_mask") else None
         input_scale_o = self.get_buffer("_input_scale_o") \
             if hasattr(self, "_input_scale_o") else None
+        weight_importance = self.get_buffer("_sq_importance") \
+            if hasattr(self, "_sq_importance") else None
+        sq_activation_mask = self.get_buffer("_sq_activation_mask") \
+            if hasattr(self, "_sq_activation_mask") else None
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
@@ -821,4 +856,5 @@ class QuantizedConvTranspose3d(ObservableMixin, nn.ConvTranspose3d):
             output_scale, input_scale,
             output_mask, output_scale_o,
             input_mask, input_scale_o,
+            weight_importance, sq_activation_mask,
         )

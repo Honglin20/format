@@ -948,7 +948,22 @@ class FormatBase(ABC):
             channel_mask: bool tensor (K,) — True = high-precision channel
         """
         mask = channel_mask.to(x.device)
-        mask_exp = mask.view(-1, *([1] * (x.ndim - 1)))
+        # Broadcast mask along the dimension that matches its size.
+        # For weight tensors (K,N) this is dim 0; for activation tensors
+        # (batch,channels) this is dim 1.
+        channel_dim = None
+        for d in range(x.ndim):
+            if x.shape[d] == mask.shape[0]:
+                channel_dim = d
+                break
+        if channel_dim is None:
+            raise ValueError(
+                f"Channel mask size {mask.shape[0]} does not match any "
+                f"dimension of input shape {tuple(x.shape)}"
+            )
+        broadcast_shape = [1] * x.ndim
+        broadcast_shape[channel_dim] = mask.shape[0]
+        mask_exp = mask.view(broadcast_shape)
 
         q_fmt = outlier_format if outlier_format is not None else self
 
