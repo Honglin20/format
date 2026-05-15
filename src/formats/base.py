@@ -167,11 +167,15 @@ class FormatBase(ABC):
             return self._quantize_per_block(x, granularity, round_mode,
                                               scale=scale, scale_storage=scale_storage)
         elif mode == GranularityMode.BANK:
-            if granularity.outlier_ratio > 0.0 and mask is not None:
-                return self._quantize_per_bank_static_sparse(
-                    x, mask, scale, scale_o, granularity, round_mode,
-                    allow_denorm=allow_denorm, scale_storage=scale_storage,
-                    outlier_format=outlier_format)
+            if granularity.outlier_ratio > 0.0:
+                if mask is not None:
+                    return self._quantize_per_bank_static_sparse(
+                        x, mask, scale, scale_o, granularity, round_mode,
+                        allow_denorm=allow_denorm, scale_storage=scale_storage,
+                        outlier_format=outlier_format)
+                return self._quantize_per_bank_sparse(
+                    x, granularity, round_mode, allow_denorm=allow_denorm,
+                    scale_storage=scale_storage, outlier_format=outlier_format)
             return self._quantize_per_bank(x, granularity, round_mode,
                                             allow_denorm=allow_denorm,
                                             scale=scale, scale_storage=scale_storage)
@@ -316,6 +320,104 @@ class FormatBase(ABC):
         x_q = self.quantize_elemwise(x_norm, round_mode=round_mode,
                                      allow_denorm=allow_denorm)
         x_q = x_q * amax
+        return x_q.reshape(x.shape)
+
+    def _quantize_per_bank_sparse(self, x, granularity, round_mode,
+                                   allow_denorm=True, scale_storage="pot",
+                                   outlier_format=None):
+        """BANK dynamic sparse: per-bank outlier/normal split.
+
+        Within each bank, top-k elements by magnitude (outliers) and the
+        remaining elements (normals) each get their own per-bank amax.
+        Uses the TWO_GROUP format: both groups are quantized with the same
+        elemwise quantizer — only the scale differs.
+        """
+        if self.ebits > 0:
+            return self._quantize_per_bank(x, granularity, round_mode,
+                                           allow_denorm=allow_denorm,
+                                           scale_storage=scale_storage)
+
+        axis = granularity.bank_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        if not (0 <= axis < x.ndim):
+            raise ValueError(
+                f"bank_axis={granularity.bank_axis} out of range "
+                f"for tensor with ndim={x.ndim}"
+            )
+
+        bank_size = granularity.bank_size
+        N_along = x.shape[axis]
+        if N_along % bank_size != 0:
+            raise ValueError(
+                f"Dimension {axis} size {N_along} not divisible "
+                f"by bank_size {bank_size}"
+            )
+
+        num_banks = N_along // bank_size
+        new_shape = list(x.shape)
+        new_shape[axis] = num_banks
+        new_shape.insert(axis + 1, bank_size)
+        x_r = x.reshape(new_shape)  # (..., num_banks, bank_size, ...)
+
+        k = max(1, int(bank_size * granularity.outlier_ratio))
+
+        # Transpose bank dim to front for per-group top-k
+        ndim_r = x_r.ndim
+        perm = list(range(ndim_r))
+        perm.pop(axis)
+        perm = [axis] + perm
+        x_b = x_r.permute(perm)  # (num_banks, ..., bank_size, ...)
+
+        group_size = x_b[0].numel()
+        if k >= group_size:
+            # Degenerate: all elements are outliers → standard per_bank
+            return self._quantize_per_bank(x, granularity, round_mode,
+                                           allow_denorm=allow_denorm,
+                                           scale_storage=scale_storage)
+
+        x_flat = x_b.reshape(num_banks, group_size)
+        _, top_indices = torch.topk(torch.abs(x_flat), k, dim=1)
+        mask_flat = torch.zeros(num_banks, group_size, dtype=torch.bool, device=x.device)
+        mask_flat.scatter_(1, top_indices, True)
+        mask_b = mask_flat.reshape(x_b.shape)
+
+        # Undo permutation: back to (..., num_banks, bank_size, ...)
+        inv_perm = [0] * ndim_r
+        for i, p in enumerate(perm):
+            inv_perm[p] = i
+        mask_r = mask_b.permute(inv_perm)  # back to reshaped layout
+
+        # Per-bank per-group amax — reduce all dims except bank dim (axis)
+        dims_to_reduce = [i for i in range(x_r.ndim) if i != axis]
+
+        amax_o = torch.amax(torch.abs(x_r * mask_r.float()), dim=tuple(dims_to_reduce),
+                            keepdim=True).clamp(min=1e-12)
+        amax_n = torch.amax(torch.abs(x_r * (~mask_r).float()), dim=tuple(dims_to_reduce),
+                            keepdim=True).clamp(min=1e-12)
+
+        if scale_storage == "pot":
+            amax_o = 2 ** torch.round(torch.log2(amax_o))
+            amax_n = 2 ** torch.round(torch.log2(amax_n))
+
+        q_fmt = outlier_format if outlier_format is not None else self
+        x_q = torch.zeros_like(x_r)
+
+        # Outlier group
+        x_q_o = q_fmt.quantize_elemwise(
+            x_r / amax_o, round_mode=round_mode, allow_denorm=allow_denorm)
+        x_q = x_q + x_q_o * amax_o * mask_r.float()
+
+        # Normal group
+        x_q_n = self.quantize_elemwise(
+            x_r / amax_n, round_mode=round_mode, allow_denorm=allow_denorm)
+        x_q = x_q + x_q_n * amax_n * (~mask_r).float()
+
+        # Preserve special values
+        x_q[x_r == float("Inf")] = float("Inf")
+        x_q[x_r == -float("Inf")] = -float("Inf")
+        x_q[x_r == float("NaN")] = float("NaN")
+
         return x_q.reshape(x.shape)
 
     def _per_block_norm_shift(self) -> int:

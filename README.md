@@ -46,6 +46,35 @@ report.print_summary()                    # 所有 config 一张表，含 fp32_*
 report.print_summary(qsnr_type="accum")   # 切换为端到端累积 QSNR
 ```
 
+## 可视化速览
+
+```python
+from src.viz import histogram_overlay, classify_layer_type, filter_layers_by_type
+
+# 单层三 role 直方图叠加（fp32 蓝色填充 / quant 红色虚线 / error 灰色）
+fig = result.plot.histogram_overlay(layer="module.0.QuantizedLinear")
+# → 1×3 面板：input / weight / output 各自的三通道直方图
+fig.savefig("histogram_fc1.png", dpi=150)
+
+# Top-5 最敏感层的 (layer, role) 直方图
+fig = result.plot.histogram_overlay(top_k=5)
+
+# 查看所有可可视化的层及其算子类型
+layer_names = list(result.qsnr_per_layer.keys())
+for name in layer_names:
+    print(f"{name:40s} → {classify_layer_type(name)}")
+
+# 只看 Linear / Conv 层的 weight QSNR
+linear_layers = filter_layers_by_type(layer_names, ["linear"])
+print(f"共 {len(linear_layers)} 个 Linear 层")
+
+# 更多内置图表（20+ 种）
+result.plot.qsnr_comparison()             # 逐层 QSNR 柱状图
+result.plot.error_propagation(role="output")  # 误差传播三行面板
+result.plot.per_role_qsnr_bars()          # 每层三 role 分组柱状图
+result.plot.per_layer_role_histogram(k=5) # 最差 k 层 × 三 role 直方图网格
+```
+
 ## 文档导航
 
 一切从 Session 开始。以下按推荐阅读顺序排列：
@@ -56,7 +85,7 @@ report.print_summary(qsnr_type="accum")   # 切换为端到端累积 QSNR
 2. [QuantConfig 配置](docs/guides/session/config.md) — format × granularity × transform × calibration
 3. [精度优化方法](docs/guides/session/optimization.md) — Prescale / LSQ / GPTQ / Hadamard / SmoothQuant / Adaptive / per_layer_optimal
 4. [结果查看](docs/guides/session/result.md) — summary / accuracy_table / layer_report / top_k_qsnr
-5. [可视化](docs/guides/session/plotting.md) — 12 种内置图表
+5. [可视化](docs/guides/session/plotting.md) — 20+ 种内置图表，含直方图叠加、三 role 对比、误差传播面板、Pareto 前沿等
 6. [误差分析](docs/guides/session/analysis.md) — 5 种 Observer / 累积 vs 本地误差传播
 7. [Study 多配置对比](docs/guides/session/study.md) — 批量对比 · DataFrame 导出
 8. [ONNX 导出](docs/guides/session/export.md) — QDQ + MX 自定义算子
