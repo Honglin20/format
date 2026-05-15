@@ -172,6 +172,7 @@ class CalibrationSession:
         track_input: bool = False,
         sparse: bool = False,
         sq_mode: Optional[str] = None,
+        sq_sparsity: float = 0.5,
     ):
         self.model = model
         self.strategy = strategy
@@ -180,6 +181,7 @@ class CalibrationSession:
         self._track_input = track_input
         self._sparse = sparse
         self._sq_mode = sq_mode  # "weight" or "activation_static"
+        self._sq_sparsity = sq_sparsity
         self._running_amax: Dict[str, torch.Tensor] = {}
         self._running_input_amax: Dict[str, torch.Tensor] = {}
         self._output_samples: Dict[str, List[torch.Tensor]] = {}
@@ -609,7 +611,19 @@ class CalibrationSession:
                     continue
                 w = module.weight.detach()
                 act_avg = self._compute_activation_average(outputs)
-                mask = self._compute_activation_mask(act_avg, w)
+
+                # Get bank_size from scheme granularity
+                scheme = getattr(getattr(module, "cfg", None), "input", None)
+                bank_size = None
+                if scheme is not None:
+                    from src.scheme.granularity import GranularityMode
+                    if scheme.granularity.mode == GranularityMode.BANK:
+                        bank_size = scheme.granularity.bank_size
+
+                mask = self._compute_activation_mask_per_bank(
+                    act_avg, w, bank_size=bank_size,
+                    sq_sparsity=self._sq_sparsity,
+                )
                 module.register_buffer("_sq_activation_mask", mask)
 
     @staticmethod
@@ -639,20 +653,65 @@ class CalibrationSession:
         return stacked.abs().mean(dim=0)  # |A| average per channel
 
     @staticmethod
+    @staticmethod
     def _compute_activation_mask(act_avg: torch.Tensor,
                                   weight: torch.Tensor) -> torch.Tensor:
-        """Compute per-channel importance scores for activation SQ.
+        """DEPRECATED: use _compute_activation_mask_per_bank instead.
 
-        I_j = |Ā_j| · Σ_i |W_{j,i}| — channel importance.
-        Returns boolean mask: True = high-precision channel.
+        Kept for backward compatibility. Selects top-50% globally.
         """
         from src.formats._sq_importance import compute_activation_channel_importance
         importance = compute_activation_channel_importance(act_avg, weight)
-        # Top-50% channels by importance → high precision
         k = max(1, int(importance.numel() * 0.5))
         _, top_idx = torch.topk(importance, k)
         mask = torch.zeros(importance.shape, dtype=torch.bool)
         mask.scatter_(0, top_idx, True)
+        return mask
+
+    @staticmethod
+    def _compute_activation_mask_per_bank(act_avg: torch.Tensor,
+                                           weight: torch.Tensor,
+                                           bank_size: int = None,
+                                           sq_sparsity: float = 0.5) -> torch.Tensor:
+        """Compute per-channel mask with per-bank fixed sparsity.
+
+        Within each bank of size bank_size, select top-(1-sq_sparsity)
+        channels by importance I_j = |A_j * sum_i W_{j,i}|.
+
+        Paper: Algorithm 2, Step 3-5.
+
+        Args:
+            act_avg: per-channel average activation, shape (K,)
+            weight: weight matrix, shape (K, N)
+            bank_size: bank size for per-bank selection. None = single bank.
+            sq_sparsity: fraction of low-precision channels per bank.
+
+        Returns:
+            Boolean mask, shape (K,), True = high-precision channel.
+        """
+        from src.formats._sq_importance import compute_activation_channel_importance
+        importance = compute_activation_channel_importance(act_avg, weight)
+        K = importance.numel()
+
+        if bank_size is None or bank_size >= K:
+            bank_size = K
+
+        if K % bank_size != 0:
+            raise ValueError(
+                f"Channel count {K} not divisible by bank_size {bank_size}"
+            )
+
+        num_banks = K // bank_size
+        k_high_per_bank = max(1, int(bank_size * (1 - sq_sparsity)))
+
+        mask = torch.zeros(K, dtype=torch.bool)
+        for b in range(num_banks):
+            start = b * bank_size
+            end = start + bank_size
+            imp_bank = importance[start:end]
+            _, top_idx = torch.topk(imp_bank, k_high_per_bank)
+            mask[start + top_idx] = True
+
         return mask
 
     # ------------------------------------------------------------------

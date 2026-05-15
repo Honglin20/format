@@ -121,3 +121,61 @@ class TestSQCalibrationNoop:
         linear = qmodel[0]
         assert not hasattr(linear, "_sq_importance")
         assert not hasattr(linear, "_sq_activation_mask")
+
+
+class TestSQPerBankMaskSelection:
+    """Mask selection is per-bank, not global."""
+
+    def test_per_bank_selection(self):
+        """Each bank gets (1-s)*bank_size high-precision channels."""
+        # Simulate 2 banks of 4 channels each
+        # Bank 0: channels [0,1,2,3], Bank 1: channels [4,5,6,7]
+        act_avg = torch.tensor([1.0, 2.0, 3.0, 4.0,   # Bank 0
+                                5.0, 5.0, 1.0, 1.0])  # Bank 1
+        w = torch.ones(8, 4)  # uniform weight → importance ∝ |act_avg|
+
+        mask = CalibrationSession._compute_activation_mask_per_bank(
+            act_avg, w, bank_size=4, sq_sparsity=0.5
+        )
+        # s=0.5 → per bank: (1-0.5)*4 = 2 high-precision channels
+        # Bank 0: channels 2,3 (highest act_avg in bank 0)
+        # Bank 1: channels 4,5 (highest act_avg in bank 1)
+        assert mask.sum().item() == 4  # 2 per bank * 2 banks
+        assert mask[2].item() is True   # Bank 0, top-2
+        assert mask[3].item() is True   # Bank 0, top-2
+        assert mask[4].item() is True   # Bank 1, top-2
+        assert mask[5].item() is True   # Bank 1, top-2
+        assert mask[0].item() is False  # Bank 0, not top-2
+        assert mask[1].item() is False  # Bank 0, not top-2
+        assert mask[6].item() is False  # Bank 1, not top-2
+        assert mask[7].item() is False  # Bank 1, not top-2
+
+    def test_flat_mask_when_no_bank_info(self):
+        """When bank_size=None or covers all channels, global selection."""
+        act_avg = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        w = torch.ones(4, 4)
+
+        mask = CalibrationSession._compute_activation_mask_per_bank(
+            act_avg, w, bank_size=None, sq_sparsity=0.5
+        )
+        # Global top-50%: channels 2,3
+        assert mask.sum().item() == 2
+        assert mask[2].item() is True
+        assert mask[3].item() is True
+
+    def test_sq_sparsity_ratio_respected(self):
+        """sq_sparsity controls fraction of low-precision per bank."""
+        act_avg = torch.ones(8)  # all same → any selection works
+        w = torch.ones(8, 4)
+
+        # s=0.25 → (1-0.25)*4 = 3 high-precision per bank
+        mask = CalibrationSession._compute_activation_mask_per_bank(
+            act_avg, w, bank_size=4, sq_sparsity=0.25
+        )
+        assert mask.sum().item() == 6  # 3 per bank * 2 banks
+
+        # s=0.75 → (1-0.75)*4 = 1 high-precision per bank
+        mask = CalibrationSession._compute_activation_mask_per_bank(
+            act_avg, w, bank_size=4, sq_sparsity=0.75
+        )
+        assert mask.sum().item() == 2  # 1 per bank * 2 banks
