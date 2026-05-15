@@ -4,15 +4,18 @@
 Compares all four ScaleStrategies and all four Observers on the same model.
 Run:  PYTHONPATH=. python examples/03_calibration_analysis.py
 """
+import copy
+
 import torch
-from torch.utils.data import DataLoader, TensorDataset
 
 from pipeline._model import ToyMLP
 from src.formats.base import FormatBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
-from src.session import QuantSession
+from src.session import quantize_model
+from src.calibration.pipeline import CalibrationSession
+from src.analysis.context import AnalysisContext
 from src.calibration.strategies import (
     MaxScaleStrategy,
     PercentileScaleStrategy,
@@ -39,19 +42,18 @@ def make_data(n_samples=32):
 
 def calibrate_and_measure(strategy, model, calib_data):
     """Run calibration + analysis for a given strategy, return QSNR/MSE summary."""
-    session = QuantSession(model, make_cfg(), calibrator=strategy)
-    session.eval()
+    qmodel = quantize_model(copy.deepcopy(model), make_cfg())
+    qmodel.eval()
 
-    with session.calibrate():
+    with CalibrationSession(qmodel, strategy):
         for i in range(0, len(calib_data), 4):
-            session(calib_data[i : i + 4])
+            qmodel(calib_data[i : i + 4])
 
-    with session.analyze(observers=[QSNRObserver(), MSEObserver()]) as ctx:
+    with AnalysisContext(qmodel, [QSNRObserver(), MSEObserver()]) as ctx:
         for i in range(0, len(calib_data), 4):
-            session(calib_data[i : i + 4])
+            qmodel(calib_data[i : i + 4])
 
     report = ctx.report()
-    # Compute average QSNR/MSE across all layers
     total_qsnr, total_mse, n = 0.0, 0.0, 0
     for layer_name in report.keys():
         for role in report._raw[layer_name]:
@@ -96,8 +98,8 @@ def main():
     print("\n2. Observer output samples (MaxScaleStrategy)")
 
     model = ToyMLP()
-    session = QuantSession(model, make_cfg())
-    session.eval()
+    qmodel = quantize_model(copy.deepcopy(model), make_cfg())
+    qmodel.eval()
 
     all_observers = [
         QSNRObserver(),
@@ -106,16 +108,15 @@ def main():
         DistributionObserver(),
     ]
 
-    with session.calibrate():
+    with CalibrationSession(qmodel, MaxScaleStrategy()):
         for i in range(0, len(calib_data), 4):
-            session(calib_data[i : i + 4])
+            qmodel(calib_data[i : i + 4])
 
-    with session.analyze(observers=all_observers) as ctx:
+    with AnalysisContext(qmodel, all_observers) as ctx:
         for i in range(0, len(calib_data), 4):
-            session(calib_data[i : i + 4])
+            qmodel(calib_data[i : i + 4])
 
     report = ctx.report()
-    # Show one sample row to demonstrate observer output structure
     sample_layer = sorted(report.keys())[0]
     sample_role_data = report._raw[sample_layer]
     first_role = list(sample_role_data.keys())[0]

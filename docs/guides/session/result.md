@@ -65,18 +65,49 @@ print(df.sort_values("qsnr_db").head(5))
 | `top_k_qsnr()` | QSNRObserver（默认开启） | 返回空列表 |
 | `layer_report()` | QSNRObserver / MSEObserver（默认含 qsnr） | 返回含 NaN 的 DataFrame |
 
+### SessionResult.plot 方法
+
+| 方法 | 必要的 outputs key | 额外条件 |
+|------|-------------------|---------|
+| `qsnr_comparison()` | `"qsnr"`（默认） | — |
+| `crest_vs_qsnr(roles)` | `"distribution"` + `"qsnr"` | — |
+| `outlier_analysis(roles)` | `"distribution"`（推荐 `"qsnr"`） | — |
+| `per_block_qsnr(roles)` | `"qsnr"` | per_block 粒度 |
+| `correlation_heatmap()` | `"distribution"` + `"qsnr"` | — |
+| `cost_decomposition()` | cost 已执行 | — |
+| `role_distribution_comparison()` | `"distribution"` | — |
+| `kurtosis_analysis(roles)` | `"distribution"` + `"qsnr"` | — |
+| `histogram_overlay(top_k, role, layer, op_types, qsnr_type)` | `"histogram"` + `"qsnr"` | QSNR 可选，缺失时按幅度排序 |
+| `layer_histogram(layer, role)` | `"histogram"` | — |
+| `channel_heterogeneity(layer, role)` | `"qsnr"` | per-channel 模式 |
+| `per_layer_role_histogram(k)` | `"histogram"` 或 `"distribution"` | — |
+| `error_propagation(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `accumulated_vs_local(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `propagation_dag()` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `error_waterfall()` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `local_vs_accum_scatter()` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `per_role_qsnr_bars()` | `"qsnr"` | — |
+| `depth_decay(role)` | `"qsnr"` | — |
+| `per_layer_role_qsnr_line()` | `"qsnr"` | — |
+
 ### StudyReport.plot 方法
 
 | 方法 | 必要的 outputs key | 额外条件 |
 |------|-------------------|---------|
 | `qsnr_comparison()` | `"qsnr"`（默认） | — |
-| `crest_vs_qsnr(role)` | `"distribution"` + `"qsnr"` | — |
-| `outlier_analysis(role)` | `"distribution"`（推荐 `"qsnr"`） | — |
-| `per_block_qsnr(role)` | `"qsnr"` | per_block 粒度（`qsnr_db_std/min/max` 只在 per_block 时采集） |
+| `crest_vs_qsnr(roles)` | `"distribution"` + `"qsnr"` | — |
+| `outlier_analysis(roles)` | `"distribution"`（推荐 `"qsnr"`） | — |
+| `per_block_qsnr(roles)` | `"qsnr"` | per_block 粒度 |
 | `pareto_frontier(metric)` | cost 已执行 | `metric="accuracy"` 还需 `eval_fn` |
 | `correlation_heatmap()` | `"distribution"` + `"qsnr"` | — |
 | `cost_decomposition()` | cost 已执行 | — |
 | `role_distribution_comparison()` | `"distribution"` | — |
+| `kurtosis_analysis(roles)` | `"distribution"` + `"qsnr"` | — |
+| `histogram_overlay(top_k, role, layer, op_types, qsnr_type)` | `"histogram"` + `"qsnr"` | QSNR 可选，缺失时按幅度排序 |
+| `per_layer_role_histogram(k)` | `"histogram"` 或 `"distribution"` | — |
+| `per_layer_role_qsnr_line(role, qsnr_type)` | `"qsnr"` | — |
+| `error_propagation(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `accumulated_vs_local(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
 
 ### 表格输出
 

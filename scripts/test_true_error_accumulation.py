@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from src.session._config import QuantConfig
-from src.session._session import Session
+from src.session._session import run_quantization
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -89,10 +89,8 @@ def run_and_trace(n_layers=8, seed=42):
 
     cfg = QuantConfig(w_format="int8", a_format="int8", calibrator="max",
                       quantize_nonlinear=False)
-    session = Session(quant_model, cfg)
-    result = session.run(data, outputs=["qsnr", "mse"])
-
-    qmodel = session._quant_session.qmodel
+    qmodel, fp32_model, result = run_quantization(
+        quant_model, cfg, data, outputs=["qsnr", "mse"])
 
     print_model_structure(fp32_model, "fp32 model")
     print_model_structure(qmodel, "quant model (qmodel)")

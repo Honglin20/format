@@ -18,9 +18,11 @@ from src.formats.base import FormatBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
-from src.session import QuantSession
+from src.session import quantize_model
+from src.session._helpers import initialize_pre_scales, optimize_scales
 from src.transform.pre_scale import PreScaleTransform
 from src.calibration.lsq_optimizer import LayerwiseScaleOptimizer
+from src.analysis.e2e import compare_models
 
 
 def main():
@@ -33,8 +35,6 @@ def main():
     # ═════════════════════════════════════════════════════════════════
     print("\n1. PreScaleTransform — manual usage")
 
-    # PreScaleTransform holds a *reference* to a tensor (not a copy).
-    # This means updates to the tensor automatically take effect.
     scale = torch.tensor([2.0, 0.5, 1.0])
     ps = PreScaleTransform(scale=scale)
     x = torch.ones(3, 4)
@@ -45,7 +45,6 @@ def main():
     print(f"   forward(ones) = {out[:, 0].tolist()}  (broadcasted per-channel)")
     print(f"   round-trip error: {(x - back).abs().max().item():.2e}")
 
-    # PoT mode: scale is projected to nearest power-of-two before use
     ps_pot = PreScaleTransform(scale=torch.tensor([3.0, 0.3, 7.0]), pot=True)
     out_pot = ps_pot.forward(torch.ones(3, 4))
     print(f"   PoT([3.0, 0.3, 7.0]) → {out_pot[:, 0].tolist()}  "
@@ -53,9 +52,9 @@ def main():
     print(f"   invertible: {ps.invertible}  (inverse always defined)")
 
     # ═════════════════════════════════════════════════════════════════
-    # 2. QuantSession.initialize_pre_scales()
+    # 2. initialize_pre_scales()
     # ═════════════════════════════════════════════════════════════════
-    print("\n2. QuantSession.initialize_pre_scales()")
+    print("\n2. initialize_pre_scales()")
 
     fp32_model = ToyMLP()
     fp32_model.eval()
@@ -64,14 +63,14 @@ def main():
     i8s = QuantScheme(i8f, GranularitySpec.per_tensor())
     cfg = OpQuantConfig(input=i8s, weight=i8s, output=i8s)
 
-    session = QuantSession(copy.deepcopy(fp32_model), cfg=cfg)
-    session.eval()
+    qmodel = quantize_model(copy.deepcopy(fp32_model), cfg=cfg)
+    qmodel.eval()
 
     calib = [torch.randn(8, 128) for _ in range(4)]
-    count = session.initialize_pre_scales(calib, init="ones")
+    count = initialize_pre_scales(qmodel, calib, init="ones")
     print(f"   Created {count} _pre_scale buffers (tensor ones)")
     print(f"   Pot=False")
-    for n, m in session.qmodel.named_modules():
+    for n, m in qmodel.named_modules():
         if hasattr(m, "_pre_scale"):
             print(f"     {n}._pre_scale = {m._pre_scale.flatten().tolist()}")
 
@@ -85,11 +84,11 @@ def main():
             return (fp32_model(torch.randn(8, 128)) -
                     qm(torch.randn(8, 128))).pow(2).mean().item()
 
-    mse_before = mse(session.qmodel)
+    mse_before = mse(qmodel)
     opt = LayerwiseScaleOptimizer(num_steps=50, num_batches=2,
                                   optimizer="adam", lr=1e-3)
-    result = session.optimize_scales(opt, calib)
-    mse_after = mse(session.qmodel)
+    result = optimize_scales(qmodel, fp32_model, opt, calib)
+    mse_after = mse(qmodel)
     delta = (1 - mse_after / mse_before) * 100 if mse_before > 0 else 0
     print(f"   MSE before LSQ:  {mse_before:.6f}")
     print(f"   MSE after LSQ:   {mse_after:.6f}  ({delta:+.1f}%)")
@@ -103,20 +102,19 @@ def main():
     print("   PoT projects to 2**round(log2(s)) after each optimizer step.")
     print("   This guarantees bit-shift multiplication (hardware-friendly).")
 
-    session2 = QuantSession(copy.deepcopy(fp32_model), cfg=cfg)
-    session2.eval()
-    session2.initialize_pre_scales(calib, init="ones", pot=True)
+    qmodel2 = quantize_model(copy.deepcopy(fp32_model), cfg=cfg)
+    qmodel2.eval()
+    initialize_pre_scales(qmodel2, calib, init="ones", pot=True)
 
-    mse_before2 = mse(session2.qmodel)
+    mse_before2 = mse(qmodel2)
     opt2 = LayerwiseScaleOptimizer(num_steps=50, num_batches=2,
                                    optimizer="adam", lr=1e-3, pot=True)
-    result2 = session2.optimize_scales(opt2, calib)
-    mse_after2 = mse(session2.qmodel)
+    result2 = optimize_scales(qmodel2, fp32_model, opt2, calib)
+    mse_after2 = mse(qmodel2)
     delta2 = (1 - mse_after2 / mse_before2) * 100 if mse_before2 > 0 else 0
     print(f"   MSE before LSQ:  {mse_before2:.6f}")
     print(f"   MSE after LSQ:   {mse_after2:.6f}  ({delta2:+.1f}%)")
 
-    # Verify PoT property
     all_pot = all(
         torch.allclose(s, 2 ** torch.round(torch.log2(s)))
         for s in result2.values()
@@ -127,16 +125,15 @@ def main():
         print(f"     {name}: {[f'{v:.4f}' for v in scale.flatten().tolist()]}  "
               f"PoT={is_pot}")
 
-    # Note on PoT trade-off
     print("\n   Note: PoT constrains the optimization space (only discrete")
     print("   powers of 2 are allowed). This may reduce MSE improvement")
     print("   compared to fp32 pre-scales, but guarantees bit-shift scaling")
     print("   for hardware efficiency.")
 
     # ═════════════════════════════════════════════════════════════════
-    # 5. E2E: initialize → optimize → compare
+    # 5. E2E: compare_models
     # ═════════════════════════════════════════════════════════════════
-    print("\n5. E2E comparison (session.compare)")
+    print("\n5. E2E comparison (compare_models)")
 
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -147,7 +144,7 @@ def main():
     def acc(logits, labels):
         return {"acc": (logits.argmax(-1) == labels).float().mean().item()}
 
-    r = session.compare(dl, eval_fn=acc, directions={"acc": "higher"})
+    r = compare_models(fp32_model, qmodel, dl, eval_fn=acc, directions={"acc": "higher"})
     print(f"   fp32 acc: {r['fp32']['acc']:.4f}")
     print(f"   quant acc: {r['quant']['acc']:.4f}")
     print(f"   delta: {r['delta']['acc']:+.4f}")
@@ -156,15 +153,15 @@ def main():
     # 6. API summary
     # ═════════════════════════════════════════════════════════════════
     print("\n6. API summary")
-    print(f"   {'Method':<30} {'Description'}")
-    print(f"   {'-'*30} {'-'*40}")
+    print(f"   {'Function':<35} {'Description'}")
+    print(f"   {'-'*35} {'-'*40}")
     for method, desc in [
-        ("session.initialize_pre_scales()", "Create _pre_scale buffers + transforms"),
-        ("session.optimize_scales(opt, data)", "Layer-wise LSQ gradient optimization"),
+        ("initialize_pre_scales(qmodel, data)", "Create _pre_scale buffers + transforms"),
+        ("optimize_scales(qmodel, fp32, opt, data)", "Layer-wise LSQ gradient optimization"),
         ("LayerwiseScaleOptimizer(pot=True)", "PoT projected gradient descent"),
         ("PreScaleTransform(scale, pot=...)", "Reference-based transform in QuantScheme"),
     ]:
-        print(f"   {method:<30} {desc}")
+        print(f"   {method:<35} {desc}")
 
     print("\n" + "=" * 55)
     print("Pre-scale + LSQ example complete.")

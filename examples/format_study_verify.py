@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.session import resolve_config
-from src.session import QuantSession
+from src.session import Session
 from src.calibration.strategies import MSEScaleStrategy
 from src.analysis.observers import QSNRObserver
 from src.quantize.elemwise import quantize as lib_quantize
@@ -294,7 +294,7 @@ def run_pipeline_for_config(cfg_desc: dict, fp32_model: nn.Module):
     op_cfg = resolve_config(cfg_desc)
     model = copy.deepcopy(fp32_model)
 
-    session = QuantSession(
+    session = Session(
         model, op_cfg,
         calibrator=MSEScaleStrategy(),
         keep_fp32=True,

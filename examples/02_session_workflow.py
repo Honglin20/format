@@ -1,7 +1,7 @@
 """
-02 — QuantSession Unified Workflow: calibrate → analyze → compare → export.
+02 — Session Unified Workflow: calibrate → analyze → compare → export.
 
-Demonstrates the full pipeline through a single QuantSession object.
+Demonstrates the full pipeline through a single Session object.
 Run:  PYTHONPATH=. python examples/02_session_workflow.py
 """
 import torch
@@ -12,7 +12,7 @@ from src.formats.base import FormatBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
-from src.session import QuantSession
+from src.session import Session
 from src.analysis.observers import QSNRObserver, MSEObserver
 
 
@@ -35,13 +35,13 @@ def make_eval_loader(n_batches=8, batch_size=4):
 
 def main():
     print("=" * 55)
-    print("QuantSession Unified Workflow")
+    print("Session Unified Workflow")
     print("=" * 55)
 
     # ── 1. Create session ─────────────────────────────────────────
-    print("\n1. Creating QuantSession ...")
+    print("\n1. Creating Session ...")
     model = ToyMLP()
-    session = QuantSession(
+    session = Session(
         model, make_cfg(),
         observers=[QSNRObserver(), MSEObserver()],
     )
@@ -115,7 +115,7 @@ def main():
     from src.calibration.strategies import PercentileScaleStrategy
 
     # Create a second session with different calibration
-    s2 = QuantSession(
+    s2 = Session(
         ToyMLP(), make_cfg(),
         calibrator=PercentileScaleStrategy(q=99.0),
     )
@@ -142,7 +142,7 @@ def main():
     print(f"   OK — model still runs without pre-computed scales")
 
     print("\n" + "=" * 55)
-    print("QuantSession workflow complete.")
+    print("Session workflow complete.")
     print("=" * 55)
 
 
