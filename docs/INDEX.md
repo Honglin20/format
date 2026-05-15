@@ -24,6 +24,8 @@
 | 新增一个 Observer | `standards/adding-observer.md` → `architecture/002-*.md` |
 | 新增一种 Transform | `standards/adding-transform.md` → `architecture/001-*.md` |
 | 写量化测试用例 | `standards/quantization-testing.md` → `verification/README.md` |
+| 提交代码前跑 E2E | `standards/e2e-testing.md`（三层 E2E 门，每次 commit 必跑） |
+| 排查 E2E 回归 | `verification/e2e-regression-patterns.md`（回归模式库，对照全部 §） |
 | 子任务做完了，准备收尾 | `principles/review-gate.md` → `workflow/subtask-lifecycle.md` |
 | 提交代码 | `workflow/branching-commits.md` |
 | 排查一个历史 bug / 回顾之前怎么修的 | `reviews/INDEX.md` |

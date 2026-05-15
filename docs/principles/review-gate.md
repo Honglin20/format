@@ -60,18 +60,23 @@ Study(configs=[QuantConfig...], model=fp32_model)
 
 ### P0 — E2E 回归
 
-任何修改 transform / format / quantize / session 的 commit 必须通过：
+任何修改 transform / format / quantize / session / calibration 的 commit 必须通过：
 
 | 脚本 | 模型 | 数据集 |
 |------|------|--------|
 | `scripts/mnist_hadamard_study.py` | 3-layer MLP | MNIST |
 | `scripts/transformer_agnews_study.py` | 2-layer Transformer | AG News |
+| `scripts/verify_batch_independence.py` | Tiny MLP (8→4→2) | Random (16 samples) |
 
 合理性判据:
 - FP32 accuracy 不得为 0（回归检测）
 - int8-pc: |quant - fp32| < 0.02
 - int4-pb32: |quant - fp32| < 0.05
 - Hadamard/SmoothQuant 退化 ~1% 以内
+- verify_batch_independence.py: 全部 6 项 PASS
+
+> **E2E 回归模式库**: `docs/verification/e2e-regression-patterns.md` — 记录每个曾导致 E2E 回归的 bug 模式。
+> 修改涉及 calibration / quantize 的代码前，对照该文档检查。
 
 ### P1 — 数值边界
 

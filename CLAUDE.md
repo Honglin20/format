@@ -27,24 +27,22 @@
 4. 测试先于实现：写失败测试 → 实现 → 通过 → commit → review agent
 5. CURRENT.md 只记录当前进行中的任务（≤30 行）。子任务完成后立即将已完成条目移到 `docs/status/CHANGELOG.md`，不在 CURRENT.md 中积累历史
 6. README 只放项目简介 + 一个 example + 文档链接。不放架构设计、API 参考表、多步骤教程。详细内容写到 `docs/` 对应模块文档
-7. **E2E 回归门**：任何修改 transform / format / quantize / session 的 commit 必须通过下面两个 E2E Study 脚本，并审视结果合理性：
+7. **E2E 回归门**：任何修改 transform / format / quantize / session / calibration 的 commit **必须先通过 `docs/standards/e2e-testing.md` 规定的全部三层 E2E 门**，禁止跳过任何一层：
 
-| 项目 | 脚本 | 模型 | 数据集 |
-|------|------|------|--------|
-| MNIST | `scripts/mnist_hadamard_study.py` | 3-layer MLP (784→512→128→10) | MNIST 手写数字 |
-| Transformer | `scripts/transformer_agnews_study.py` | 2-layer Transformer (d=128, nhead=4) | AG News 4 分类 |
-| Batch Independence | `scripts/verify_batch_independence.py` | 1-2 layer MLP (8→4→2) | Random (16 samples) |
+**Layer A — 每次 commit 必跑（4 脚本 + 全量单测）：**
 
-- 预训练权重在 `scripts/weights/` 下，可用 `*_eval.py` 脚本加载跳过训练直接跑 Study
-- 合理性判据（基于当前 baseline，2026-05-11）：
-  - MNIST / AG News: FP32 accuracy 不得为 0（回归检测）
-  - int8-pc: |quant - fp32| < 0.02
-  - int4-pb32: |quant - fp32| < 0.05
-  - Hadamard 和 SmoothQuant 在 MNIST/Transformer 上退化均在 ~1% 以内（2026-05-12 修复后）
-  - verify_batch_independence.py: 全部 6 项 PASS
-- E2E 回归模式库: `docs/verification/e2e-regression-patterns.md`（曾导致回归的 bug 模式，修改 calibration/quantize 前对照检查）
-- **特性级 E2E 测试（新增功能必执行）**: 任何新增 format / granularity mode / transform / sparse 机制，必须有对应的 `src/tests/test_<feature>_e2e.py`，覆盖全部 granularity × ratio 边界 × 形状多样性 × format 组合 × Session + Study API。标准 → `docs/standards/quantization-testing.md`
-- **Bug 修复回归门**: 修复量化路径 bug 后，必须在 E2E 测试文件中添加直接触发该 bug 的测试用例，确认修复有效并固化。禁止只修代码不加测试。
+| 项目 | 脚本 | 模型 | 判据 |
+|------|------|------|------|
+| MNIST | `scripts/mnist_hadamard_study.py` | 3-layer MLP | FP32≠0, int8 Δ<0.02, int4 Δ<0.05 |
+| Transformer | `scripts/transformer_agnews_study.py` | 2-layer Transformer | FP32≠0, int8 Δ<0.02, int4 Δ<0.05 |
+| Batch Independence | `scripts/verify_batch_independence.py` | 1-2 layer MLP | 全部 6 项 PASS |
+| Sparse Consistency | `scripts/verify_sparse_consistency.py` | — | 全部 7 项 PASS |
+| Mask Shapes | `scripts/verify_mask_shapes.py` | Conv/Linear BANK/PER_CHANNEL/PER_TENSOR | 全部 694 项 PASS |
+| 全量单测 | `pytest src/tests/ --ignore=...` | — | 0 failed |
+
+**Layer B — 新增功能必写：**`src/tests/test_<feature>_e2e.py`（覆盖全部 granularity × ratio × 形状 × format 组合 × Session + Study API）
+
+**Layer C — 修改前必读：**`docs/verification/e2e-regression-patterns.md`（历史回归模式，含治理规则：准入四条件、合并规则、排除标准）
 
 ---
 
@@ -117,9 +115,10 @@ x_q = quantize(x, scheme)
 | 新增可视化/表格 | `docs/standards/role-aware-visualization.md` — role 区分规范 |
 | 新增公共 API | `docs/standards/api-design.md` |
 | 子任务做完了，准备收尾 | `docs/principles/review-gate.md` → `docs/workflow/subtask-lifecycle.md` |
-| 修改了 transform/format/quantize | `scripts/mnist_hadamard_study.py` + `scripts/transformer_agnews_study.py` → 跑两个 E2E Study，审视结果
-| 修改了 calibration / sparse | `scripts/verify_batch_independence.py` + `docs/verification/e2e-regression-patterns.md` → 对照回归模式库
-| 排查 E2E 回归 | `docs/verification/e2e-regression-patterns.md` → 对照已知回归模式逐个排查
+| 修改了 transform/format/quantize/calibration | `docs/standards/e2e-testing.md` → 跑 Layer A 全部 4 脚本 + 全量单测
+| 新增 feature（format/granularity/sparse/...） | `docs/standards/e2e-testing.md` §三 → 写 Layer B E2E 测试
+| 排查 E2E 回归 | `docs/verification/e2e-regression-patterns.md` → 对照全部 § 逐个排查
+| 修复量化路径 bug | `docs/standards/e2e-testing.md` §五 → 写重现测试 + 评估是否入 Layer C
 | 提交代码 | `docs/workflow/branching-commits.md` |
 | 排查历史缺陷 | `docs/reviews/INDEX.md` |
 | 查公式定义 | `docs/reference/INDEX.md` |
@@ -138,7 +137,10 @@ x_q = quantize(x, scheme)
 - **E2E 回归 (MNIST)**: `PYTHONPATH=. python scripts/mnist_hadamard_study.py`（MLP + int4/int8 + hadamard/sq）
 - **E2E 回归 (Transformer)**: `PYTHONPATH=. python scripts/transformer_agnews_study.py`（Transformer + AG News + int4/int8 + hadamard/sq）
 - **E2E 回归 (eval only)**: `PYTHONPATH=. python scripts/transformer_agnews_eval.py`（跳过训练，加载预训练权重直接跑 Study）
-- **E2E Batch Independence**: `python scripts/verify_batch_independence.py`（static sparse mask 不泄露 batch 维度，6 项检查）
+- **E2E Batch Independence**: `python scripts/verify_batch_independence.py`（mask 不泄露 batch 维，6 项）
+- **E2E Sparse Consistency**: `python scripts/verify_sparse_consistency.py`（Session API bit-level 一致性，7 项）
+- **E2E Mask Shapes**: `python scripts/verify_mask_shapes.py`（全模式 × 全算子 mask 形状验证，694 项）
+- **E2E 规范全文**: `docs/standards/e2e-testing.md`（三层结构、准入标准、开发流程强制要求）
 
 ---
 

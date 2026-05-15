@@ -10,4 +10,5 @@
 | [adding-transform.md](adding-transform.md) | 新增 Transform：Pre/Post 变换、量化流程集成 | 新增变换时 |
 | [onnx-export.md](onnx-export.md) | ONNX export 接入规范（symbolic、Format.export_onnx） | 新增需导出 ONNX 的模块时 |
 | [quantization-testing.md](quantization-testing.md) | 量化测试用例编写规范：形状覆盖、block专项、推导前置 | 写任何量化测试前 |
+| [e2e-testing.md](e2e-testing.md) | **E2E 测试规范**：三层回归门、准入标准、合并/排除规则、开发流程强制要求 | 提交代码前必读 |
 | [role-aware-visualization.md](role-aware-visualization.md) | 可视化与表格的 Role 区分规范：输入/权重/输出显式标注 | 新增/修改绘图或表格前 |
