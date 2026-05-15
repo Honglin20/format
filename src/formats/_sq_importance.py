@@ -37,9 +37,11 @@ def compute_hessian_diag_from_inputs(inputs: list) -> torch.Tensor:
 def compute_activation_channel_importance(
     act_avg: torch.Tensor, weight: torch.Tensor
 ) -> torch.Tensor:
-    """I_j = |Ā_j · Σ_i |W_{j,i}|| — per-channel activation importance.
+    """I_j = |Ā_j · Σ_i W_{j,i}| — per-channel activation importance.
 
     Measures the contribution of input channel j to the dot product A · W.
+    Weights are summed WITHOUT absolute value — cancelling contributions
+    correctly indicate low channel importance (paper Section 3.2.2).
 
     Args:
         act_avg: per-channel average activation, shape (K,)
@@ -47,5 +49,5 @@ def compute_activation_channel_importance(
     Returns:
         per-channel importance scores, shape (K,)
     """
-    weight_sum = torch.sum(torch.abs(weight), dim=-1)  # shape (K,)
-    return torch.abs(act_avg.to(weight.device)) * weight_sum
+    weight_sum = torch.sum(weight, dim=-1)  # shape (K,) — Σ_i W_{j,i} (paper)
+    return torch.abs(act_avg.to(weight.device) * weight_sum)  # |Ā_j · Σ_i W_{j,i}|

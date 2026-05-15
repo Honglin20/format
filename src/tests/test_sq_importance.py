@@ -53,3 +53,39 @@ class TestActivationChannelImportance:
         w = torch.zeros(3, 5)
         imp = compute_activation_channel_importance(act_avg, w)
         assert torch.all(imp == 0.0)
+
+
+class TestActivationChannelImportancePaperFormula:
+    """Verify I_j = |A_j * Σ_i W_{j,i}| — abs outside the sum."""
+
+    def test_mixed_sign_weights_sum_differently(self):
+        """|sum(W)| != sum(|W|) when weights have mixed signs."""
+        act_avg = torch.ones(3)
+        # Row 0: large positive and negative weights cancel → low |sum(W)|
+        # Row 1: all positive → sum(W) = sum(|W|)
+        # Row 2: all positive, same magnitude as row 1
+        w = torch.tensor([
+            [5.0, -5.0, 0.0, 0.0],  # sum=0, abs_sum=10 → paper: low, old: high
+            [1.0, 1.0, 1.0, 1.0],   # sum=4, abs_sum=4
+            [2.0, 2.0, 0.0, 0.0],   # sum=4, abs_sum=4
+        ])
+        imp = compute_activation_channel_importance(act_avg, w)
+        # Paper formula: I_0 = |1 * 0| = 0, I_1 = |1 * 4| = 4, I_2 = |1 * 4| = 4
+        # Channel 0 should be LEAST important (cancelling weights)
+        assert imp[0] < imp[1]
+        assert imp[0] < imp[2]
+        # Channel 0 should be near-zero importance
+        assert imp[0] < 0.01
+
+    def test_all_positive_same_as_before(self):
+        """When all weights positive, |sum(W)| = sum(|W|)."""
+        act_avg = torch.ones(3)
+        w = torch.tensor([
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ])
+        imp = compute_activation_channel_importance(act_avg, w)
+        # With all-positive weights, result should match old formula
+        expected = act_avg * torch.sum(torch.abs(w), dim=-1)
+        assert torch.allclose(imp, expected)
