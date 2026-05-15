@@ -1,7 +1,7 @@
 """Tests for Study aggregation layer.
 
 Study is pure aggregation - zero quantization logic.
-These tests mock Session.run() to isolate Study behavior.
+These tests mock run_quantization() to isolate Study behavior.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def configs():
 
 
 @pytest.fixture
-def mock_session_run():
+def mock_run_quantization():
     """Return a factory that creates a predictable SessionResult for a config."""
 
     def _make(config: QuantConfig) -> SessionResult:
@@ -72,15 +72,14 @@ class TestStudyConstruction:
 
 
 class TestStudyRun:
-    """Study.run() delegates to Session and returns StudyReport."""
+    """Study.run() delegates to run_quantization and returns StudyReport."""
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_single_config_returns_study_report(
-        self, MockSession, model, configs, mock_session_run,
+        self, mock_rq, model, configs, mock_run_quantization,
     ):
         cfg = configs[0]
-        mock_instance = MockSession.return_value
-        mock_instance.run.return_value = mock_session_run(cfg)
+        mock_rq.return_value = (None, None, mock_run_quantization(cfg))
 
         study = Study([cfg], model=model)
         report = study.run(torch.randn(2, 4))
@@ -89,15 +88,13 @@ class TestStudyRun:
         assert report.total_experiments == 1
         assert report.parts == ["int8"]
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_multiple_configs_multiple_entries(
-        self, MockSession, model, configs, mock_session_run,
+        self, mock_rq, model, configs, mock_run_quantization,
     ):
-        def session_side_effect(model_arg, config, **kwargs):
-            instance = MagicMock()
-            instance.run.return_value = mock_session_run(config)
-            return instance
-        MockSession.side_effect = session_side_effect
+        mock_rq.side_effect = [
+            (None, None, mock_run_quantization(cfg)) for cfg in configs
+        ]
 
         study = Study(configs, model=model)
         report = study.run(torch.randn(2, 4))
@@ -105,12 +102,11 @@ class TestStudyRun:
         assert report.total_experiments == 2
         assert set(report.parts) == {"int8", "int4"}
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_model_factory_called_per_config(
-        self, MockSession, model, configs, mock_session_run,
+        self, mock_rq, model, configs, mock_run_quantization,
     ):
-        mock_instance = MockSession.return_value
-        mock_instance.run.return_value = mock_session_run(configs[0])
+        mock_rq.return_value = (None, None, mock_run_quantization(configs[0]))
 
         factory_calls = []
 
@@ -124,12 +120,11 @@ class TestStudyRun:
         assert len(factory_calls) == 2
         assert factory_calls == ["int8", "int4"]
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_model_factory_result_used_for_session(
-        self, MockSession, model, configs, mock_session_run,
+        self, mock_rq, model, configs, mock_run_quantization,
     ):
-        mock_instance = MockSession.return_value
-        mock_instance.run.return_value = mock_session_run(configs[0])
+        mock_rq.return_value = (None, None, mock_run_quantization(configs[0]))
 
         custom_model = _TwoLayerModel()
 
@@ -139,55 +134,52 @@ class TestStudyRun:
         study = Study(configs, model=model)
         study.run(torch.randn(2, 4), model_factory=model_factory)
 
-        # Verify Session was created with the custom model
-        model_arg = MockSession.call_args[0][0]
+        # Verify run_quantization was called with the custom model
+        model_arg = mock_rq.call_args[0][0]
         assert model_arg is custom_model
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_passes_outputs_to_session(
-        self, MockSession, model, configs, mock_session_run,
+        self, mock_rq, model, configs, mock_run_quantization,
     ):
         cfg = configs[0]
-        mock_instance = MockSession.return_value
-        mock_instance.run.return_value = mock_session_run(cfg)
+        mock_rq.return_value = (None, None, mock_run_quantization(cfg))
 
         study = Study([cfg], model=model)
         study.run(torch.randn(2, 4), outputs=["accuracy", "qsnr"])
 
-        call_kwargs = mock_instance.run.call_args
+        call_kwargs = mock_rq.call_args
         assert call_kwargs[1]["outputs"] == ["accuracy", "qsnr"]
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_default_outputs_passed_to_session(
-        self, MockSession, model, configs, mock_session_run,
+        self, mock_rq, model, configs, mock_run_quantization,
     ):
         cfg = configs[0]
-        mock_instance = MockSession.return_value
-        mock_instance.run.return_value = mock_session_run(cfg)
+        mock_rq.return_value = (None, None, mock_run_quantization(cfg))
 
         study = Study([cfg], model=model)
         study.run(torch.randn(2, 4))
 
-        call_kwargs = mock_instance.run.call_args
+        call_kwargs = mock_rq.call_args
         assert call_kwargs[1]["outputs"] == "default"
 
-    @patch("src.session._study.Session")
-    def test_empty_configs_empty_report(self, MockSession, model):
+    @patch("src.session._study.run_quantization")
+    def test_empty_configs_empty_report(self, mock_rq, model):
         study = Study([], model=model)
         report = study.run(torch.randn(2, 4))
 
         assert report.total_experiments == 0
         assert report.parts == []
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_creates_deep_copies_of_model(
-        self, MockSession, model,
+        self, mock_rq, model,
     ):
-        """Without model_factory, each Session gets a deep copy."""
-        mock_instance = MockSession.return_value
-        mock_instance.run.return_value = SessionResult(
+        """Without model_factory, each run_quantization gets a deep copy."""
+        mock_rq.return_value = (None, None, SessionResult(
             name="test", config=QuantConfig(name="test"),
-        )
+        ))
 
         study = Study(
             [QuantConfig(name="a"), QuantConfig(name="b")],
@@ -195,25 +187,24 @@ class TestStudyRun:
         )
         study.run(torch.randn(2, 4))
 
-        assert MockSession.call_count == 2
-        models_passed = [call.args[0] for call in MockSession.call_args_list]
+        assert mock_rq.call_count == 2
+        models_passed = [call.args[0] for call in mock_rq.call_args_list]
         for m in models_passed:
             assert m is not model  # Not the original
         assert models_passed[0] is not models_passed[1]  # Different copies
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_with_eval_fn_metric_populated(
-        self, MockSession, model, configs,
+        self, mock_rq, model, configs,
     ):
         cfg = configs[0]
-        mock_instance = MockSession.return_value
-        mock_instance.run.return_value = SessionResult(
+        mock_rq.return_value = (None, None, SessionResult(
             name="int8",
             config=cfg,
             fp32_metrics={"acc": 0.95},
             quant_metrics={"acc": 0.93},
             delta={"acc": 0.02},
-        )
+        ))
 
         eval_fn = MagicMock(return_value={"acc": 0.9})
         study = Study([cfg], model=model)
@@ -227,13 +218,12 @@ class TestStudyRun:
         assert entry.fp32_metrics == {"acc": 0.95}
         assert entry.delta == {"acc": 0.02}
 
-    @patch("src.session._study.Session")
+    @patch("src.session._study.run_quantization")
     def test_eval_data_passed_to_session(
-        self, MockSession, model, configs, mock_session_run,
+        self, mock_rq, model, configs, mock_run_quantization,
     ):
         cfg = configs[0]
-        mock_instance = MockSession.return_value
-        mock_instance.run.return_value = mock_session_run(cfg)
+        mock_rq.return_value = (None, None, mock_run_quantization(cfg))
 
         eval_data = torch.randn(4, 4)
         eval_fn = MagicMock(return_value={"acc": 0.9})
@@ -242,6 +232,6 @@ class TestStudyRun:
             torch.randn(2, 4), eval_data=eval_data, eval_fn=eval_fn,
         )
 
-        call_kwargs = mock_instance.run.call_args
+        call_kwargs = mock_rq.call_args
         assert call_kwargs[1]["eval_data"] is eval_data
         assert call_kwargs[1]["eval_fn"] is eval_fn

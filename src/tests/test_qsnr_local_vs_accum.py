@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.session._session import Session
+from src.session._session import run_quantization
 from src.session._config import QuantConfig
 
 
@@ -35,17 +35,16 @@ def _extract_qsnr_all_roles(observers_data):
 
 
 def _run_analyze(model, cfg, input_tensor, n_batches=1):
-    """Run session.run and return (accum_qsnr, local_out, local_all)."""
-    session = Session(model, cfg)
+    """Run run_quantization and return (accum_qsnr, local_out, local_all)."""
     batches = [input_tensor for _ in range(n_batches)]
-    result = session.run(batches, outputs=["qsnr"])
+    qmodel, fp32, result = run_quantization(model, cfg, batches, outputs=["qsnr"])
 
     accum = dict(result.accum_qsnr_per_layer)
     local_output = dict(result.qsnr_per_layer)
 
     # Local from all roles (min across input/weight/output/bias)
-    if session._observers_data:
-        local_all = _extract_qsnr_all_roles(session._observers_data)
+    if result.observers_data:
+        local_all = _extract_qsnr_all_roles(result.observers_data)
     else:
         local_all = {}
 
@@ -393,8 +392,7 @@ def generate_deep_model_table():
     )
     input_tensor = torch.randn(2, 3, 8, 8)
 
-    session = Session(model, cfg)
-    result = session.run([input_tensor], outputs=["qsnr"])
+    qmodel, fp32, result = run_quantization(model, cfg, [input_tensor], outputs=["qsnr"])
 
     accum = dict(result.accum_qsnr_per_layer)
     local_out = dict(result.qsnr_per_layer)

@@ -303,24 +303,30 @@ class TestSparseShapeAndEdgeCases:
 class TestSparseContract:
     """API contract tests for sparse paths: error cases, float formats, fp32 storage."""
 
-    def test_scale_with_sparse_per_tensor_raises(self):
-        """Passing scale to quantize() with outlier_ratio > 0 raises NotImplementedError."""
+    def test_scale_with_sparse_per_tensor_falls_through(self):
+        """Passing scale to quantize() with outlier_ratio > 0 falls through to dynamic sparse.
+
+        Calibrated modules pass _output_scale without a static mask; the scale is
+        ignored and the dynamic sparse path recomputes amax via topk.
+        """
         x = torch.randn(8)
         fmt = FormatBase.from_str("int8")
         g = GranularitySpec(mode=GranularityMode.PER_TENSOR, outlier_ratio=0.1)
         scheme = QuantScheme(format=fmt, granularity=g, scale_storage="pot")
-        with pytest.raises(NotImplementedError, match="Static scale with sparse"):
-            quantize(x, scheme, scale=torch.tensor(1.0))
+        result = quantize(x, scheme, scale=torch.tensor(1.0))
+        assert result.shape == x.shape
+        assert torch.isfinite(result).all()
 
-    def test_scale_with_sparse_per_channel_raises(self):
-        """Passing scale to quantize() with per_channel + outlier_ratio > 0 raises NotImplementedError."""
+    def test_scale_with_sparse_per_channel_falls_through(self):
+        """Passing scale to quantize() with per_channel + outlier_ratio > 0 falls through to dynamic sparse."""
         x = torch.randn(4, 8)
         fmt = FormatBase.from_str("int8")
         g = GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=0,
                             outlier_ratio=0.1)
         scheme = QuantScheme(format=fmt, granularity=g, scale_storage="pot")
-        with pytest.raises(NotImplementedError, match="Static scale with sparse"):
-            quantize(x, scheme, scale=torch.ones(4, 1))
+        result = quantize(x, scheme, scale=torch.ones(4, 1))
+        assert result.shape == x.shape
+        assert torch.isfinite(result).all()
 
     def test_scale_none_with_sparse_ok(self):
         """scale=None (dynamic) with sparse should work fine."""
@@ -428,9 +434,9 @@ class TestSessionSparseIntegration:
         return TinyMLP()
 
     def test_quantconfig_per_tensor_sparse_roundtrips(self, simple_model):
-        """QuantConfig with per_tensor + outlier_ratio produces valid session."""
+        """QuantConfig with per_tensor + outlier_ratio produces valid qmodel."""
         from src.session._config import QuantConfig
-        from src.session._session import _QuantSession
+        from src.session._session import run_quantization
 
         cfg = QuantConfig(
             name="test-sparse-pt",
@@ -443,17 +449,19 @@ class TestSessionSparseIntegration:
             quantize_nonlinear=True,
         ).to_op_config()
 
-        session = _QuantSession(simple_model, cfg, keep_fp32=False)
         x = torch.randn(3, 4)
+        qmodel, fp32, result = run_quantization(
+            simple_model, cfg, [x], keep_fp32=False,
+        )
         with torch.no_grad():
-            out = session.qmodel(x)
+            out = qmodel(x)
         assert out.shape == (3, 2)
         assert torch.isfinite(out).all()
 
     def test_quantconfig_per_channel_sparse_roundtrips(self, simple_model):
-        """QuantConfig with per_channel + outlier_ratio produces valid session."""
+        """QuantConfig with per_channel + outlier_ratio produces valid qmodel."""
         from src.session._config import QuantConfig
-        from src.session._session import _QuantSession
+        from src.session._session import run_quantization
 
         cfg = QuantConfig(
             name="test-sparse-pc",
@@ -466,10 +474,12 @@ class TestSessionSparseIntegration:
             quantize_nonlinear=True,
         ).to_op_config()
 
-        session = _QuantSession(simple_model, cfg, keep_fp32=False)
         x = torch.randn(3, 4)
+        qmodel, fp32, result = run_quantization(
+            simple_model, cfg, [x], keep_fp32=False,
+        )
         with torch.no_grad():
-            out = session.qmodel(x)
+            out = qmodel(x)
         assert out.shape == (3, 2)
         assert torch.isfinite(out).all()
 

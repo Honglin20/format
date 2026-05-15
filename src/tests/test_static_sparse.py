@@ -587,3 +587,201 @@ class TestOutlierFormatDynamicSparse:
         result = quantize(x, scheme)
         assert result.shape == x.shape
         assert torch.isfinite(result).all()
+
+    def test_per_block_sparse_outlier_format(self):
+        """PER_BLOCK dynamic sparse uses outlier_format for outlier group."""
+        int4 = FormatBase.from_str("int4")
+        int8 = FormatBase.from_str("int8")
+
+        x = torch.randn(2, 8)
+        g = GranularitySpec(mode=GranularityMode.PER_BLOCK, block_size=4,
+                            block_axis=-1, outlier_ratio=0.25)
+        scheme_int4_only = QuantScheme(format=int4, granularity=g, scale_storage="pot")
+        scheme_int8_outlier = QuantScheme(format=int4, granularity=g, scale_storage="pot",
+                                          outlier_format=int8)
+
+        r_normal = quantize(x, scheme_int4_only)
+        r_outlier_fmt = quantize(x, scheme_int8_outlier)
+
+        assert r_outlier_fmt.shape == x.shape
+        assert torch.isfinite(r_outlier_fmt).all()
+        assert not torch.equal(r_normal, r_outlier_fmt), \
+            "outlier_format=int8 should produce different result from int4-only"
+
+    def test_bank_sparse_outlier_format(self):
+        """BANK dynamic sparse uses outlier_format for outlier group."""
+        int4 = FormatBase.from_str("int4")
+        int8 = FormatBase.from_str("int8")
+
+        x = torch.randn(2, 16)
+        g = GranularitySpec(mode=GranularityMode.BANK, bank_size=8, bank_axis=-1,
+                            outlier_ratio=0.25)
+        scheme_int4_only = QuantScheme(format=int4, granularity=g, scale_storage="pot")
+        scheme_int8_outlier = QuantScheme(format=int4, granularity=g, scale_storage="pot",
+                                          outlier_format=int8)
+
+        r_normal = quantize(x, scheme_int4_only)
+        r_outlier_fmt = quantize(x, scheme_int8_outlier)
+
+        assert r_outlier_fmt.shape == x.shape
+        assert torch.isfinite(r_outlier_fmt).all()
+        assert not torch.equal(r_normal, r_outlier_fmt), \
+            "outlier_format=int8 should produce different result from int4-only"
+
+
+class TestSessionStaticSparse:
+    """Session-level static sparse: calibration computes mask + per-group scales."""
+
+    @pytest.fixture
+    def tiny_model(self):
+        import torch.nn as nn
+
+        class Tiny(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(4, 8)
+
+            def forward(self, x):
+                return self.fc(x)
+
+        torch.manual_seed(42)
+        return Tiny()
+
+    def test_calibration_stores_static_sparse_buffers(self, tiny_model):
+        """CalibrationSession(sparse=True) stores mask + per-group scale buffers."""
+        from src.scheme.op_config import OpQuantConfig
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec, GranularityMode
+        from src.session._model import quantize_model
+        from src.calibration.pipeline import CalibrationSession
+        from src.calibration.strategies import MaxScaleStrategy
+
+        g = GranularitySpec(mode=GranularityMode.PER_TENSOR, outlier_ratio=0.25)
+        scheme = QuantScheme(format=FormatBase.from_str("int4"), granularity=g,
+                             scale_storage="fp32")
+        cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
+
+        qmodel = quantize_model(tiny_model, cfg=cfg)
+
+        # Calibrate with 3 samples, sparse mode enabled
+        x = torch.randn(3, 4)
+        with CalibrationSession(qmodel, MaxScaleStrategy(), sparse=True):
+            with torch.no_grad():
+                for s in range(3):
+                    qmodel(x[s:s + 1])
+
+        fc = qmodel.fc
+        assert hasattr(fc, "_output_mask"), "should store output mask"
+        assert hasattr(fc, "_output_scale"), "should store normal group scale"
+        assert hasattr(fc, "_output_scale_o"), "should store outlier group scale"
+        assert fc._output_mask.dtype == torch.bool
+        assert fc._output_mask.shape == (1, 8)  # (batch=1, features)
+        n_outliers = fc._output_mask.sum().item()
+        assert n_outliers == max(1, int(8 * 0.25))
+
+    def test_static_sparse_forward_differs_from_dynamic(self, tiny_model):
+        """Static sparse forward uses pre-computed mask."""
+        from src.scheme.op_config import OpQuantConfig
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec, GranularityMode
+        from src.session._model import quantize_model
+        from src.calibration.pipeline import CalibrationSession
+        from src.calibration.strategies import MaxScaleStrategy
+
+        g = GranularitySpec(mode=GranularityMode.PER_TENSOR, outlier_ratio=0.25)
+        scheme = QuantScheme(format=FormatBase.from_str("int4"), granularity=g,
+                             scale_storage="fp32")
+        cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
+
+        torch.manual_seed(99)
+        qmodel = quantize_model(tiny_model, cfg=cfg)
+
+        x_calib = torch.randn(3, 4)
+        with CalibrationSession(qmodel, MaxScaleStrategy(), sparse=True):
+            with torch.no_grad():
+                for s in range(3):
+                    qmodel(x_calib[s:s + 1])
+
+        # Forward with static sparse (buffers are on the module)
+        x_test = torch.randn(2, 4)
+        with torch.no_grad():
+            out_static = qmodel(x_test)
+
+        assert out_static.shape == (2, 8)
+        assert torch.isfinite(out_static).all()
+
+    def test_static_sparse_per_channel(self, tiny_model):
+        """Calibration with per_channel granularity stores correct shapes."""
+        from src.scheme.op_config import OpQuantConfig
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec, GranularityMode
+        from src.session._model import quantize_model
+        from src.calibration.pipeline import CalibrationSession
+        from src.calibration.strategies import MaxScaleStrategy
+
+        g = GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=0,
+                            outlier_ratio=0.25)
+        scheme = QuantScheme(format=FormatBase.from_str("int8"), granularity=g,
+                             scale_storage="fp32")
+        cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
+
+        qmodel = quantize_model(tiny_model, cfg=cfg)
+
+        x = torch.randn(3, 4)
+        with CalibrationSession(qmodel, MaxScaleStrategy(), sparse=True):
+            with torch.no_grad():
+                for s in range(3):
+                    qmodel(x[s:s + 1])
+
+        fc = qmodel.fc
+        assert hasattr(fc, "_output_mask")
+        assert fc._output_mask.shape == (1, 8)  # (batch=1, features)
+        assert fc._output_scale.ndim >= 1
+        assert fc._output_scale_o.ndim >= 1
+
+    def test_static_sparse_bank(self):
+        """Calibration with bank granularity stores correct shapes."""
+        import torch.nn as nn
+        from src.scheme.op_config import OpQuantConfig
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.granularity import GranularitySpec, GranularityMode
+        from src.session._model import quantize_model
+        from src.calibration.pipeline import CalibrationSession
+        from src.calibration.strategies import MaxScaleStrategy
+
+        class BankModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(16, 32)
+
+            def forward(self, x):
+                return self.fc(x)
+
+        torch.manual_seed(42)
+        model = BankModel()
+
+        g = GranularitySpec(mode=GranularityMode.BANK, bank_axis=-1,
+                            bank_size=8, outlier_ratio=0.125)
+        scheme = QuantScheme(format=FormatBase.from_str("int4"), granularity=g,
+                             scale_storage="fp32")
+        cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
+
+        qmodel = quantize_model(model, cfg=cfg)
+
+        x = torch.randn(3, 16)
+        with CalibrationSession(qmodel, MaxScaleStrategy(), sparse=True):
+            with torch.no_grad():
+                for s in range(3):
+                    qmodel(x[s:s + 1])
+
+        fc = qmodel.fc
+        assert hasattr(fc, "_output_mask")
+        assert fc._output_mask.shape == (1, 32)  # (batch=1, features)
+        num_banks = 32 // 8
+        assert fc._output_scale.shape[fc._output_scale.ndim - 2] == num_banks
+        assert fc._output_scale_o.shape[fc._output_scale_o.ndim - 2] == num_banks
+
+        with torch.no_grad():
+            out = qmodel(torch.randn(2, 16))
+        assert out.shape == (2, 32)
+        assert torch.isfinite(out).all()

@@ -18,7 +18,7 @@ from mx import finalize_mx_specs, mx_mapping
 from mx.specs import apply_mx_specs
 
 from src.session._config import QuantConfig
-from src.session._session import Session
+from src.session._session import run_quantization
 
 _HIDDEN = 32
 _HEADS = 2
@@ -179,13 +179,13 @@ def _mx_reference(model: TransformerDecoder, x: torch.Tensor, mx_specs: dict) ->
 
 
 def _run_session(model, x, kwargs):
-    """Run Session.quantize() on a fresh model copy."""
+    """Run run_quantization on a fresh model copy."""
     m = copy.deepcopy(model).eval()
     cfg = QuantConfig(**kwargs)
-    session = Session(m, cfg).quantize()
-    session.qmodel.eval()
+    qmodel, _, _ = run_quantization(m, cfg, [x], keep_fp32=False)
+    qmodel.eval()
     with torch.no_grad():
-        return session.qmodel(x.clone())
+        return qmodel(x.clone())
 
 
 # ═══════════════════════════════════════════════════════════════════════════

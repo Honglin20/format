@@ -1,11 +1,12 @@
-"""Integration test: verify session + viz produce valid output."""
+"""Integration test: verify run_quantization + viz produce valid output."""
 import copy
 import os
 import tempfile
 
 import torch
 import torch.nn as nn
-from src.session import Session, QuantConfig
+from src.session import QuantConfig
+from src.session._session import run_quantization
 from src.session._config import resolve_config
 
 
@@ -23,8 +24,8 @@ class TestPipelineIntegration:
             cfg = resolve_config(desc)
             assert cfg.weight is not None, f"{name}: weight scheme missing"
 
-    def test_session_minimal_end_to_end(self):
-        """Session completes quantize->calibrate->analyze->evaluate for a tiny model."""
+    def test_run_quantization_minimal_end_to_end(self):
+        """run_quantization completes quantize->calibrate->analyze->evaluate for a tiny model."""
         model = nn.Sequential(nn.Linear(4, 3))
 
         cfg = QuantConfig(
@@ -32,7 +33,6 @@ class TestPipelineIntegration:
             w_format="int8",
             w_granularity="per_tensor",
         )
-        session = Session(model, cfg)
 
         def _eval_fn(m, data):
             m.eval()
@@ -43,8 +43,8 @@ class TestPipelineIntegration:
                 return {"mean": m(data).mean().item()}
 
         calib = [torch.randn(2, 4)]
-        result = session.run(
-            calib_data=calib,
+        qmodel, fp32_model, result = run_quantization(
+            model, cfg, calib,
             eval_data=torch.randn(2, 4),
             eval_fn=_eval_fn,
         )
@@ -79,8 +79,8 @@ class TestPipelineIntegration:
                                 f"{fname} imports {module} (forbidden: {forbidden_mod})"
 
 
-def test_session_handles_block_sweep_style_config():
-    """Session can handle multiple configs via Study."""
+def test_study_handles_block_sweep_style_config():
+    """Study handles multiple configs via Study."""
     from src.session import Study, QuantConfig
 
     configs = [

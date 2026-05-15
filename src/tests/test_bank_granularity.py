@@ -257,7 +257,6 @@ class TestBankSessionIntegration:
         torch.manual_seed(42)
         return TinyMLP()
 
-    @pytest.mark.xfail(reason="Observer does not support BANK mode yet (P3)")
     def test_bank_smoke(self, simple_model):
         """QuantConfig bank mode produces valid output."""
         from src.session._config import QuantConfig
