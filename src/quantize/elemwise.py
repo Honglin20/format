@@ -44,7 +44,8 @@ _quantize_elemwise_core = _elemwise_core
 # ---------------------------------------------------------------------------
 
 def quantize(x, scheme=None, allow_denorm=True, scale=None, mask=None, scale_o=None,
-             group_mask=None):
+             group_mask=None, importance=None, sq_sparsity=None,
+             sq_activation_mask=None):
     """Quantize tensor x using a QuantScheme (format + granularity + transform).
 
     This is the primary entry point for tensor-level quantization.
@@ -81,7 +82,10 @@ def quantize(x, scheme=None, allow_denorm=True, scale=None, mask=None, scale_o=N
                                       outlier_format=scheme.outlier_format,
                                       group_format=scheme.group_format,
                                       group_ratio=scheme.group_ratio,
-                                      group_mask=group_mask)
+                                      group_mask=group_mask,
+                                      importance=importance,
+                                      sq_sparsity=sq_sparsity if sq_sparsity is not None else scheme.sq_sparsity,
+                                      sq_activation_mask=sq_activation_mask)
         return scheme.transform.inverse(x_q)
     finally:
         _exit_quantize()

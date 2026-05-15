@@ -46,6 +46,10 @@ class QuantScheme:
     """If set, top group_ratio granularity groups use this format (high precision)."""
     group_ratio: float = 0.0
     """Fraction of granularity groups assigned to group_format (H). ∈ [0, 1]."""
+    sq_importance: bool = False
+    """If True, use Hessian importance (not magnitude) for BANK outlier selection (ADR-014 Alg 1)."""
+    sq_sparsity: Optional[float] = None
+    """SQ-format fixed sparsity per bank. ∈ [0, 1]. None = not SQ-format."""
 
     def __post_init__(self):
         # Coerce string format to FormatBase (supports factory methods accepting str)

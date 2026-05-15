@@ -199,6 +199,10 @@ class QuantConfig:
     a_group_ratio: Optional[float] = None       # Activation override for group_ratio (None = follow group_ratio)
     a_group_format: Optional[str] = None        # Activation override for group_format (None = follow group_format)
 
+    # ---- SQ-format (ADR-014) ----
+    sq_mode: Optional[str] = None           # None | "weight" | "activation_static"
+    sq_sparsity: float = 0.5                # SQ-format fixed sparsity per bank. ∈ [0, 1]
+
     # ---- Mode ----
     weight_only: bool = False
     quantize_nonlinear: bool = True         # False = skip quantizing nonlinear ops (norm/activation/pool)
@@ -375,6 +379,27 @@ class QuantConfig:
                 raise ValueError(
                     f"a_group_ratio must be in [0, 1], got {self.a_group_ratio}"
                 )
+        # ---- SQ-format validation ----
+        if self.sq_mode is not None and self.sq_mode not in ("weight", "activation_static"):
+            raise ValueError(
+                f"sq_mode must be None, 'weight', or 'activation_static', "
+                f"got {self.sq_mode!r}"
+            )
+        if self.sq_sparsity < 0.0 or self.sq_sparsity > 1.0:
+            raise ValueError(
+                f"sq_sparsity must be in [0, 1], got {self.sq_sparsity}"
+            )
+        if self.sq_mode is not None and self.sq_mode != "activation_static" and self.w_granularity != "bank":
+            raise ValueError(
+                f"sq_mode={self.sq_mode!r} requires w_granularity='bank', "
+                f"got {self.w_granularity!r}"
+            )
+        if self.sq_mode == "activation_static" and self.a_granularity not in ("bank", "per_channel"):
+            raise ValueError(
+                f"sq_mode='activation_static' requires a_granularity='bank' or 'per_channel', "
+                f"got {self.a_granularity!r}"
+            )
+
         # Mutually exclusive: group_format and outlier_format
         if self.group_format is not None and self.outlier_format is not None:
             raise ValueError(
@@ -433,6 +458,8 @@ class QuantConfig:
             outlier_format=w_outlier_fmt,
             group_format=w_group_fmt,
             group_ratio=w_group_ratio,
+            sq_importance=(self.sq_mode == "weight"),
+            sq_sparsity=self.sq_sparsity if self.sq_mode == "weight" else None,
         )
         a_scheme = QuantScheme(
             format=a_fmt,
@@ -442,6 +469,8 @@ class QuantConfig:
             outlier_format=a_outlier_fmt,
             group_format=a_group_fmt,
             group_ratio=a_group_ratio,
+            sq_importance=(self.sq_mode == "activation_static"),
+            sq_sparsity=self.sq_sparsity if self.sq_mode == "activation_static" else None,
         )
 
         # ---- Storage scheme (element-wise) ----
@@ -577,6 +606,13 @@ class QuantConfig:
                 "'a_group_format' cannot be used with 'weight_only=True'"
             )
 
+        sq_mode = desc.get("sq_mode")
+        if sq_mode is not None and not isinstance(sq_mode, str):
+            raise TypeError(
+                f"'sq_mode' must be a string, got {type(sq_mode).__name__}"
+            )
+        sq_sparsity = desc.get("sq_sparsity", 0.5)
+
         # Storage: support legacy keys "bfloat"/"fp" for backward compat
         _sbits = desc.get("storage_bits", 0)
         _skind = desc.get("storage_kind", "bfloat")
@@ -643,6 +679,8 @@ class QuantConfig:
             group_format=group_format,
             a_group_ratio=a_group_ratio,
             a_group_format=a_group_format,
+            sq_mode=sq_mode,
+            sq_sparsity=sq_sparsity,
         )
 
 

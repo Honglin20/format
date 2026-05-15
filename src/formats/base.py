@@ -106,7 +106,8 @@ class FormatBase(ABC):
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
                  scale=None, scale_storage="pot", mask=None, scale_o=None,
                  outlier_format=None, group_format=None, group_ratio=0.0,
-                 group_mask=None):
+                 group_mask=None, importance=None, sq_sparsity=None,
+                 sq_activation_mask=None):
         """Quantize tensor x to this format.
 
         Dispatches by granularity mode.  Subclasses may override to provide
@@ -190,6 +191,18 @@ class FormatBase(ABC):
                                               scale=scale, scale_storage=scale_storage,
                                               outlier_format=outlier_format)
         elif mode == GranularityMode.BANK:
+            if importance is not None and sq_sparsity is not None:
+                return self._quantize_sq_weight(
+                    x, granularity, importance, sq_sparsity,
+                    round_mode, allow_denorm=allow_denorm,
+                    scale_storage=scale_storage, outlier_format=outlier_format,
+                )
+            if sq_activation_mask is not None:
+                return self._quantize_sq_activation_static(
+                    x, granularity, sq_activation_mask,
+                    round_mode, allow_denorm=allow_denorm,
+                    scale_storage=scale_storage, outlier_format=outlier_format,
+                )
             if granularity.outlier_ratio > 0.0:
                 if mask is not None:
                     return self._quantize_per_bank_static_sparse(
@@ -803,6 +816,151 @@ class FormatBase(ABC):
 
         # Undo transpose
         return x_t_q.transpose(0, axis)
+
+    # ------------------------------------------------------------------
+    # SQ-format quantization (ADR-014)
+    # ------------------------------------------------------------------
+
+    def _quantize_sq_weight(self, x, granularity, importance, sq_sparsity,
+                             round_mode, allow_denorm=True, scale_storage="pot",
+                             outlier_format=None):
+        """SQ-format Algorithm 1: per-bank mixed-precision weight quantization.
+
+        Within each bank, within each column, select top-(1-sq_sparsity)
+        elements by importance score for high-precision (outlier_format),
+        remaining get low-precision (self).
+
+        Paper: Section 3.2.1, Algorithm 1.
+        """
+        axis = granularity.bank_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        if not (0 <= axis < x.ndim):
+            raise ValueError(
+                f"bank_axis={granularity.bank_axis} out of range "
+                f"for tensor with ndim={x.ndim}"
+            )
+
+        bank_size = granularity.bank_size
+        N_along = x.shape[axis]
+        if N_along % bank_size != 0:
+            raise ValueError(
+                f"Dimension {axis} size {N_along} not divisible "
+                f"by bank_size {bank_size}"
+            )
+
+        num_banks = N_along // bank_size
+
+        # Reshape: split axis into (num_banks, bank_size)
+        new_shape = list(x.shape)
+        new_shape[axis] = num_banks
+        new_shape.insert(axis + 1, bank_size)
+        x_r = x.reshape(new_shape)
+        imp_r = importance.reshape(new_shape)
+
+        # Transpose bank dim to front for per-group operations
+        ndim_r = x_r.ndim
+        perm = list(range(ndim_r))
+        perm.pop(axis)
+        perm = [axis] + perm
+        x_b = x_r.permute(perm)   # (num_banks, ..., bank_size, ...)
+        imp_b = imp_r.permute(perm)
+
+        # Flatten to expose columns for per-column selection within each bank.
+        # x_b shape: (num_banks, *middle, bank_size)
+        # Reshape to: (num_banks, rows_per_col, bank_size)
+        group_size = x_b[0].numel()
+        cols = x_b.shape[-1]  # bank_size
+        rows_per_col = group_size // cols
+
+        x_flat = x_b.reshape(num_banks, rows_per_col, cols)
+        imp_flat = imp_b.reshape(num_banks, rows_per_col, cols)
+
+        k_high = max(1, int(rows_per_col * (1 - sq_sparsity)))
+        if k_high >= rows_per_col:
+            # Degenerate: all high-precision → standard per_bank with outlier_format
+            q_fmt = outlier_format if outlier_format is not None else self
+            return q_fmt._quantize_per_bank(x, granularity, round_mode,
+                                            allow_denorm=allow_denorm,
+                                            scale_storage=scale_storage)
+
+        # Per-column top-k by importance
+        _, top_indices = torch.topk(imp_flat, k_high, dim=1)
+        mask_flat = torch.zeros(num_banks, rows_per_col, cols,
+                                dtype=torch.bool, device=x.device)
+        mask_flat.scatter_(1, top_indices, True)
+
+        # Reshape mask back to x_b shape
+        mask_b = mask_flat.reshape(x_b.shape)
+
+        # Undo permutation: back to (..., num_banks, bank_size, ...)
+        inv_perm = [0] * ndim_r
+        for i, p in enumerate(perm):
+            inv_perm[p] = i
+        mask_r = mask_b.permute(inv_perm)
+
+        # Per-bank per-group amax — reduce all dims except bank dim (axis)
+        dims_to_reduce = [i for i in range(x_r.ndim) if i != axis]
+
+        amax_high = torch.amax(
+            torch.abs(x_r * mask_r.float()),
+            dim=tuple(dims_to_reduce), keepdim=True,
+        ).clamp(min=1e-12)
+        amax_low = torch.amax(
+            torch.abs(x_r * (~mask_r).float()),
+            dim=tuple(dims_to_reduce), keepdim=True,
+        ).clamp(min=1e-12)
+
+        if scale_storage == "pot":
+            amax_high = 2 ** torch.round(torch.log2(amax_high))
+            amax_low = 2 ** torch.round(torch.log2(amax_low))
+
+        q_fmt = outlier_format if outlier_format is not None else self
+        x_q = torch.zeros_like(x_r)
+
+        # High-precision group
+        x_q_high = q_fmt.quantize_elemwise(
+            x_r / amax_high, round_mode=round_mode, allow_denorm=allow_denorm)
+        x_q = x_q + x_q_high * amax_high * mask_r.float()
+
+        # Low-precision group
+        x_q_low = self.quantize_elemwise(
+            x_r / amax_low, round_mode=round_mode, allow_denorm=allow_denorm)
+        x_q = x_q + x_q_low * amax_low * (~mask_r).float()
+
+        # Preserve special values
+        x_q[x_r == float("Inf")] = float("Inf")
+        x_q[x_r == -float("Inf")] = -float("Inf")
+        x_q[x_r == float("NaN")] = float("NaN")
+
+        return x_q.reshape(x.shape)
+
+    def _quantize_sq_activation_static(self, x, granularity, channel_mask,
+                                        round_mode, allow_denorm=True,
+                                        scale_storage="pot", outlier_format=None):
+        """SQ-format Algorithm 2: static activation quantization.
+
+        Splits weight rows by pre-computed per-channel mask.
+        High-precision channels → outlier_format, low-precision → self.
+
+        Args:
+            x: weight tensor (K, N) where K=input channels
+            channel_mask: bool tensor (K,) — True = high-precision channel
+        """
+        mask = channel_mask.to(x.device)
+        mask_exp = mask.view(-1, *([1] * (x.ndim - 1)))
+
+        q_fmt = outlier_format if outlier_format is not None else self
+
+        x_q = torch.zeros_like(x)
+        x_q = x_q + q_fmt.quantize_elemwise(
+            x * mask_exp.float(), round_mode=round_mode,
+            allow_denorm=allow_denorm)
+        x_q = x_q + self.quantize_elemwise(
+            x * (~mask_exp).float(), round_mode=round_mode,
+            allow_denorm=allow_denorm)
+
+        return x_q
 
     # ------------------------------------------------------------------
     # Group-sparse quantization (ADR-013)
