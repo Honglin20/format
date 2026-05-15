@@ -870,7 +870,7 @@ class FormatBase(ABC):
         # x_b shape: (num_banks, *middle, bank_size)
         # Reshape to: (num_banks, rows_per_col, bank_size)
         group_size = x_b[0].numel()
-        cols = x_b.shape[-1]  # bank_size
+        cols = x_b.shape[-1]  # output features (N for 2D weights)
         rows_per_col = group_size // cols
 
         x_flat = x_b.reshape(num_banks, rows_per_col, cols)
