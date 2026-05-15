@@ -231,7 +231,9 @@ def run_quantization(
     if _needs_calibration(cfg_for_calib):
         track_input_flag = config.static_input_scale if isinstance(config, QuantConfig) else False
         _sparse = _any_outlier_ratio(qmodel)
-        with CalibrationSession(qmodel, calibrator, track_input=track_input_flag, sparse=_sparse):
+        _sq_mode = config.sq_mode if isinstance(config, QuantConfig) else None
+        with CalibrationSession(qmodel, calibrator, track_input=track_input_flag,
+                                sparse=_sparse, sq_mode=_sq_mode):
             _run_model(qmodel, calib_data, eval_fn)
 
     # ---- Analyze ----

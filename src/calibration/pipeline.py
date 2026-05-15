@@ -23,12 +23,41 @@ import torch
 import torch.nn as nn
 
 from src.calibration.strategies import ScaleStrategy
-from src.scheme.granularity import GranularityMode
+from src.scheme.granularity import GranularityMode, GranularitySpec
 
 
 # ---------------------------------------------------------------------------
 # Static sparse scale computation (ADR-012)
 # ---------------------------------------------------------------------------
+
+
+def _adjust_gran_axes_for_calibration(gran):
+    """Return a GranularitySpec with axes adjusted for calibration samples.
+
+    Calibration samples (after :func:`torch.cat` flattening the batch dim) are
+    one rank lower than the inference-time tensors that the spec's axes target.
+    Positive axis indices must be decremented by 1 to point to the same
+    semantic dimension.  Negative indices auto-adjust with rank and are left
+    unchanged.
+
+    This is only needed for sparse calibration (mask and per-group scale
+    computation), which processes individual per-sample tensors without a
+    batch dimension.
+    """
+    if gran is None:
+        return gran
+    bank_axis = gran.bank_axis - 1 if gran.bank_axis > 0 else gran.bank_axis
+    channel_axis = gran.channel_axis - 1 if gran.channel_axis > 0 else gran.channel_axis
+    block_axis = gran.block_axis - 1 if gran.block_axis > 0 else gran.block_axis
+    return GranularitySpec(
+        mode=gran.mode,
+        block_size=gran.block_size,
+        channel_axis=channel_axis,
+        block_axis=block_axis,
+        bank_size=gran.bank_size,
+        bank_axis=bank_axis,
+        outlier_ratio=gran.outlier_ratio,
+    )
 
 
 def _compute_sparse_scales(
@@ -86,22 +115,26 @@ def _compute_group_amax(x, mask, invert, mode, gran):
     if mode == GranularityMode.PER_CHANNEL:
         axis = gran.channel_axis
         if axis < 0:
-            axis = x.ndim + axis
-        dims_to_reduce = [i for i in range(x.ndim) if i != axis]
+            axis = x_sel.ndim + axis
+        dims_to_reduce = [i for i in range(x_sel.ndim) if i != axis]
+        if not dims_to_reduce:
+            return torch.abs(x_sel)
         return torch.amax(torch.abs(x_sel), dim=tuple(dims_to_reduce), keepdim=True)
 
     if mode == GranularityMode.BANK:
         axis = gran.bank_axis
         if axis < 0:
-            axis = x.ndim + axis
+            axis = x_sel.ndim + axis
         bank_size = gran.bank_size
-        N_along = x.shape[axis]
+        N_along = x_sel.shape[axis]
         num_banks = N_along // bank_size
-        new_shape = list(x.shape)
+        new_shape = list(x_sel.shape)
         new_shape[axis] = num_banks
         new_shape.insert(axis + 1, bank_size)
         x_r = x_sel.reshape(new_shape)
         dims_to_reduce = [i for i in range(x_r.ndim) if i != axis]
+        if not dims_to_reduce:
+            return torch.abs(x_r)
         return torch.amax(torch.abs(x_r), dim=tuple(dims_to_reduce), keepdim=True)
 
     raise ValueError(f"Unsupported granularity mode for static sparse: {mode}")
@@ -138,6 +171,7 @@ class CalibrationSession:
         assign: bool = True,
         track_input: bool = False,
         sparse: bool = False,
+        sq_mode: Optional[str] = None,
     ):
         self.model = model
         self.strategy = strategy
@@ -145,10 +179,13 @@ class CalibrationSession:
         self._assign = assign
         self._track_input = track_input
         self._sparse = sparse
+        self._sq_mode = sq_mode  # "weight" or "activation_static"
         self._running_amax: Dict[str, torch.Tensor] = {}
         self._running_input_amax: Dict[str, torch.Tensor] = {}
         self._output_samples: Dict[str, List[torch.Tensor]] = {}
         self._input_samples: Dict[str, List[torch.Tensor]] = {}
+        self._sq_inputs: Dict[str, List[torch.Tensor]] = {}
+        self._sq_outputs: Dict[str, List[torch.Tensor]] = {}
         self._hooks: list = []
 
     # ------------------------------------------------------------------
@@ -159,6 +196,8 @@ class CalibrationSession:
         self._running_amax.clear()
         self._output_samples.clear()
         self._input_samples.clear()
+        self._sq_inputs.clear()
+        self._sq_outputs.clear()
         for name, module in self.model.named_modules():
             if hasattr(module, "cfg"):
                 hook = module.register_forward_hook(self._make_hook(name))
@@ -177,6 +216,8 @@ class CalibrationSession:
             if self._sparse:
                 self._compute_and_assign_sparse_state()
                 self._compute_and_assign_group_sparse_state()
+            if self._sq_mode:
+                self._compute_and_assign_sq_state()
 
     # ------------------------------------------------------------------
     # Public API
@@ -404,6 +445,27 @@ class CalibrationSession:
                             if name not in self._input_samples:
                                 self._input_samples[name] = []
                             self._input_samples[name].append(inp.clone())
+
+            # SQ-format: collect inputs for Hessian (weight SQ) and outputs for
+            # activation averages (activation_static SQ).
+            if self._sq_mode and hasattr(module, "cfg"):
+                w_scheme = getattr(module.cfg, "weight", None)
+                a_scheme = getattr(module.cfg, "input", None)
+                if (self._sq_mode == "weight"
+                        and w_scheme is not None
+                        and w_scheme.sq_importance
+                        and _input and isinstance(_input[0], torch.Tensor)):
+                    inp = _input[0].detach()
+                    if name not in self._sq_inputs:
+                        self._sq_inputs[name] = []
+                    self._sq_inputs[name].append(inp.clone())
+                if (self._sq_mode == "activation_static"
+                        and a_scheme is not None
+                        and a_scheme.sq_importance):
+                    x_out = output.detach()
+                    if name not in self._sq_outputs:
+                        self._sq_outputs[name] = []
+                    self._sq_outputs[name].append(x_out.clone())
         return _hook
 
     # ------------------------------------------------------------------
@@ -479,21 +541,119 @@ class CalibrationSession:
 
         Args:
             samples: List of tensors, each the output of one forward pass.
+                     Each tensor may include a batch dimension; all batch
+                     elements are treated as independent calibration samples.
             fmt: FormatBase instance for the main format.
             gran: GranularitySpec with outlier_ratio > 0.
 
         Returns:
             (mask, scale_n, scale_o) tuple.
+            mask has shape ``(1, D1, D2, ...)`` — a batch dim of size 1
+            that broadcasts with any inference batch size.
         """
         from src.quantize._sparse_mask import compute_sparse_mask
 
-        x_calib = torch.stack(samples, dim=0)  # (S, D1, D2, ...)
-        mask = compute_sparse_mask(x_calib, fmt, gran, gran.outlier_ratio)
+        # Flatten per-batch samples into independent per-element samples.
+        # samples = [ (B1, *spatial), (B2, *spatial), ... ]
+        # → x_calib = (ΣBi, *spatial)
+        x_calib = torch.cat(samples, dim=0)
+
+        # Per-sample tensors inside this routine lack the batch dim; adjust
+        # positive axis indices so they point to the same semantic dimension.
+        calib_gran = _adjust_gran_axes_for_calibration(gran)
+
+        mask = compute_sparse_mask(x_calib, fmt, calib_gran, calib_gran.outlier_ratio)
+        # mask shape: (*spatial) — per-position, no batch dim
 
         scale_n, scale_o = _compute_sparse_scales(
-            x_calib, mask, gran,
+            x_calib, mask, calib_gran,
         )
+
+        # Add batch dim of size 1 so the mask broadcasts with any inference
+        # batch size during forward (see _quantize_per_bank_static_sparse).
+        mask = mask.unsqueeze(0)  # (1, *spatial)
         return mask, scale_n, scale_o
+
+    # ------------------------------------------------------------------
+    # SQ-format state (ADR-014)
+    # ------------------------------------------------------------------
+
+    def _compute_and_assign_sq_state(self):
+        """Compute SQ-format artifacts from collected calibration data.
+
+        sq_mode="weight": compute Hessian diagonal from inputs, then
+            Hessian importance I = W²·H², store as _sq_importance buffer.
+        sq_mode="activation_static": compute per-channel activation
+            averages, then A·W channel importance, store as _sq_activation_mask.
+        """
+        module_map = dict(self.model.named_modules())
+
+        if self._sq_mode == "weight":
+            for name, inputs in self._sq_inputs.items():
+                module = module_map.get(name)
+                if module is None or not inputs:
+                    continue
+                if not hasattr(module, "weight") or module.weight is None:
+                    continue
+                w = module.weight.detach()
+                hessian_diag = self._compute_hessian_diag(inputs)
+                importance = self._compute_weight_importance(w, hessian_diag)
+                module.register_buffer("_sq_importance", importance)
+
+        elif self._sq_mode == "activation_static":
+            for name, outputs in self._sq_outputs.items():
+                module = module_map.get(name)
+                if module is None or not outputs:
+                    continue
+                if not hasattr(module, "weight") or module.weight is None:
+                    continue
+                w = module.weight.detach()
+                act_avg = self._compute_activation_average(outputs)
+                mask = self._compute_activation_mask(act_avg, w)
+                module.register_buffer("_sq_activation_mask", mask)
+
+    @staticmethod
+    def _compute_hessian_diag(inputs: list) -> torch.Tensor:
+        """Compute Hessian diagonal from calibration inputs.
+
+        H_i = mean(x²)_i over calibration set.
+        """
+        from src.formats._sq_importance import compute_hessian_diag_from_inputs
+        return compute_hessian_diag_from_inputs(inputs)
+
+    @staticmethod
+    def _compute_weight_importance(weight: torch.Tensor,
+                                    hessian_diag: torch.Tensor) -> torch.Tensor:
+        """Compute I = W² · H² per-element weight importance."""
+        from src.formats._sq_importance import compute_hessian_importance
+        return compute_hessian_importance(weight, hessian_diag)
+
+    @staticmethod
+    def _compute_activation_average(outputs: list) -> torch.Tensor:
+        """Compute per-channel average activation across calibration samples."""
+        all_flat = []
+        for x in outputs:
+            x_flat = x.reshape(-1, x.shape[-1])
+            all_flat.append(x_flat)
+        stacked = torch.cat(all_flat, dim=0)
+        return stacked.abs().mean(dim=0)  # |A| average per channel
+
+    @staticmethod
+    def _compute_activation_mask(act_avg: torch.Tensor,
+                                  weight: torch.Tensor) -> torch.Tensor:
+        """Compute per-channel importance scores for activation SQ.
+
+        I_j = |Ā_j| · Σ_i |W_{j,i}| — channel importance.
+        Returns boolean mask: True = high-precision channel.
+        """
+        from src.formats._sq_importance import compute_activation_channel_importance
+        importance = compute_activation_channel_importance(act_avg, weight)
+        # Top-50% channels by importance → high precision
+        k = max(1, int(importance.numel() * 0.5))
+        _, top_idx = torch.topk(importance, k)
+        mask = torch.zeros(importance.shape, dtype=torch.bool)
+        mask.scatter_(0, top_idx, True)
+        return mask
 
     # ------------------------------------------------------------------
     # Static group sparse state (ADR-013)
