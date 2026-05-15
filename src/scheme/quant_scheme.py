@@ -42,6 +42,10 @@ class QuantScheme:
     scale_storage: str = "pot"
     outlier_format: Optional[FormatBase] = None
     """If set, outlier group uses this format instead of the main format."""
+    group_format: Optional[FormatBase] = None
+    """If set, top group_ratio granularity groups use this format (high precision)."""
+    group_ratio: float = 0.0
+    """Fraction of granularity groups assigned to group_format (H). ∈ [0, 1]."""
 
     def __post_init__(self):
         # Coerce string format to FormatBase (supports factory methods accepting str)
@@ -82,6 +86,34 @@ class QuantScheme:
         if self.outlier_format is not None and not isinstance(self.outlier_format, FormatBase):
             raise TypeError(
                 f"outlier_format must be FormatBase or str, got {type(self.outlier_format).__name__}"
+            )
+
+        # Coerce string group_format to FormatBase
+        if isinstance(self.group_format, str):
+            object.__setattr__(self, "group_format", _resolve_format(self.group_format))
+        if self.group_format is not None and not isinstance(self.group_format, FormatBase):
+            raise TypeError(
+                f"group_format must be FormatBase or str, got {type(self.group_format).__name__}"
+            )
+
+        # Validate group_ratio range
+        if not (0.0 <= self.group_ratio <= 1.0):
+            raise ValueError(
+                f"group_ratio must be in [0, 1], got {self.group_ratio}"
+            )
+
+        # group_format and outlier_format are mutually exclusive
+        if self.group_format is not None and self.outlier_format is not None:
+            raise ValueError(
+                "group_format and outlier_format are mutually exclusive. "
+                "Use either element-level sparse (outlier_format) or "
+                "group-level sparse (group_format), not both."
+            )
+        # group_ratio > 0 and outlier_ratio > 0 are also mutually exclusive
+        if self.group_ratio > 0.0 and self.granularity.outlier_ratio > 0.0:
+            raise ValueError(
+                "group_ratio > 0 and outlier_ratio > 0 are mutually exclusive. "
+                "Use either element-level sparse or group-level sparse, not both."
             )
 
     @staticmethod

@@ -43,7 +43,8 @@ _quantize_elemwise_core = _elemwise_core
 # QuantScheme-driven unified entry point
 # ---------------------------------------------------------------------------
 
-def quantize(x, scheme=None, allow_denorm=True, scale=None, mask=None, scale_o=None):
+def quantize(x, scheme=None, allow_denorm=True, scale=None, mask=None, scale_o=None,
+             group_mask=None):
     """Quantize tensor x using a QuantScheme (format + granularity + transform).
 
     This is the primary entry point for tensor-level quantization.
@@ -56,6 +57,8 @@ def quantize(x, scheme=None, allow_denorm=True, scale=None, mask=None, scale_o=N
         scale: Optional pre-computed scale tensor (normal-group amax when sparse).
         mask: Optional pre-computed boolean mask for static sparse. True = outlier.
         scale_o: Optional pre-computed scale for outlier group (static sparse).
+        group_mask: Optional pre-computed per-group boolean mask (True = H) for
+                    static group sparse.
 
     Returns:
         Quantized tensor with same shape as x.
@@ -75,7 +78,10 @@ def quantize(x, scheme=None, allow_denorm=True, scale=None, mask=None, scale_o=N
                                       allow_denorm=allow_denorm, scale=scale,
                                       scale_storage=scheme.scale_storage,
                                       mask=mask, scale_o=scale_o,
-                                      outlier_format=scheme.outlier_format)
+                                      outlier_format=scheme.outlier_format,
+                                      group_format=scheme.group_format,
+                                      group_ratio=scheme.group_ratio,
+                                      group_mask=group_mask)
         return scheme.transform.inverse(x_q)
     finally:
         _exit_quantize()

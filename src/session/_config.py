@@ -193,6 +193,12 @@ class QuantConfig:
     outlier_format: Optional[str] = None    # Format for outlier group (None = use main format)
     a_outlier_format: Optional[str] = None  # Activation-only override (None = follow outlier_format)
 
+    # ---- Group sparse (ADR-013) ----
+    group_ratio: float = 0.0                    # Fraction of granularity groups assigned to group_format (H)
+    group_format: Optional[str] = None          # H format name (e.g. "int8"), mutually exclusive with outlier_format
+    a_group_ratio: Optional[float] = None       # Activation override for group_ratio (None = follow group_ratio)
+    a_group_format: Optional[str] = None        # Activation override for group_format (None = follow group_format)
+
     # ---- Mode ----
     weight_only: bool = False
     quantize_nonlinear: bool = True         # False = skip quantizing nonlinear ops (norm/activation/pool)
@@ -333,6 +339,55 @@ class QuantConfig:
                     "a_outlier_format cannot be set when weight_only=True"
                 )
 
+        # ---- Group sparse validation ----
+        if self.group_ratio < 0.0 or self.group_ratio > 1.0:
+            raise ValueError(
+                f"group_ratio must be in [0, 1], got {self.group_ratio}"
+            )
+        if self.group_format is not None:
+            if not isinstance(self.group_format, str):
+                raise TypeError(
+                    f"group_format must be a string, got {type(self.group_format).__name__}"
+                )
+            try:
+                FormatBase.from_str(self.group_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown group_format {self.group_format!r}: {e}"
+                ) from None
+        if self.a_group_format is not None:
+            if not isinstance(self.a_group_format, str):
+                raise TypeError(
+                    f"a_group_format must be a string, got {type(self.a_group_format).__name__}"
+                )
+            try:
+                FormatBase.from_str(self.a_group_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown a_group_format {self.a_group_format!r}: {e}"
+                ) from None
+            if self.weight_only:
+                raise ValueError(
+                    "a_group_format cannot be set when weight_only=True"
+                )
+        if self.a_group_ratio is not None:
+            if self.a_group_ratio < 0.0 or self.a_group_ratio > 1.0:
+                raise ValueError(
+                    f"a_group_ratio must be in [0, 1], got {self.a_group_ratio}"
+                )
+        # Mutually exclusive: group_format and outlier_format
+        if self.group_format is not None and self.outlier_format is not None:
+            raise ValueError(
+                "group_format and outlier_format are mutually exclusive. "
+                "Use either element-level sparse (outlier_format) or "
+                "group-level sparse (group_format), not both."
+            )
+        if self.group_ratio > 0.0 and self.outlier_ratio > 0.0:
+            raise ValueError(
+                "group_ratio > 0 and outlier_ratio > 0 are mutually exclusive. "
+                "Use either element-level sparse or group-level sparse, not both."
+            )
+
     def to_op_config(self) -> OpQuantConfig:
         """Convert this user-facing config to internal :class:`OpQuantConfig`.
 
@@ -363,12 +418,21 @@ class QuantConfig:
         a_outlier_fmt_raw = self.a_outlier_format if self.a_outlier_format is not None else self.outlier_format
         a_outlier_fmt = FormatBase.from_str(a_outlier_fmt_raw) if a_outlier_fmt_raw is not None else None
 
+        w_group_fmt = FormatBase.from_str(self.group_format) if self.group_format is not None else None
+        a_group_fmt_raw = self.a_group_format if self.a_group_format is not None else self.group_format
+        a_group_fmt = FormatBase.from_str(a_group_fmt_raw) if a_group_fmt_raw is not None else None
+
+        w_group_ratio = self.group_ratio
+        a_group_ratio = self.a_group_ratio if self.a_group_ratio is not None else self.group_ratio
+
         w_scheme = QuantScheme(
             format=w_fmt,
             granularity=w_gran,
             transform=w_tx,
             scale_storage=self.scale_storage,
             outlier_format=w_outlier_fmt,
+            group_format=w_group_fmt,
+            group_ratio=w_group_ratio,
         )
         a_scheme = QuantScheme(
             format=a_fmt,
@@ -376,6 +440,8 @@ class QuantConfig:
             transform=a_tx,
             scale_storage=self.scale_storage,
             outlier_format=a_outlier_fmt,
+            group_format=a_group_fmt,
+            group_ratio=a_group_ratio,
         )
 
         # ---- Storage scheme (element-wise) ----
@@ -494,6 +560,23 @@ class QuantConfig:
                 "'a_outlier_format' cannot be used with 'weight_only=True'"
             )
 
+        group_ratio = desc.get("group_ratio", 0.0)
+        group_format = desc.get("group_format")
+        if group_format is not None and not isinstance(group_format, str):
+            raise TypeError(
+                f"'group_format' must be a string, got {type(group_format).__name__}"
+            )
+        a_group_ratio = desc.get("a_group_ratio")
+        a_group_format = desc.get("a_group_format")
+        if a_group_format is not None and not isinstance(a_group_format, str):
+            raise TypeError(
+                f"'a_group_format' must be a string, got {type(a_group_format).__name__}"
+            )
+        if weight_only and a_group_format is not None:
+            raise ValueError(
+                "'a_group_format' cannot be used with 'weight_only=True'"
+            )
+
         # Storage: support legacy keys "bfloat"/"fp" for backward compat
         _sbits = desc.get("storage_bits", 0)
         _skind = desc.get("storage_kind", "bfloat")
@@ -556,6 +639,10 @@ class QuantConfig:
             outlier_ratio=outlier_ratio,
             outlier_format=outlier_format,
             a_outlier_format=a_outlier_format,
+            group_ratio=group_ratio,
+            group_format=group_format,
+            a_group_ratio=a_group_ratio,
+            a_group_format=a_group_format,
         )
 
 

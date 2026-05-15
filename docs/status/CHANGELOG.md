@@ -5,7 +5,37 @@
 
 ---
 
-## ADR-012: BANK 粒度 + Sparse 静态量化 + 可配置 Outlier Format ✅ (2026-05-15)
+## ADR-013: Group Sparse 按粒度组格式分配 ✅ (2026-05-15)
+
+**六阶段实现，P1-P6 全部完成:**
+
+| Phase | 内容 | 关键文件 | 测试 |
+|-------|------|---------|------|
+| P1 | QuantScheme 新增 group_format + group_ratio + 互斥验证 | `quant_scheme.py` | 12 tests |
+| P2 | compute_group_mask() 独立函数 | `quantize/_group_mask.py` — per-group amax → cross-sample max → top-k | 19 tests |
+| P3 | FormatBase 各 mode group_sparse 量化方法（动态路径） | `base.py` — 4 个 _quantize_*_group_sparse 方法 | 11 tests |
+| P4 | CalibrationSession 集成 | `pipeline.py` — _compute_and_assign_group_sparse_state() | 7 tests |
+| P5 | FormatBase 静态路径（pre-computed group_mask） | `base.py` — group_mask 参数 threading + static mask in all modes | 6 tests |
+| P6 | QuantConfig 用户面字段 + to_op_config() + from_descriptor() | `_config.py` — 4 个新字段 + validation + conversion | 25 tests |
+
+**设计文档**: `docs/architecture/013-group-sparse-format-assignment.md`
+
+**核心架构决策:**
+- Group sparse mask 为 per-granularity-group（非 per-element），与 ADR-012 正交并存
+- `group_format` + `group_ratio` 放在 QuantScheme（非 GranularitySpec），与 outlier_format 互斥
+- 动态路径：per-group amax → top-k groups → torch.where(H/L)
+- 静态路径：CalibrationSession 收集样本 → compute_group_mask → _output_group_mask buffer → 推理期读取
+- PER_BLOCK group_sparse: 两个 shared-exponent 副本（H 用 group_format.emax offset, L 用 self.emax）
+- Float 格式（ebits > 0）委托标准路径，不作 group split
+- QuantConfig 沿用 a_format 的 override 模式：a_group_format / a_group_ratio 覆盖激活
+
+**Code Review 修复:**
+- C1: QuantScheme 新增 ratio-level 互斥验证（group_ratio > 0 且 outlier_ratio > 0 抛异常）
+- I1: _group_sparse_config 清理未使用的 group_fmt 返回值
+- I2: 新增 PER_BLOCK static path 测试覆盖
+- I3: 文档化 PER_BLOCK float-format 处理差异（MX 规范）
+
+**全量测试**: 2,590 passed, 42 预存在失败 | **测试文件**: `src/tests/test_group_sparse.py` (85 tests)
 
 **四阶段实现，每阶段独立 review:**
 

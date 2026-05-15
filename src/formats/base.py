@@ -105,7 +105,8 @@ class FormatBase(ABC):
 
     def quantize(self, x, granularity, round_mode="nearest", allow_denorm=True,
                  scale=None, scale_storage="pot", mask=None, scale_o=None,
-                 outlier_format=None):
+                 outlier_format=None, group_format=None, group_ratio=0.0,
+                 group_mask=None):
         """Quantize tensor x to this format.
 
         Dispatches by granularity mode.  Subclasses may override to provide
@@ -122,6 +123,11 @@ class FormatBase(ABC):
                   True = outlier.  Requires scale and scale_o.
             scale_o: Optional pre-computed scale for outlier group (static sparse).
             outlier_format: If set, outlier group uses this format instead of self.
+            group_format: If set, top group_ratio groups use this format (H).
+                          Mutually exclusive with outlier_format.
+            group_ratio: Fraction of granularity groups assigned to group_format.
+            group_mask: Optional pre-computed per-group boolean mask (True = H).
+                        When provided, skips dynamic top-k computation.
 
         Returns:
             Quantized tensor with same shape as x.
@@ -144,6 +150,11 @@ class FormatBase(ABC):
                 return self._quantize_per_tensor_sparse(
                     x, granularity, round_mode, allow_denorm,
                     scale_storage=scale_storage, outlier_format=outlier_format)
+            if group_format is not None and group_ratio > 0.0:
+                return self._quantize_per_tensor_group_sparse(
+                    x, group_format, round_mode, allow_denorm,
+                    scale=scale, scale_storage=scale_storage,
+                    group_mask=group_mask)
             return self._quantize_per_tensor(x, round_mode, allow_denorm, scale=scale,
                                               scale_storage=scale_storage)
         elif mode == GranularityMode.PER_CHANNEL:
@@ -155,6 +166,12 @@ class FormatBase(ABC):
                 return self._quantize_per_channel_sparse(
                     x, granularity, round_mode, allow_denorm,
                     scale_storage=scale_storage, outlier_format=outlier_format)
+            if group_format is not None and group_ratio > 0.0:
+                return self._quantize_per_channel_group_sparse(
+                    x, granularity, group_format, group_ratio,
+                    round_mode, allow_denorm,
+                    scale=scale, scale_storage=scale_storage,
+                    group_mask=group_mask)
             return self._quantize_per_channel(x, granularity, round_mode, allow_denorm,
                                               scale=scale, scale_storage=scale_storage)
         elif mode == GranularityMode.PER_BLOCK:
@@ -164,6 +181,11 @@ class FormatBase(ABC):
                     "Use dynamic sparse (mask=None) or per_tensor/per_channel/bank "
                     "granularity for static sparse."
                 )
+            if group_format is not None and group_ratio > 0.0:
+                return self._quantize_per_block_group_sparse(
+                    x, granularity, group_format, group_ratio,
+                    round_mode, scale_storage=scale_storage,
+                    group_mask=group_mask)
             return self._quantize_per_block(x, granularity, round_mode,
                                               scale=scale, scale_storage=scale_storage,
                                               outlier_format=outlier_format)
@@ -177,6 +199,12 @@ class FormatBase(ABC):
                 return self._quantize_per_bank_sparse(
                     x, granularity, round_mode, allow_denorm=allow_denorm,
                     scale_storage=scale_storage, outlier_format=outlier_format)
+            if group_format is not None and group_ratio > 0.0:
+                return self._quantize_per_bank_group_sparse(
+                    x, granularity, group_format, group_ratio,
+                    round_mode, allow_denorm=allow_denorm,
+                    scale=scale, scale_storage=scale_storage,
+                    group_mask=group_mask)
             return self._quantize_per_bank(x, granularity, round_mode,
                                             allow_denorm=allow_denorm,
                                             scale=scale, scale_storage=scale_storage)
@@ -775,6 +803,224 @@ class FormatBase(ABC):
 
         # Undo transpose
         return x_t_q.transpose(0, axis)
+
+    # ------------------------------------------------------------------
+    # Group-sparse quantization (ADR-013)
+    # ------------------------------------------------------------------
+
+    def _quantize_per_tensor_group_sparse(self, x, group_format, round_mode,
+                                           allow_denorm=True, scale=None,
+                                           scale_storage="pot", group_mask=None):
+        """PER_TENSOR group-sparse: one group → whole tensor uses group_format."""
+        if self.ebits > 0:
+            return self._quantize_per_tensor(x, round_mode, allow_denorm=allow_denorm,
+                                              scale=scale, scale_storage=scale_storage)
+        if scale is not None:
+            amax = scale
+        else:
+            amax = torch.amax(torch.abs(x))
+        if not torch.isfinite(amax) or amax <= 0:
+            return group_format.quantize_elemwise(x, round_mode=round_mode,
+                                                   allow_denorm=allow_denorm)
+        amax = amax.clamp(min=1e-12)
+        if scale_storage == "pot":
+            amax = 2 ** torch.round(torch.log2(amax))
+        x_norm = x / amax
+        x_q = group_format.quantize_elemwise(x_norm, round_mode=round_mode,
+                                              allow_denorm=allow_denorm)
+        return x_q * amax
+
+    def _quantize_per_channel_group_sparse(self, x, granularity, group_format,
+                                            group_ratio, round_mode,
+                                            allow_denorm=True, scale=None,
+                                            scale_storage="pot", group_mask=None):
+        """PER_CHANNEL group-sparse: top-k channels by amax → group_format."""
+        if self.ebits > 0:
+            return self._quantize_per_channel(x, granularity, round_mode,
+                                               allow_denorm=allow_denorm,
+                                               scale=scale, scale_storage=scale_storage)
+        axis = granularity.channel_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        if not (0 <= axis < x.ndim):
+            raise ValueError(
+                f"channel_axis={granularity.channel_axis} out of range "
+                f"for tensor with ndim={x.ndim}"
+            )
+        C = x.shape[axis]
+
+        if scale is not None:
+            amax = scale
+        else:
+            dims_to_reduce = [i for i in range(x.ndim) if i != axis]
+            amax = torch.amax(torch.abs(x), dim=tuple(dims_to_reduce), keepdim=True)
+            amax = amax.clamp(min=1e-12)
+
+        if scale_storage == "pot":
+            amax = 2 ** torch.round(torch.log2(amax))
+
+        # Top-k channels by amax (or use pre-computed group_mask)
+        if group_mask is not None:
+            h_mask = group_mask.view(amax.shape)
+        else:
+            scores = amax.flatten()
+            k = max(1, int(C * group_ratio))
+            _, top_indices = torch.topk(scores, k)
+            h_mask = torch.zeros(C, dtype=torch.bool, device=x.device)
+            h_mask.scatter_(0, top_indices, True)
+            h_mask = h_mask.view(amax.shape)
+
+        # Quantize all elements with both formats; select by mask
+        x_norm = x / amax
+        x_q_h = group_format.quantize_elemwise(x_norm, round_mode=round_mode,
+                                                allow_denorm=allow_denorm)
+        x_q_l = self.quantize_elemwise(x_norm, round_mode=round_mode,
+                                        allow_denorm=allow_denorm)
+        x_q = torch.where(h_mask, x_q_h * amax, x_q_l * amax)
+
+        # Preserve special values
+        x_q[x == float("Inf")] = float("Inf")
+        x_q[x == -float("Inf")] = -float("Inf")
+        x_q[x == float("NaN")] = float("NaN")
+
+        return x_q
+
+    def _quantize_per_block_group_sparse(self, x, granularity, group_format,
+                                          group_ratio, round_mode,
+                                          scale_storage="pot", group_mask=None):
+        """PER_BLOCK group-sparse: top-k blocks by amax → group_format.
+
+        Each block is quantized with its own MX-style shared exponent.
+        H blocks use group_format's emax offset; L blocks use self.emax.
+
+        Unlike per-tensor/channel/bank, float formats (ebits > 0) do NOT
+        early-return to a standard path — shared-exponent normalization is
+        always applied per block for both integer and float formats, which
+        is consistent with the MX specification.
+        """
+        if torch.jit.is_tracing():
+            return x
+        from src.session._context import _onnx_export_active
+        if _onnx_export_active.get():
+            return x
+
+        from src.formats._block_utils import (
+            _reshape_to_blocks,
+            _undo_reshape_to_blocks,
+            _shared_exponents,
+        )
+
+        block_size = granularity.block_size
+        axes = [granularity.block_axis]
+        axes = [a + x.ndim if a < 0 else a for a in axes]
+
+        A, axes, orig_shape, padded_shape = _reshape_to_blocks(x, axes, block_size)
+        block_dim = axes[-1] + 1
+
+        # Per-block amax scores (or use pre-computed group_mask)
+        scores = torch.amax(torch.abs(A), dim=block_dim)
+        if group_mask is not None:
+            h_mask = group_mask.reshape(scores.shape).unsqueeze(block_dim)
+        else:
+            G = scores.numel()
+            k = max(1, int(G * group_ratio))
+            scores_flat = scores.flatten()
+            _, top_indices = torch.topk(scores_flat, k)
+            h_mask_flat = torch.zeros(G, dtype=torch.bool, device=x.device)
+            h_mask_flat.scatter_(0, top_indices, True)
+            h_mask = h_mask_flat.reshape(scores.shape).unsqueeze(block_dim)
+
+        # Shared exponents
+        shared_exp = _shared_exponents(A, method="max", axes=[block_dim], ebits=0)
+
+        shared_exp_h = shared_exp - group_format.emax + group_format._per_block_norm_shift()
+        shared_exp_l = shared_exp - self.emax + self._per_block_norm_shift()
+
+        scale_emax = 2 ** (8 - 1) - 1
+        shared_exp_h[shared_exp_h > scale_emax] = float("NaN")
+        shared_exp_h[shared_exp_h < -scale_emax] = -scale_emax
+        shared_exp_l[shared_exp_l > scale_emax] = float("NaN")
+        shared_exp_l[shared_exp_l < -scale_emax] = -scale_emax
+
+        # Quantize all blocks with both formats
+        A_q_h = A / (2 ** shared_exp_h)
+        A_q_h = group_format.quantize_elemwise(
+            A_q_h, round_mode=round_mode, allow_denorm=True, saturate_normals=True)
+        A_q_h = A_q_h * (2 ** shared_exp_h)
+
+        A_q_l = A / (2 ** shared_exp_l)
+        A_q_l = self.quantize_elemwise(
+            A_q_l, round_mode=round_mode, allow_denorm=True, saturate_normals=True)
+        A_q_l = A_q_l * (2 ** shared_exp_l)
+
+        A_q = torch.where(h_mask, A_q_h, A_q_l)
+        return _undo_reshape_to_blocks(A_q, padded_shape, orig_shape, axes)
+
+    def _quantize_per_bank_group_sparse(self, x, granularity, group_format,
+                                         group_ratio, round_mode,
+                                         allow_denorm=True, scale=None,
+                                         scale_storage="pot", group_mask=None):
+        """BANK group-sparse: top-k banks by amax → group_format."""
+        if self.ebits > 0:
+            return self._quantize_per_bank(x, granularity, round_mode,
+                                            allow_denorm=allow_denorm,
+                                            scale=scale, scale_storage=scale_storage)
+        axis = granularity.bank_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        if not (0 <= axis < x.ndim):
+            raise ValueError(
+                f"bank_axis={granularity.bank_axis} out of range "
+                f"for tensor with ndim={x.ndim}"
+            )
+        bank_size = granularity.bank_size
+        N_along = x.shape[axis]
+        if N_along % bank_size != 0:
+            raise ValueError(
+                f"Dimension {axis} size {N_along} not divisible "
+                f"by bank_size {bank_size}"
+            )
+
+        num_banks = N_along // bank_size
+        new_shape = list(x.shape)
+        new_shape[axis] = num_banks
+        new_shape.insert(axis + 1, bank_size)
+        x_r = x.reshape(new_shape)
+
+        if scale is not None:
+            amax = scale
+        else:
+            dims_to_reduce = [i for i in range(x_r.ndim) if i != axis]
+            amax = torch.amax(torch.abs(x_r), dim=tuple(dims_to_reduce), keepdim=True)
+            amax = amax.clamp(min=1e-12)
+
+        if scale_storage == "pot":
+            amax = 2 ** torch.round(torch.log2(amax))
+
+        # Top-k banks by amax (or use pre-computed group_mask)
+        if group_mask is not None:
+            h_mask = group_mask.view(amax.shape)
+        else:
+            scores = amax.flatten()
+            k = max(1, int(num_banks * group_ratio))
+            _, top_indices = torch.topk(scores, k)
+            h_mask = torch.zeros(num_banks, dtype=torch.bool, device=x.device)
+            h_mask.scatter_(0, top_indices, True)
+            h_mask = h_mask.view(amax.shape)
+
+        # Quantize all banks with both formats; select by mask
+        x_norm = x_r / amax
+        x_q_h = group_format.quantize_elemwise(x_norm, round_mode=round_mode,
+                                                allow_denorm=allow_denorm)
+        x_q_l = self.quantize_elemwise(x_norm, round_mode=round_mode,
+                                        allow_denorm=allow_denorm)
+        x_q = torch.where(h_mask, x_q_h * amax, x_q_l * amax)
+
+        # Preserve special values
+        x_q[torch.isinf(x_r)] = x_r[torch.isinf(x_r)]
+        x_q[torch.isnan(x_r)] = float("NaN")
+
+        return x_q.reshape(x.shape)
 
     def export_onnx(self, g, x, scheme):
         """Emit unified three-axis ONNX nodes: Scale → Quantize.

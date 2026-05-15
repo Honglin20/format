@@ -31,6 +31,12 @@
 | `quantize_nonlinear` | `bool` | `True` | False = 非线性算子保持 fp32 |
 | `static_input_scale` | `bool` | `False` | True = 用校准期计算的 input_scale 做激活量化（推理时 scale 固定不变，而非每 batch 动态计算） |
 | `outlier_ratio` | `float` | `0.0` | Sparse outlier 比例，∈ [0, 1]。>0 时将 top-k 离群点分离到独立 scale 组，适用于 per_tensor / per_channel / per_block |
+| `outlier_format` | `str\|None` | `None` | Outlier 组格式（None = 使用主格式） |
+| `a_outlier_format` | `str\|None` | `None` | 激活 outlier 格式覆盖（None = 跟随 `outlier_format`） |
+| `group_ratio` | `float` | `0.0` | Group sparse H 组占比 ∈ [0, 1]。与 `outlier_ratio` 互斥 |
+| `group_format` | `str\|None` | `None` | Group sparse H 格式（如 "int8"）。与 `outlier_format` 互斥 |
+| `a_group_ratio` | `float\|None` | `None` | 激活 group_ratio 覆盖（None = 跟随 `group_ratio`） |
+| `a_group_format` | `str\|None` | `None` | 激活 group_format 覆盖（None = 跟随 `group_format`） |
 
 ## 精度优化字段
 
@@ -66,6 +72,10 @@ QuantConfig(w_format="int8", transform="adaptive")
 
 # 非线性算子保持 fp32
 QuantConfig(w_format="int8", quantize_nonlinear=False)
+
+# Group sparse: 30% channel 用 int8 高精度，其余用 int4
+QuantConfig(w_format="int4", w_granularity="per_channel",
+            group_format="int8", group_ratio=0.3)
 ```
 
 ## 从 legacy dict 构造
@@ -76,5 +86,7 @@ cfg = QuantConfig.from_descriptor({
     "granularity": "per_channel",
     "transform": "hadamard",
     "calibrator": "mse",
+    "group_format": "int8",
+    "group_ratio": 0.3,
 })
 ```

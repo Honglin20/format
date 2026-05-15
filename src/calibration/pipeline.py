@@ -11,6 +11,9 @@ Design:
   2. User runs forward passes manually inside ``with`` block.
   3. __exit__ removes hooks, computes scales via strategy, and (by
      default) auto-assigns them as ``_output_scale`` buffers.
+  4. When ``sparse=True``, per-sample activations are collected and
+     ``compute_sparse_mask()`` is called on exit to produce static
+     sparse masks and per-group scales.
 
   Scales can also be inspected mid-collection via :meth:`scales`.
 """
@@ -21,6 +24,92 @@ import torch.nn as nn
 
 from src.calibration.strategies import ScaleStrategy
 from src.scheme.granularity import GranularityMode
+
+
+# ---------------------------------------------------------------------------
+# Static sparse scale computation (ADR-012)
+# ---------------------------------------------------------------------------
+
+
+def _compute_sparse_scales(
+    x_calib: torch.Tensor,
+    mask: torch.Tensor,
+    gran,
+) -> tuple:
+    """Compute per-group amax scales from calibration data and a fixed mask.
+
+    Args:
+        x_calib: Calibration samples stacked along dim 0 (S, D1, D2, ...).
+        mask: Boolean mask with shape (D1, D2, ...), True = outlier.
+        gran: GranularitySpec with outlier_ratio > 0.
+
+    Returns:
+        (scale_n, scale_o) — amax tensors with shapes matching the
+        granularity mode (scalar for per_tensor, per-channel shape for
+        per_channel, etc.).
+    """
+    S = x_calib.shape[0]
+    mode = gran.mode
+
+    normal_amax = None
+    outlier_amax = None
+    for s in range(S):
+        x_s = x_calib[s]
+        n_a = _compute_group_amax(x_s, mask, invert=True, mode=mode, gran=gran)
+        o_a = _compute_group_amax(x_s, mask, invert=False, mode=mode, gran=gran)
+        normal_amax = torch.max(normal_amax, n_a) if normal_amax is not None else n_a
+        outlier_amax = torch.max(outlier_amax, o_a) if outlier_amax is not None else o_a
+
+    return normal_amax.clamp(min=1e-12), outlier_amax.clamp(min=1e-12)
+
+
+def _compute_group_amax(x, mask, invert, mode, gran):
+    """Compute amax of masked values for a given group, respecting granularity.
+
+    Args:
+        x: Single-sample tensor.
+        mask: Boolean mask, True = outlier.
+        invert: If True, compute for normal group (mask=False elements).
+                If False, compute for outlier group (mask=True elements).
+        mode: GranularityMode.
+        gran: GranularitySpec.
+
+    Returns:
+        amax tensor with shape determined by granularity.
+    """
+    sel = (~mask) if invert else mask
+    x_sel = x * sel.float()
+
+    if mode == GranularityMode.PER_TENSOR:
+        return torch.amax(torch.abs(x_sel))
+
+    if mode == GranularityMode.PER_CHANNEL:
+        axis = gran.channel_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        dims_to_reduce = [i for i in range(x.ndim) if i != axis]
+        return torch.amax(torch.abs(x_sel), dim=tuple(dims_to_reduce), keepdim=True)
+
+    if mode == GranularityMode.BANK:
+        axis = gran.bank_axis
+        if axis < 0:
+            axis = x.ndim + axis
+        bank_size = gran.bank_size
+        N_along = x.shape[axis]
+        num_banks = N_along // bank_size
+        new_shape = list(x.shape)
+        new_shape[axis] = num_banks
+        new_shape.insert(axis + 1, bank_size)
+        x_r = x_sel.reshape(new_shape)
+        dims_to_reduce = [i for i in range(x_r.ndim) if i != axis]
+        return torch.amax(torch.abs(x_r), dim=tuple(dims_to_reduce), keepdim=True)
+
+    raise ValueError(f"Unsupported granularity mode for static sparse: {mode}")
+
+
+# ---------------------------------------------------------------------------
+# CalibrationSession
+# ---------------------------------------------------------------------------
 
 
 class CalibrationSession:
@@ -48,14 +137,18 @@ class CalibrationSession:
         axis: int = -1,
         assign: bool = True,
         track_input: bool = False,
+        sparse: bool = False,
     ):
         self.model = model
         self.strategy = strategy
         self.axis = axis
         self._assign = assign
         self._track_input = track_input
+        self._sparse = sparse
         self._running_amax: Dict[str, torch.Tensor] = {}
         self._running_input_amax: Dict[str, torch.Tensor] = {}
+        self._output_samples: Dict[str, List[torch.Tensor]] = {}
+        self._input_samples: Dict[str, List[torch.Tensor]] = {}
         self._hooks: list = []
 
     # ------------------------------------------------------------------
@@ -64,6 +157,8 @@ class CalibrationSession:
 
     def __enter__(self) -> "CalibrationSession":
         self._running_amax.clear()
+        self._output_samples.clear()
+        self._input_samples.clear()
         for name, module in self.model.named_modules():
             if hasattr(module, "cfg"):
                 hook = module.register_forward_hook(self._make_hook(name))
@@ -79,6 +174,9 @@ class CalibrationSession:
                 self._assign_scales(self.scales())
             if self._track_input and self._running_input_amax:
                 self._assign_input_scales(self.input_scales())
+            if self._sparse:
+                self._compute_and_assign_sparse_state()
+                self._compute_and_assign_group_sparse_state()
 
     # ------------------------------------------------------------------
     # Public API
@@ -258,6 +356,18 @@ class CalibrationSession:
             else:
                 self._running_amax[name] = amax
 
+            # Collect per-sample outputs for static sparse (ADR-012 + ADR-013)
+            if self._sparse and gran is not None:
+                scheme = getattr(module.cfg, "output", None)
+                needs_sparse = gran.outlier_ratio > 0.0
+                needs_group = (scheme is not None
+                               and scheme.group_format is not None
+                               and scheme.group_ratio > 0.0)
+                if needs_sparse or needs_group:
+                    if name not in self._output_samples:
+                        self._output_samples[name] = []
+                    self._output_samples[name].append(x.clone())
+
             # Track input amax when static_input_scale is requested
             if self._track_input and _input and isinstance(_input[0], torch.Tensor):
                 inp = _input[0].detach()
@@ -282,7 +392,176 @@ class CalibrationSession:
                         )
                     else:
                         self._running_input_amax[name] = inp_amax
+
+                    # Collect per-sample inputs for static sparse (ADR-012 + ADR-013)
+                    if self._sparse and igran is not None:
+                        ischeme = getattr(module.cfg, "input", None)
+                        ineeds_sparse = igran.outlier_ratio > 0.0
+                        ineeds_group = (ischeme is not None
+                                        and ischeme.group_format is not None
+                                        and ischeme.group_ratio > 0.0)
+                        if ineeds_sparse or ineeds_group:
+                            if name not in self._input_samples:
+                                self._input_samples[name] = []
+                            self._input_samples[name].append(inp.clone())
         return _hook
+
+    # ------------------------------------------------------------------
+    # Static sparse state (ADR-012)
+    # ------------------------------------------------------------------
+
+    def _compute_and_assign_sparse_state(self):
+        """Compute static sparse masks and per-group scales from collected samples.
+
+        For each module with collected output samples:
+          1. Stack samples → call compute_sparse_mask()
+          2. Compute per-group amax (max across samples)
+          3. Store _output_mask, _output_scale (normal), _output_scale_o
+
+        For each module with collected input samples:
+          Same process → _input_mask, _input_scale, _input_scale_o
+
+        Also computes weight sparse masks from the weight tensor directly.
+        """
+        module_map = dict(self.model.named_modules())
+
+        for name, samples in self._output_samples.items():
+            module = module_map.get(name)
+            if module is None or not samples:
+                continue
+            gran, fmt, outlier_fmt = self._sparse_config(module, role="output")
+            if gran is None:
+                continue
+            mask, scale_n, scale_o = self._compute_sparse_state(
+                samples, fmt, gran,
+            )
+            module.register_buffer("_output_mask", mask)
+            module.register_buffer("_output_scale", scale_n)
+            module.register_buffer("_output_scale_o", scale_o)
+
+        for name, samples in self._input_samples.items():
+            module = module_map.get(name)
+            if module is None or not samples:
+                continue
+            gran, fmt, outlier_fmt = self._sparse_config(module, role="input")
+            if gran is None:
+                continue
+            mask, scale_n, scale_o = self._compute_sparse_state(
+                samples, fmt, gran,
+            )
+            module.register_buffer("_input_mask", mask)
+            module.register_buffer("_input_scale", scale_n)
+            module.register_buffer("_input_scale_o", scale_o)
+
+    @staticmethod
+    def _sparse_config(module, role="output"):
+        """Return (granularity, format, outlier_format) for sparse mask computation.
+
+        Returns (None, None, None) when sparse is not applicable.
+        """
+        if not hasattr(module, "cfg"):
+            return None, None, None
+        scheme = getattr(module.cfg, role, None)
+        if scheme is None:
+            return None, None, None
+        g = scheme.granularity
+        if g.outlier_ratio <= 0.0:
+            return None, None, None
+        if g.mode == GranularityMode.PER_BLOCK:
+            return None, None, None
+        if scheme.format.ebits > 0:
+            return None, None, None
+        return g, scheme.format, scheme.outlier_format
+
+    @staticmethod
+    def _compute_sparse_state(samples, fmt, gran):
+        """Compute mask, normal amax, and outlier amax from per-sample data.
+
+        Args:
+            samples: List of tensors, each the output of one forward pass.
+            fmt: FormatBase instance for the main format.
+            gran: GranularitySpec with outlier_ratio > 0.
+
+        Returns:
+            (mask, scale_n, scale_o) tuple.
+        """
+        from src.quantize._sparse_mask import compute_sparse_mask
+
+        x_calib = torch.stack(samples, dim=0)  # (S, D1, D2, ...)
+        mask = compute_sparse_mask(x_calib, fmt, gran, gran.outlier_ratio)
+
+        scale_n, scale_o = _compute_sparse_scales(
+            x_calib, mask, gran,
+        )
+        return mask, scale_n, scale_o
+
+    # ------------------------------------------------------------------
+    # Static group sparse state (ADR-013)
+    # ------------------------------------------------------------------
+
+    def _compute_and_assign_group_sparse_state(self):
+        """Compute static group masks from collected samples.
+
+        For each module with collected output samples and group_format set:
+          1. Stack samples → call compute_group_mask()
+          2. Store _output_group_mask
+
+        For each module with collected input samples:
+          Same process → _input_group_mask
+        """
+        module_map = dict(self.model.named_modules())
+
+        for name, samples in self._output_samples.items():
+            module = module_map.get(name)
+            if module is None or not samples:
+                continue
+            gran, group_ratio = self._group_sparse_config(module, role="output")
+            if gran is None:
+                continue
+            group_mask = self._compute_group_sparse_state(samples, gran, group_ratio)
+            module.register_buffer("_output_group_mask", group_mask)
+
+        for name, samples in self._input_samples.items():
+            module = module_map.get(name)
+            if module is None or not samples:
+                continue
+            gran, group_ratio = self._group_sparse_config(module, role="input")
+            if gran is None:
+                continue
+            group_mask = self._compute_group_sparse_state(samples, gran, group_ratio)
+            module.register_buffer("_input_group_mask", group_mask)
+
+    @staticmethod
+    def _group_sparse_config(module, role="output"):
+        """Return (granularity, group_ratio) for group mask computation.
+
+        Returns (None, None) when group sparse is not applicable.
+        """
+        if not hasattr(module, "cfg"):
+            return None, None
+        scheme = getattr(module.cfg, role, None)
+        if scheme is None:
+            return None, None
+        if scheme.group_format is None or scheme.group_ratio <= 0.0:
+            return None, None
+        return scheme.granularity, scheme.group_ratio
+
+    @staticmethod
+    def _compute_group_sparse_state(samples, gran, group_ratio):
+        """Compute group mask from per-sample data.
+
+        Args:
+            samples: List of tensors, each the output of one forward pass.
+            gran: GranularitySpec instance.
+            group_ratio: Fraction of groups to mark as H.
+
+        Returns:
+            Boolean group_mask tensor.
+        """
+        from src.quantize._group_mask import compute_group_mask
+
+        x_calib = torch.stack(samples, dim=0)  # (S, D1, D2, ...)
+        return compute_group_mask(x_calib, gran, group_ratio)
 
     @staticmethod
     def _output_granularity(module):
