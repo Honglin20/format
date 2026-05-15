@@ -56,45 +56,140 @@ class LinearFunction(torch.autograd.Function):
             x = quantize(x, cfg.storage)
             if emit_fn: emit_fn("input", 0, "input_pre_quant", x_raw, x, cfg.storage)
         x_post_storage = x
-        if cfg.input is not None:
+        sq_split = False
+        if cfg.input is not None and input_sq_activation_mask is not None:
+            # SQ-format activation static: split by mask, two precision matmuls.
+            # Paper Algorithm 2 inference: W_high @ A_high + W_low @ A_low.
+            import dataclasses
+            sq_mask = input_sq_activation_mask.to(x.device)
+            high_idx = sq_mask.nonzero(as_tuple=True)[0]
+            low_idx = (~sq_mask).nonzero(as_tuple=True)[0]
+
+            # Handle edge cases: all-high or all-low mask
+            has_high = high_idx.numel() > 0
+            has_low = low_idx.numel() > 0
+
+            # Use PER_CHANNEL since the bank structure no longer applies post-split.
+            from src.scheme.granularity import GranularityMode, GranularitySpec
+            part_gran = GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=1)
+
+            if has_high and has_low:
+                x_high = x.index_select(1, high_idx)
+                x_low = x.index_select(1, low_idx)
+                high_scheme = dataclasses.replace(
+                    cfg.input, format=cfg.input.outlier_format,
+                    outlier_format=None, sq_importance=False,
+                    granularity=part_gran,
+                )
+                low_scheme = dataclasses.replace(cfg.input, granularity=part_gran)
+                x_high_q = quantize(x_high, high_scheme)
+                x_low_q = quantize(x_low, low_scheme)
+            elif not has_low:
+                # All channels high-precision — single path with outlier_format
+                high_scheme = dataclasses.replace(
+                    cfg.input, format=cfg.input.outlier_format,
+                    outlier_format=None, sq_importance=False,
+                    granularity=part_gran,
+                )
+                x_high_q = quantize(x, high_scheme)
+                x_low_q = None
+            else:
+                # All channels low-precision — single path with base format
+                low_scheme = dataclasses.replace(cfg.input, granularity=part_gran)
+                x_high_q = None
+                x_low_q = quantize(x, low_scheme)
+
+            # weight: storage
+            if cfg.storage is not None:
+                w = quantize(w, cfg.storage)
+                if emit_fn: emit_fn("weight", 0, "weight_pre_quant", w_raw, w, cfg.storage)
+            w_post_storage = w
+            # Split weight and quantize each part
+            if has_high and has_low:
+                w_high = w.index_select(1, high_idx)
+                w_low = w.index_select(1, low_idx)
+                if cfg.weight is not None:
+                    w_high_q = quantize(w_high, cfg.weight)
+                    w_low_q = quantize(w_low, cfg.weight)
+                else:
+                    w_high_q = w_high
+                    w_low_q = w_low
+            elif not has_low:
+                w_high_q = quantize(w, cfg.weight) if cfg.weight is not None else w
+                w_low_q = None
+            else:
+                w_high_q = None
+                w_low_q = quantize(w, cfg.weight) if cfg.weight is not None else w
+
+            # bias
+            q_bias = b
+            if b is not None and cfg.storage is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+                if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+            if b is not None and cfg.bias is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+                if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
+
+            # Save for backward
+            if cfg.is_training:
+                ctx.save_for_backward(x_post_storage, w_post_storage)
+            else:
+                ctx.save_for_backward(x_raw, w_raw)
+
+            ctx.cfg = cfg
+            ctx.has_bias = b is not None
+            ctx.in_dim = w_raw.shape[1]
+            ctx.out_dim = w_raw.shape[0]
+            ctx.name = name
+
+            # Two parallel matmuls — paper Equation 4 inference
+            if has_high and has_low:
+                y = _F_linear(x_high_q, w_high_q) + _F_linear(x_low_q, w_low_q)
+            elif not has_low:
+                y = _F_linear(x_high_q, w_high_q)
+            else:
+                y = _F_linear(x_low_q, w_low_q)
+            sq_split = True
+
+        elif cfg.input is not None:
             x = quantize(x, cfg.input, scale=input_scale,
                          mask=input_mask, scale_o=input_scale_o,
                          sq_activation_mask=input_sq_activation_mask)
             if emit_fn: emit_fn("input", 1, "input_pre_quant", x_raw, x, cfg.input)
 
-        # weight: storage → compute
-        # Use w_raw for ALL weight observer fp32 references.
-        if cfg.storage is not None:
-            w = quantize(w, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", w_raw, w, cfg.storage)
-        w_post_storage = w
-        if cfg.weight is not None:
-            w = quantize(w, cfg.weight, importance=weight_importance)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", w_raw, w, cfg.weight)
+        # weight: storage → compute (skipped when SQ split already handled it)
+        if not sq_split:
+            if cfg.storage is not None:
+                w = quantize(w, cfg.storage)
+                if emit_fn: emit_fn("weight", 0, "weight_pre_quant", w_raw, w, cfg.storage)
+            w_post_storage = w
+            if cfg.weight is not None:
+                w = quantize(w, cfg.weight, importance=weight_importance)
+                if emit_fn: emit_fn("weight", 1, "weight_pre_quant", w_raw, w, cfg.weight)
 
-        # bias: storage → compute
-        q_bias = b
-        if b is not None and cfg.storage is not None:
-            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
-            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
-        if b is not None and cfg.bias is not None:
-            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
-            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
+            # bias: storage → compute
+            q_bias = b
+            if b is not None and cfg.storage is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+                if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+            if b is not None and cfg.bias is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+                if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
-        # Save for backward: post-storage if training, raw if STE
-        if cfg.is_training:
-            ctx.save_for_backward(x_post_storage, w_post_storage)
-        else:
-            ctx.save_for_backward(x_raw, w_raw)
+            # Save for backward: post-storage if training, raw if STE
+            if cfg.is_training:
+                ctx.save_for_backward(x_post_storage, w_post_storage)
+            else:
+                ctx.save_for_backward(x_raw, w_raw)
 
-        ctx.cfg = cfg
-        ctx.has_bias = b is not None
-        ctx.in_dim = w_raw.shape[1]
-        ctx.out_dim = w_raw.shape[0]
-        ctx.name = name
+            ctx.cfg = cfg
+            ctx.has_bias = b is not None
+            ctx.in_dim = w_raw.shape[1]
+            ctx.out_dim = w_raw.shape[0]
+            ctx.name = name
 
-        # matmul
-        y = _F_linear(x, w)
+            # matmul
+            y = _F_linear(x, w)
 
         # Pre-compute true fp32 references for each intermediate output stage.
         # Stage 0 (post-matmul, pre-bias): compare against matmul-only true output.

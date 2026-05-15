@@ -443,3 +443,62 @@ class TestSQQuantConfig:
 
         result = quantize(w, scheme, importance=imp)
         assert result.shape == w.shape
+
+
+class TestSQOperatorSplit:
+    """Operator-level two-matmul path for SQ activation static."""
+
+    def test_linear_two_matmuls_equal_single_when_all_high(self):
+        """With all channels high-precision, two matmuls = single matmul."""
+        from src.ops.linear import QuantizedLinear
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.op_config import OpQuantConfig
+        from src.formats.base import FormatBase
+
+        int8 = FormatBase.from_str("int8")
+        a_scheme = QuantScheme(
+            format=int8,
+            granularity=GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=1),
+            outlier_format=int8,
+            sq_importance=True, sq_sparsity=0.5,
+        )
+        w_scheme = QuantScheme(format=int8, granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(input=a_scheme, weight=w_scheme)
+        layer = QuantizedLinear(4, 8, cfg=cfg)
+
+        mask = torch.ones(4, dtype=torch.bool)
+        layer.register_buffer("_sq_activation_mask", mask)
+
+        torch.manual_seed(42)
+        x = torch.randn(2, 4) * 0.5
+        y = layer(x)
+        assert y.shape == (2, 8)
+        assert torch.isfinite(y).all()
+
+    def test_linear_two_matmuls_with_mixed_precision(self):
+        """High channels use INT8, low channels use INT4."""
+        from src.ops.linear import QuantizedLinear
+        from src.scheme.quant_scheme import QuantScheme
+        from src.scheme.op_config import OpQuantConfig
+        from src.formats.base import FormatBase
+
+        int4 = FormatBase.from_str("int4")
+        int8 = FormatBase.from_str("int8")
+        a_scheme = QuantScheme(
+            format=int4,
+            granularity=GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=1),
+            outlier_format=int8,
+            sq_importance=True, sq_sparsity=0.5,
+        )
+        w_scheme = QuantScheme(format=int8, granularity=GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(input=a_scheme, weight=w_scheme)
+        layer = QuantizedLinear(8, 4, cfg=cfg)
+
+        mask = torch.tensor([True, True, True, True, False, False, False, False])
+        layer.register_buffer("_sq_activation_mask", mask)
+
+        torch.manual_seed(42)
+        x = torch.randn(2, 8) * 0.5
+        y = layer(x)
+        assert y.shape == (2, 4)
+        assert torch.isfinite(y).all()

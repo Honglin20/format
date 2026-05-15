@@ -89,46 +89,141 @@ class ConvFunction(torch.autograd.Function):
             input = quantize(input, cfg.storage)
             if emit_fn: emit_fn("input", 0, "input_pre_quant", input_raw, input, cfg.storage)
         input_post_storage = input
-        if cfg.input is not None:
+        sq_split = False
+        if cfg.input is not None and input_sq_activation_mask is not None:
+            # SQ-format activation static: split by mask, two precision convs.
+            import dataclasses
+            sq_mask = input_sq_activation_mask.to(input.device)
+            high_idx = sq_mask.nonzero(as_tuple=True)[0]
+            low_idx = (~sq_mask).nonzero(as_tuple=True)[0]
+            has_high = high_idx.numel() > 0
+            has_low = low_idx.numel() > 0
+
+            from src.scheme.granularity import GranularityMode, GranularitySpec
+            part_gran = GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=1)
+
+            if has_high and has_low:
+                input_high = input.index_select(1, high_idx)
+                input_low = input.index_select(1, low_idx)
+                high_scheme = dataclasses.replace(
+                    cfg.input, format=cfg.input.outlier_format,
+                    outlier_format=None, sq_importance=False,
+                    granularity=part_gran,
+                )
+                low_scheme = dataclasses.replace(cfg.input, granularity=part_gran)
+                input_high_q = quantize(input_high, high_scheme)
+                input_low_q = quantize(input_low, low_scheme)
+            elif not has_low:
+                high_scheme = dataclasses.replace(
+                    cfg.input, format=cfg.input.outlier_format,
+                    outlier_format=None, sq_importance=False,
+                    granularity=part_gran,
+                )
+                input_high_q = quantize(input, high_scheme)
+                input_low_q = None
+            else:
+                low_scheme = dataclasses.replace(cfg.input, granularity=part_gran)
+                input_high_q = None
+                input_low_q = quantize(input, low_scheme)
+
+            # weight: storage
+            if cfg.storage is not None:
+                weight = quantize(weight, cfg.storage)
+                if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
+            weight_post_storage = weight
+            # Split weight
+            if has_high and has_low:
+                weight_high = weight.index_select(1, high_idx)
+                weight_low = weight.index_select(1, low_idx)
+                if cfg.weight is not None:
+                    weight_high_q = quantize(weight_high, cfg.weight)
+                    weight_low_q = quantize(weight_low, cfg.weight)
+                else:
+                    weight_high_q = weight_high
+                    weight_low_q = weight_low
+            elif not has_low:
+                weight_high_q = quantize(weight, cfg.weight) if cfg.weight is not None else weight
+                weight_low_q = None
+            else:
+                weight_high_q = None
+                weight_low_q = quantize(weight, cfg.weight) if cfg.weight is not None else weight
+
+            # bias
+            q_bias = bias
+            if bias is not None and cfg.storage is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+                if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+            if bias is not None and cfg.bias is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+                if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
+
+            # Save for backward
+            if cfg.is_training:
+                ctx.save_for_backward(input_post_storage, weight_post_storage)
+            else:
+                ctx.save_for_backward(input_raw, weight_raw)
+
+            ctx.cfg = cfg
+
+            # Two parallel convs (bias added at end to avoid double-counting)
+            conv_fn = {1: F.conv1d, 2: F.conv2d, 3: F.conv3d}[num_spatial_dims]
+            if has_high and has_low:
+                output = (conv_fn(input_high_q, weight_high_q, None, stride, padding, dilation, groups)
+                          + conv_fn(input_low_q, weight_low_q, None, stride, padding, dilation, groups))
+            elif not has_low:
+                output = conv_fn(input_high_q, weight_high_q, None, stride, padding, dilation, groups)
+            else:
+                output = conv_fn(input_low_q, weight_low_q, None, stride, padding, dilation, groups)
+
+            if q_bias is not None:
+                _enter_quantize()
+                try:
+                    output = output + q_bias.reshape([1, -1] + [1] * num_spatial_dims)
+                finally:
+                    _exit_quantize()
+
+            sq_split = True
+
+        elif cfg.input is not None:
             input = quantize(input, cfg.input, scale=input_scale,
                              mask=input_mask, scale_o=input_scale_o,
                              sq_activation_mask=input_sq_activation_mask)
             if emit_fn: emit_fn("input", 1, "input_pre_quant", input_raw, input, cfg.input)
 
-        # weight: storage → compute
-        # Use weight_raw for ALL weight observer fp32 references.
-        if cfg.storage is not None:
-            weight = quantize(weight, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
-        weight_post_storage = weight
-        if cfg.weight is not None:
-            weight = quantize(weight, cfg.weight, importance=weight_importance)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, weight, cfg.weight)
+        # weight: storage → compute (skipped when SQ split already handled it)
+        if not sq_split:
+            if cfg.storage is not None:
+                weight = quantize(weight, cfg.storage)
+                if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
+            weight_post_storage = weight
+            if cfg.weight is not None:
+                weight = quantize(weight, cfg.weight, importance=weight_importance)
+                if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, weight, cfg.weight)
 
-        # bias: storage → compute
-        q_bias = bias
-        if bias is not None and cfg.storage is not None:
-            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
-            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
-        if bias is not None and cfg.bias is not None:
-            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
-            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
+            # bias: storage → compute
+            q_bias = bias
+            if bias is not None and cfg.storage is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+                if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+            if bias is not None and cfg.bias is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+                if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
-        # Save for backward
-        if cfg.is_training:
-            ctx.save_for_backward(input_post_storage, weight_post_storage)
-        else:
-            ctx.save_for_backward(input_raw, weight_raw)
+            # Save for backward
+            if cfg.is_training:
+                ctx.save_for_backward(input_post_storage, weight_post_storage)
+            else:
+                ctx.save_for_backward(input_raw, weight_raw)
 
-        ctx.cfg = cfg
+            ctx.cfg = cfg
 
-        # Compute conv
-        if num_spatial_dims == 1:
-            output = F.conv1d(input, weight, q_bias, stride, padding, dilation, groups)
-        elif num_spatial_dims == 2:
-            output = F.conv2d(input, weight, q_bias, stride, padding, dilation, groups)
-        else:
-            output = F.conv3d(input, weight, q_bias, stride, padding, dilation, groups)
+            # Compute conv
+            if num_spatial_dims == 1:
+                output = F.conv1d(input, weight, q_bias, stride, padding, dilation, groups)
+            elif num_spatial_dims == 2:
+                output = F.conv2d(input, weight, q_bias, stride, padding, dilation, groups)
+            else:
+                output = F.conv3d(input, weight, q_bias, stride, padding, dilation, groups)
 
         # Pre-compute true fp32 output for ALL observer output stages.
         _true_ref = None
