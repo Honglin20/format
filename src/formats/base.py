@@ -938,19 +938,21 @@ class FormatBase(ABC):
     def _quantize_sq_activation_static(self, x, granularity, channel_mask,
                                         round_mode, allow_denorm=True,
                                         scale_storage="pot", outlier_format=None):
-        """SQ-format Algorithm 2: static activation quantization.
+        """SQ-format Algorithm 2: static activation quantization — split-based.
 
-        Splits weight rows by pre-computed per-channel mask.
+        Splits the tensor by per-channel mask into two independent groups.
         High-precision channels → outlier_format, low-precision → self.
+        Each group is quantized independently, then reassembled.
+
+        Paper: Section 3.2.2, Algorithm 2.
 
         Args:
-            x: weight tensor (K, N) where K=input channels
+            x: tensor (..., K, ...) where K = number of channels
             channel_mask: bool tensor (K,) — True = high-precision channel
         """
         mask = channel_mask.to(x.device)
-        # Broadcast mask along the dimension that matches its size.
-        # For weight tensors (K,N) this is dim 0; for activation tensors
-        # (batch,channels) this is dim 1.
+
+        # Find which dimension matches the mask size
         channel_dim = None
         for d in range(x.ndim):
             if x.shape[d] == mask.shape[0]:
@@ -961,21 +963,36 @@ class FormatBase(ABC):
                 f"Channel mask size {mask.shape[0]} does not match any "
                 f"dimension of input shape {tuple(x.shape)}"
             )
-        broadcast_shape = [1] * x.ndim
-        broadcast_shape[channel_dim] = mask.shape[0]
-        mask_exp = mask.view(broadcast_shape)
+
+        # Select high-precision and low-precision channels
+        high_idx = mask.nonzero(as_tuple=True)[0]
+        low_idx = (~mask).nonzero(as_tuple=True)[0]
+
+        x_high = x.index_select(channel_dim, high_idx)
+        x_low = x.index_select(channel_dim, low_idx)
 
         q_fmt = outlier_format if outlier_format is not None else self
 
-        x_q = torch.zeros_like(x)
-        x_q = x_q + q_fmt.quantize_elemwise(
-            x * mask_exp.float(), round_mode=round_mode,
-            allow_denorm=allow_denorm)
-        x_q = x_q + self.quantize_elemwise(
-            x * (~mask_exp).float(), round_mode=round_mode,
-            allow_denorm=allow_denorm)
+        # After splitting, use per-channel granularity for each part
+        # since the bank structure no longer directly applies
+        from src.scheme.granularity import GranularityMode, GranularitySpec
+        part_gran = GranularitySpec(mode=GranularityMode.PER_CHANNEL,
+                                     channel_axis=channel_dim)
 
-        return x_q
+        # Quantize each part independently
+        x_high_q = q_fmt.quantize(x_high, part_gran, round_mode=round_mode,
+                                   allow_denorm=allow_denorm,
+                                   scale_storage=scale_storage)
+        x_low_q = self.quantize(x_low, part_gran, round_mode=round_mode,
+                                 allow_denorm=allow_denorm,
+                                 scale_storage=scale_storage)
+
+        # Reassemble into original shape
+        result = torch.zeros_like(x)
+        result.index_copy_(channel_dim, high_idx, x_high_q)
+        result.index_copy_(channel_dim, low_idx, x_low_q)
+
+        return result
 
     # ------------------------------------------------------------------
     # Group-sparse quantization (ADR-013)

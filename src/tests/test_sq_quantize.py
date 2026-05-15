@@ -127,7 +127,7 @@ class TestSQWeightQuantize:
 
 
 class TestSQActivationStatic:
-    """Algorithm 2: SQ-format static on activations."""
+    """Algorithm 2: SQ-format static on activations — split-based."""
 
     def test_sq_activation_static_shape(self, int4_fmt, int8_fmt):
         w = torch.randn(8, 4)
@@ -138,30 +138,78 @@ class TestSQActivationStatic:
         )
         assert result.shape == w.shape
 
-    def test_sq_activation_all_high(self, int4_fmt, int8_fmt):
-        """All channels high-precision → result equals outlier_format elemwise quantization."""
-        w = torch.randn(4, 8) * 0.5  # values in [-1.5, 1.5] → within int8 range
-        mask = torch.ones(4, dtype=torch.bool)
+    def test_split_preserves_values(self, int4_fmt, int8_fmt):
+        """After split-quantize-reassemble, high channels use int8, low use int4."""
+        w = torch.randn(8, 4) * 0.5
+        mask = torch.tensor([True, True, False, False, True, True, False, False])
+        bank = GranularitySpec(mode=GranularityMode.BANK, bank_size=4, bank_axis=0)
 
+        result = int4_fmt.quantize(
+            w, bank, sq_activation_mask=mask, outlier_format=int8_fmt,
+        )
+        assert result.shape == w.shape
+
+        # High-precision channels (rows where mask=True) should equal int8 per-channel
+        high_rows = result[mask]
+        expected_high = int8_fmt.quantize(
+            w[mask], GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=0),
+            round_mode="nearest",
+        )
+        assert torch.allclose(high_rows, expected_high, atol=1e-5)
+
+        # Low-precision channels (rows where mask=False) should equal int4 per-channel
+        low_rows = result[~mask]
+        expected_low = int4_fmt.quantize(
+            w[~mask], GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=0),
+            round_mode="nearest",
+        )
+        assert torch.allclose(low_rows, expected_low, atol=1e-5)
+
+    def test_all_high_channels(self, int4_fmt, int8_fmt):
+        """All channels high-precision → result equals full int8 per-channel."""
+        w = torch.randn(4, 8) * 0.5
+        mask = torch.ones(4, dtype=torch.bool)
         result = int4_fmt.quantize(
             w, GranularitySpec(mode=GranularityMode.BANK, bank_size=4, bank_axis=0),
             sq_activation_mask=mask, outlier_format=int8_fmt,
         )
-        # All channels use int8_fmt elemwise — should match int8 elemwise directly
-        expected = int8_fmt.quantize_elemwise(w, round_mode="nearest")
+        expected = int8_fmt.quantize(
+            w, GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=0),
+            round_mode="nearest",
+        )
         assert torch.allclose(result, expected, atol=1e-5)
 
-    def test_sq_activation_all_low(self, int4_fmt, int8_fmt):
-        """All channels low-precision → result equals self (int4) elemwise quantization."""
+    def test_all_low_channels(self, int4_fmt, int8_fmt):
+        """All channels low-precision → result equals full int4 per-channel."""
         w = torch.randn(4, 8) * 0.5
         mask = torch.zeros(4, dtype=torch.bool)
-
         result = int4_fmt.quantize(
             w, GranularitySpec(mode=GranularityMode.BANK, bank_size=4, bank_axis=0),
             sq_activation_mask=mask, outlier_format=int8_fmt,
         )
-        expected = int4_fmt.quantize_elemwise(w, round_mode="nearest")
+        expected = int4_fmt.quantize(
+            w, GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=0),
+            round_mode="nearest",
+        )
         assert torch.allclose(result, expected, atol=1e-5)
+
+    def test_channel_dim_auto_detection(self, int4_fmt, int8_fmt):
+        """Mask of size K is matched to channel dimension in 3D tensors."""
+        # 3D tensor: (batch=2, K=6, N=8), mask on K (dim 1)
+        w = torch.randn(2, 6, 8) * 0.5
+        mask = torch.tensor([True, False, True, False, True, False])
+        bank = GranularitySpec(mode=GranularityMode.BANK, bank_size=3, bank_axis=0)
+        result = int4_fmt.quantize(
+            w, bank, sq_activation_mask=mask, outlier_format=int8_fmt,
+        )
+        assert result.shape == w.shape
+        # Verify high channels use int8
+        high_part = result[:, mask, :]
+        expected_high = int8_fmt.quantize(
+            w[:, mask, :], GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=1),
+            round_mode="nearest",
+        )
+        assert torch.allclose(high_part, expected_high, atol=1e-5)
 
 
 class TestSQOpsIntegration:
