@@ -42,7 +42,9 @@ class LinearFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, w, b, cfg: OpQuantConfig, name=None, emit_fn=None,
-                output_scale=None, input_scale=None):
+                output_scale=None, input_scale=None,
+                output_mask=None, output_scale_o=None,
+                input_mask=None, input_scale_o=None):
         ctx.emit_fn = emit_fn
         x_raw, w_raw = x, w
 
@@ -54,7 +56,8 @@ class LinearFunction(torch.autograd.Function):
             if emit_fn: emit_fn("input", 0, "input_pre_quant", x_raw, x, cfg.storage)
         x_post_storage = x
         if cfg.input is not None:
-            x = quantize(x, cfg.input, scale=input_scale)
+            x = quantize(x, cfg.input, scale=input_scale,
+                         mask=input_mask, scale_o=input_scale_o)
             if emit_fn: emit_fn("input", 1, "input_pre_quant", x_raw, x, cfg.input)
 
         # weight: storage → compute
@@ -130,7 +133,8 @@ class LinearFunction(torch.autograd.Function):
 
         # output compute: calibrated scale applies here (per-channel / per-block)
         if cfg.output is not None:
-            y = quantize(y, cfg.output, scale=output_scale)
+            y = quantize(y, cfg.output, scale=output_scale,
+                         mask=output_mask, scale_o=output_scale_o)
             if emit_fn: emit_fn("output", 2, "output_post_quant", _true_full, y, cfg.output)
 
         # Emit total layer error: true fp32 output vs final quantized output
@@ -210,10 +214,12 @@ class LinearFunction(torch.autograd.Function):
             if cfg.grad_bias is not None:
                 grad_b = quantize(grad_b, cfg.grad_bias)
 
-        return grad_x, grad_w, grad_b, None, None, None, None, None
+        return grad_x, grad_w, grad_b, None, None, None, None, None, None, None, None, None
 
     @staticmethod
-    def symbolic(g, x, w, b, cfg, name, emit_fn, output_scale=None, input_scale=None):
+    def symbolic(g, x, w, b, cfg, name, emit_fn, output_scale=None, input_scale=None,
+                 output_mask=None, output_scale_o=None,
+                 input_mask=None, input_scale_o=None):
         from src.onnx.helpers import _emit_quantize_node
         from src.session._context import _export_scales_var, _onnx_current_scale_var
 
@@ -286,7 +292,17 @@ class QuantizedLinear(ObservableMixin, nn.Linear):
             if hasattr(self, "_output_scale") else None
         input_scale = self.get_buffer("_input_scale") \
             if hasattr(self, "_input_scale") else None
+        output_mask = self.get_buffer("_output_mask") \
+            if hasattr(self, "_output_mask") else None
+        output_scale_o = self.get_buffer("_output_scale_o") \
+            if hasattr(self, "_output_scale_o") else None
+        input_mask = self.get_buffer("_input_mask") \
+            if hasattr(self, "_input_mask") else None
+        input_scale_o = self.get_buffer("_input_scale_o") \
+            if hasattr(self, "_input_scale_o") else None
         return LinearFunction.apply(
             x, self.weight, self.bias, self.cfg, self._analysis_name, emit_fn,
             output_scale, input_scale,
+            output_mask, output_scale_o,
+            input_mask, input_scale_o,
         )

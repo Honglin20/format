@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def plot_propagation_dag(result) -> plt.Figure:
+def plot_propagation_dag(result, *, qsnr_cap=None, skip_activations=True) -> plt.Figure:
     """Horizontal bar-style "DAG": each layer is a bar showing QSNR.
 
     The figure mimics a propagation diagram by showing layers in model order
@@ -20,7 +20,15 @@ def plot_propagation_dag(result) -> plt.Figure:
 
     When accumulated QSNR data is present, a second series of markers is
     plotted to show the drop across layers.
+
+    Args:
+        result: SessionResult with QSNR data.
+        qsnr_cap: If set, clip QSNR values to this maximum (e.g. 80). Useful
+            when activation layers have trivially high QSNR.
+        skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
     """
+    from src.analysis._error_provenance import is_activation_layer
+
     accum = result.accum_qsnr_per_layer
     local, _ = result.qsnr_per_role(role="output")
 
@@ -32,7 +40,18 @@ def plot_propagation_dag(result) -> plt.Figure:
         return fig
 
     layers = list(local.keys())
+    if skip_activations:
+        layers = [n for n in layers if not is_activation_layer(n)]
+    if not layers:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.text(0.5, 0.5, "No non-activation layers with QSNR data.",
+                ha="center", va="center", transform=ax.transAxes, fontsize=12)
+        ax.set_title("Error Propagation DAG")
+        return fig
+
     local_vals = [local[n] for n in layers]
+    if qsnr_cap is not None:
+        local_vals = [min(v, qsnr_cap) for v in local_vals]
 
     fig, ax = plt.subplots(figsize=(max(10, len(layers) * 0.35), 5))
 
@@ -71,13 +90,20 @@ def plot_propagation_dag(result) -> plt.Figure:
     return fig
 
 
-def plot_error_waterfall(result) -> plt.Figure:
+def plot_error_waterfall(result, *, qsnr_cap=60.0, skip_activations=True) -> plt.Figure:
     """Waterfall chart: accumulated QSNR drops layer by layer.
 
     Each bar shows the accumulated QSNR after that layer, and the drop
     from the previous layer is annotated.  The first layer starts from
     "FP32" (infinite QSNR, capped at a high value for display).
+
+    Args:
+        result: SessionResult with accumulated QSNR data.
+        qsnr_cap: Clip accumulated QSNR values to this maximum (default 60).
+        skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
     """
+    from src.analysis._error_provenance import is_activation_layer
+
     accum = result.accum_qsnr_per_layer
     if not accum:
         fig, ax = plt.subplots()
@@ -87,11 +113,18 @@ def plot_error_waterfall(result) -> plt.Figure:
         return fig
 
     layers = list(accum.keys())
-    accum_vals = [accum[n] for n in layers]
+    if skip_activations:
+        layers = [n for n in layers if not is_activation_layer(n)]
+    if not layers:
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No non-activation layers with accum QSNR data.",
+                ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Error Waterfall")
+        return fig
 
-    # Cap display at 60 dB (close enough to FP32 "infinite")
-    display_cap = 60.0
-    capped = [min(v, display_cap) for v in accum_vals]
+    accum_vals = [accum[n] for n in layers]
+    capped = [min(v, qsnr_cap) for v in accum_vals]
+    display_cap = qsnr_cap
 
     fig, ax = plt.subplots(figsize=(max(10, len(layers) * 0.3), 5))
 
@@ -125,13 +158,20 @@ def plot_error_waterfall(result) -> plt.Figure:
     return fig
 
 
-def plot_local_vs_accum_scatter(result) -> plt.Figure:
+def plot_local_vs_accum_scatter(result, *, qsnr_cap=None, skip_activations=True) -> plt.Figure:
     """Scatter plot: local QSNR vs accumulated QSNR per layer.
 
     Points above the diagonal have headroom (error is propagated from
     upstream).  Points on or below the diagonal are bottlenecks (local
     error dominates).
+
+    Args:
+        result: SessionResult with both local and accumulated QSNR data.
+        qsnr_cap: If set, clip QSNR values to this maximum.
+        skip_activations: If True (default), exclude ReLU/GELU/etc. layers.
     """
+    from src.analysis._error_provenance import is_activation_layer
+
     accum = result.accum_qsnr_per_layer
     local, _ = result.qsnr_per_role(role="output")
 
@@ -143,6 +183,8 @@ def plot_local_vs_accum_scatter(result) -> plt.Figure:
 
     # Match layers
     common = set(accum) & set(local)
+    if skip_activations:
+        common = {n for n in common if not is_activation_layer(n)}
     if not common:
         fig, ax = plt.subplots()
         ax.text(0.5, 0.5, "No matching layers between local and accumulated QSNR.",
@@ -151,6 +193,9 @@ def plot_local_vs_accum_scatter(result) -> plt.Figure:
 
     accum_vals = [accum[n] for n in common]
     local_vals = [local[n] for n in common]
+    if qsnr_cap is not None:
+        accum_vals = [min(v, qsnr_cap) for v in accum_vals]
+        local_vals = [min(v, qsnr_cap) for v in local_vals]
 
     fig, ax = plt.subplots(figsize=(8, 8))
 

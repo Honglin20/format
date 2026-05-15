@@ -286,7 +286,7 @@ class InterventionPlanner:
         all_qsnr = []
         for role in role_subset:
             for v in qsnr_by_role.get(role, {}).values():
-                if v is not None and v == v and v != float("-inf"):
+                if v is not None and v == v and v != float("inf") and v != float("-inf"):
                     all_qsnr.append(v)
 
         if not all_qsnr:

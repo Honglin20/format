@@ -34,7 +34,6 @@ class InterventionComparison:
             "",
         ]
 
-        # Accuracy comparison (quant vs quant)
         if (self.baseline.quant_metrics and self.intervention.quant_metrics
                 and self.baseline.fp32_metrics):
             lines.append(f"  {'Metric':<12} {'FP32':<12} {'Baseline':<12} {'Intervention':<12} {'Change':<12}")
@@ -48,7 +47,6 @@ class InterventionComparison:
                 delta = i_val - b_val
                 lines.append(f"  {k:<12} {fp32_v:<12.4f} {b_val:<12.4f} {i_val:<12.4f} {delta:<+12.4f}")
 
-        # QSNR comparison (average across all layers)
         b_qsnr = self.baseline.qsnr_per_layer
         i_qsnr = self.intervention.qsnr_per_layer
         if b_qsnr and i_qsnr:
@@ -59,7 +57,6 @@ class InterventionComparison:
                 i_avg = sum(i_finite) / len(i_finite)
                 lines.append(f"\n  Avg QSNR: baseline={b_avg:.1f} dB → intervention={i_avg:.1f} dB (Δ={i_avg - b_avg:+.1f} dB)")
 
-        # Per-override QSNR delta
         lines.append(f"\n  {'Layer':<30} {'Role':<10} {'QSNR Before':>12} {'QSNR After':>12} {'Δ':>10}")
         lines.append(f"  {'-' * 78}")
         changes = self.plan.metadata.get("changes", {})
@@ -105,19 +102,19 @@ class InterventionAccessor:
         eval_data=None,
         eval_fn: Optional[Callable] = None,
     ) -> InterventionComparison:
-        """Run a new Session with *plan.overrides* and compare against baseline.
+        """Run a new quantization with *plan.overrides* and compare against baseline.
 
         Args:
             model: Original (unquantized) fp32 model.
-            calib_data: Calibration data for the new Session.
+            calib_data: Calibration data.
             plan: InterventionPlan with per-layer overrides.
             eval_data: Optional evaluation data.
-            eval_fn: Optional ``(model, data) -> Dict[str, float]``.
+            eval_fn: ``(model, data) -> Dict[str, float]``.
 
         Returns:
             ``InterventionComparison`` with baseline and intervention results.
         """
-        from src.session._session import Session
+        from src.session._session import run_quantization
 
         if not plan.overrides:
             return InterventionComparison(
@@ -126,16 +123,13 @@ class InterventionAccessor:
                 plan=plan,
             )
 
-        session = Session(
+        _qmodel, _fp32, intervention_result = run_quantization(
             model,
             self._result.config,
-            keep_fp32=True,
-            overrides=plan.overrides,
-        )
-        intervention_result = session.run(
             calib_data,
             eval_data=eval_data,
             eval_fn=eval_fn,
+            overrides=plan.overrides,
         )
 
         return InterventionComparison(

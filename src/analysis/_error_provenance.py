@@ -42,6 +42,18 @@ def _infer_layer_type(layer_name: str) -> str:
     return "Other"
 
 
+# Subset of _LAYER_TYPE_PATTERNS that are pure activations — these layers
+# have trivially high QSNR (near-zero quantisation error) and can dominate
+# charts, masking actionable layers.
+_ACTIVATION_PATTERNS = ["relu", "gelu", "silu", "swish", "mish", "tanh", "sigmoid", "activation"]
+
+
+def is_activation_layer(layer_name: str) -> bool:
+    """Return True if *layer_name* refers to a pure activation (e.g. ReLU, GELU)."""
+    lower = layer_name.lower()
+    return any(pat in lower for pat in _ACTIVATION_PATTERNS)
+
+
 def _select_dominant(qsnr_by_role: dict, layers: list) -> dict:
     """For each layer, pick the role with the lowest QSNR.
 

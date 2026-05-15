@@ -33,7 +33,6 @@ class BFloat16Format(FormatBase):
         return hash("BFloat16Format")
 
 
-
 class Float16Format(FormatBase):
     """IEEE float16: 1 sign + 5 exp + 10 mantissa (5+12=12 mbits with implicit).
 

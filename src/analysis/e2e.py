@@ -164,40 +164,47 @@ def compare_models(
 
 
 def compare_sessions(
-    sessions: Dict[str, Any],
-    eval_dataloader,
-    eval_fn: Callable[..., Dict[str, float]] = _default_accuracy,
+    arg1,
+    arg2: Dict[str, Any],
+    arg3=None,
+    eval_fn: Callable[..., Dict[str, float]] = None,
     directions: Optional[Dict[str, str]] = None,
     fp32_label: str = "fp32",
 ) -> Dict[str, Dict[str, Any]]:
-    """Compare multiple quantized sessions against a shared fp32 baseline.
+    """Compare multiple quantized models against a shared fp32 baseline.
 
-    The fp32 baseline is automatically extracted from the first session's
-    ``fp32_model`` — no need to pass a separate fp32 session.
+    Accepts two calling conventions:
 
-    Args:
-        sessions: Dict ``{name: _QuantSession}``.  All sessions must share
-            the same original model (their ``fp32_model`` is the same object).
-        eval_dataloader: DataLoader yielding ``(inputs, labels)``.
-        eval_fn: ``(logits, labels) -> dict[str, float]``.
-        directions: Optional ``{"metric": "higher"|"lower"}`` hints.
-        fp32_label: Key name for the fp32 baseline row in results.
-
-    Returns:
-        Dict mapping session names to result dicts.  An ``fp32_label``
-        entry contains the baseline metrics.
+    **New API**: ``compare_sessions(fp32_model, {"name": qmodel}, dl)``
+    **Old API (backward-compat)**: ``compare_sessions({"name": session}, dl)``
+      where each value is a ``Session`` compat object with ``.fp32_model``
+      and ``.qmodel`` attributes.
     """
-    first = next(iter(sessions.values()))
-    fp32_model = first.fp32_model
+    # Detect old API: first arg is a dict, second is a DataLoader
+    if isinstance(arg1, dict):
+        sessions: Dict[str, Any] = arg1
+        eval_dataloader = arg2
+        if eval_fn is None:
+            eval_fn = _default_accuracy
+        # Derive fp32_model from first session
+        fp32_model = next(iter(sessions.values())).fp32_model
+        if fp32_model is None:
+            raise RuntimeError("Session has no fp32_model (keep_fp32=False?)")
+        qmodels = {name: s.qmodel for name, s in sessions.items()}
+    else:
+        fp32_model = arg1
+        qmodels = arg2
+        eval_dataloader = arg3
+        if eval_fn is None:
+            eval_fn = _default_accuracy
 
     fp32_model.eval()
-    for s in sessions.values():
-        s.qmodel.eval()
+    for qm in qmodels.values():
+        qm.eval()
 
-    # Collect all outputs in one pass
     cmp_fp32 = Comparator()
     cmp_quant: Dict[str, Comparator] = {
-        name: Comparator() for name in sessions
+        name: Comparator() for name in qmodels
     }
 
     with cmp_fp32, torch.no_grad():
@@ -207,11 +214,10 @@ def compare_sessions(
             fp32_out = fp32_model(inputs)
             cmp_fp32.record(fp32_out, fp32_out, labels)
 
-            for name, sess in sessions.items():
-                q_out = sess.qmodel(inputs)
+            for name, qm in qmodels.items():
+                q_out = qm(inputs)
                 cmp_quant[name].record(fp32_out, q_out, labels)
 
-    # Evaluate
     results: Dict[str, Dict[str, Any]] = {}
     results[fp32_label] = cmp_fp32.evaluate(eval_fn)["fp32"]
 

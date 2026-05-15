@@ -48,6 +48,7 @@ _OUTPUT_SPEC: Dict[str, dict] = {
     "per_block_qsnr":   {"observers": ["qsnr"],                "needs_eval": False},
     "correlation_heatmap":{"observers": ["distribution", "qsnr", "mse"], "needs_eval": False},
     "role_distribution": {"observers": ["distribution"],       "needs_eval": False},
+    "kurtosis_analysis": {"observers": ["distribution", "qsnr"], "needs_eval": False},
     "per_layer_role_histogram": {"observers": ["histogram", "qsnr"], "needs_eval": False},
     # ── Error analysis ──────────────────────────────────────────────────────
     "error_propagation": {"observers": ["qsnr"], "needs_eval": False},
