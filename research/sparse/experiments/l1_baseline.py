@@ -47,7 +47,11 @@ def compute_b_eff(shape, granularity: GranularitySpec, outlier_ratio: float,
     elif granularity.mode == GranularityMode.PER_BLOCK:
         group_size = granularity.block_size
     elif granularity.mode == GranularityMode.BANK:
-        group_size = granularity.bank_size
+        # Bank group covers bank_size elements along bank_axis and ALL
+        # elements from other dims — one amax per bank shared across them.
+        ba = granularity.bank_axis
+        N_bank_axis = shape[ba]
+        group_size = granularity.bank_size * (N // N_bank_axis)
     else:
         group_size = N
 

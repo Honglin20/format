@@ -31,9 +31,14 @@ def compute_qsnr(x_fp32: torch.Tensor, x_quant: torch.Tensor) -> float:
     return (10 * torch.log10(num / den)).item()
 
 
-def compute_b_eff(group_size: int, outlier_ratio: float,
+def compute_b_eff(bank_size: int, fixed_dim: int, outlier_ratio: float,
                   b: int = 4, b_o: int = 4, s: int = 8) -> float:
-    """Effective bitwidth for BANK granularity (group_size = bank_size)."""
+    """Effective bitwidth for BANK granularity.
+
+    group_size = bank_size * fixed_dim because one amax per bank is
+    shared across all fixed_dim rows in that bank segment.
+    """
+    group_size = bank_size * fixed_dim
     b_mask = 1.0
     b_scale = 2 * s / group_size
     return (1 - outlier_ratio) * b + outlier_ratio * b_o + b_mask + b_scale
@@ -108,7 +113,7 @@ def run_l3(cfg: dict = None, output_dir: str = None) -> list:
         qsnr_t = torch.tensor(qsnr_vals)
         mse_t = torch.tensor(mse_vals)
         s_bits = 8 if cfg.get("scale_storage", "pot") == "pot" else 32
-        b_eff = compute_b_eff(bank_size, outlier_ratio, b=4, b_o=4, s=s_bits)
+        b_eff = compute_b_eff(bank_size, fixed_dim, outlier_ratio, b=4, b_o=4, s=s_bits)
         qsnr_mean = qsnr_t.mean().item()
         qsnr_per_b_eff = qsnr_mean / b_eff if b_eff > 0 else None
 

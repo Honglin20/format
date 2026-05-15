@@ -67,6 +67,7 @@ def _scheme_normalizes_by_amax(scheme) -> bool:
 
     Affected schemes:
     - PER_CHANNEL: always normalizes by per-channel amax
+    - BANK: normalizes by per-bank amax (same risk as PER_CHANNEL)
     - Integer PER_TENSOR (ebits==0): normalizes by scalar amax
     - Float PER_TENSOR (ebits>0): direct elemwise, no normalization — safe
     """
@@ -74,6 +75,8 @@ def _scheme_normalizes_by_amax(scheme) -> bool:
         return False
     from src.scheme.granularity import GranularityMode
     if scheme.granularity.mode == GranularityMode.PER_CHANNEL:
+        return True
+    if scheme.granularity.mode == GranularityMode.BANK:
         return True
     if (scheme.granularity.mode == GranularityMode.PER_TENSOR
             and scheme.format.ebits == 0):
@@ -523,6 +526,11 @@ def _patch_forward(
     # the same args restores the original behaviour.
     model.forward = _wrapped_forward
 
+    # Store the original forward so ONNX export can swap it back
+    # temporarily — Dynamo cannot trace through QuantizeContext
+    # (ContextVar, dataclass _CtxState, patch table mutations).
+    model._original_forward = original_forward
+
     # Store for export_onnx to use without re-entering quantize_model
     model._quantize_cfg = ctx_cfg
     model._quantize_op_cfgs = op_cfgs or {}
@@ -623,7 +631,21 @@ def quantize_model(
                            quantize_nonlinear=quantize_nonlinear,
                            _patch_root=False)
 
-    # Step 2: Patch forward on the root model only
+    # Step 2: Replace the root module itself if it is a known type
+    # (e.g. bare nn.Linear passed directly).  Must run BEFORE _patch_forward
+    # so _original_forward captures QuantizedLinear.forward, not nn.Linear.forward.
+    root_class = type(model)
+    if root_class in _MODULE_MAPPING and not hasattr(model, "cfg"):
+        root_cfg = _resolve_cfg(cfg, prefix or "")
+        if root_cfg != _EMPTY_CFG or root_cfg is cfg:
+            make_fn = _MODULE_MAPPING[root_class]
+            replacement = make_fn(model, root_cfg, prefix or "",
+                                  quantize_nonlinear=quantize_nonlinear)
+            if hasattr(replacement, "load_state_dict"):
+                replacement.load_state_dict(model.state_dict(), strict=False)
+            model = replacement
+
+    # Step 3: Patch forward on the root model only
     if _patch_root:
         ctx_cfg = _resolve_context_cfg(cfg, op_cfgs)
 

@@ -165,7 +165,8 @@ class FormatBase(ABC):
                     "granularity for static sparse."
                 )
             return self._quantize_per_block(x, granularity, round_mode,
-                                              scale=scale, scale_storage=scale_storage)
+                                              scale=scale, scale_storage=scale_storage,
+                                              outlier_format=outlier_format)
         elif mode == GranularityMode.BANK:
             if granularity.outlier_ratio > 0.0:
                 if mask is not None:
@@ -360,8 +361,6 @@ class FormatBase(ABC):
         new_shape.insert(axis + 1, bank_size)
         x_r = x.reshape(new_shape)  # (..., num_banks, bank_size, ...)
 
-        k = max(1, int(bank_size * granularity.outlier_ratio))
-
         # Transpose bank dim to front for per-group top-k
         ndim_r = x_r.ndim
         perm = list(range(ndim_r))
@@ -370,6 +369,7 @@ class FormatBase(ABC):
         x_b = x_r.permute(perm)  # (num_banks, ..., bank_size, ...)
 
         group_size = x_b[0].numel()
+        k = max(1, int(group_size * granularity.outlier_ratio))
         if k >= group_size:
             # Degenerate: all elements are outliers → standard per_bank
             return self._quantize_per_bank(x, granularity, round_mode,
@@ -436,7 +436,8 @@ class FormatBase(ABC):
     def _quantize_per_block(self, x, granularity, round_mode, scale=None,
                               scale_storage="pot",
                               _shared_exp_method="max",
-                              _flush_fp32_subnorms=False):
+                              _flush_fp32_subnorms=False,
+                              outlier_format=None):
         """Per-block quantization with MX-style shared exponents.
 
         Same structure as _quantize_per_channel:
@@ -459,7 +460,8 @@ class FormatBase(ABC):
         if granularity.outlier_ratio > 0.0:
             from src.formats._outlier_utils import _quantize_outlier_bank
             return _quantize_outlier_bank(
-                self, x, granularity, round_mode, scale_storage=scale_storage)
+                self, x, granularity, round_mode, scale_storage=scale_storage,
+                outlier_format=outlier_format)
 
         from src.formats._block_utils import (
             _reshape_to_blocks,
@@ -591,6 +593,10 @@ class FormatBase(ABC):
         new_shape[axis] = num_banks
         new_shape.insert(axis + 1, bank_size)
         x_r = x.reshape(new_shape)
+        # Mask may have smaller batch dim than x (calibration batch=1 vs inference
+        # batch>1). Expand to match x's shape before reshaping.
+        if mask.shape != x.shape:
+            mask = mask.expand(x.shape)
         mask_r = mask.reshape(new_shape)
 
         # Ensure amax tensors are broadcastable with x_r.
