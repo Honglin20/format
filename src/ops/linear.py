@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.scheme.op_config import OpQuantConfig
+from src.ops._calib_buffers import CalibrationBuffers
 from src.quantize.elemwise import _enter_quantize, _exit_quantize
 
 _F_linear = F.linear
@@ -42,10 +43,8 @@ class LinearFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, w, b, cfg: OpQuantConfig, name=None, emit_fn=None,
-                output_scale=None, input_scale=None,
-                output_mask=None, output_scale_o=None,
-                input_mask=None, input_scale_o=None,
-                weight_importance=None, input_sq_activation_mask=None):
+                buffers: CalibrationBuffers = None):
+        buffers = buffers or CalibrationBuffers()
         ctx.emit_fn = emit_fn
         x_raw, w_raw = x, w
 
@@ -57,11 +56,11 @@ class LinearFunction(torch.autograd.Function):
             if emit_fn: emit_fn("input", 0, "input_pre_quant", x_raw, x, cfg.storage)
         x_post_storage = x
         sq_split = False
-        if cfg.input is not None and input_sq_activation_mask is not None:
+        if cfg.input is not None and buffers.input_sq_activation_mask is not None:
             # SQ-format activation static: split by mask, two precision matmuls.
             # Paper Algorithm 2 inference: W_high @ A_high + W_low @ A_low.
             import dataclasses
-            sq_mask = input_sq_activation_mask.to(x.device)
+            sq_mask = buffers.input_sq_activation_mask.to(x.device)
             high_idx = sq_mask.nonzero(as_tuple=True)[0]
             low_idx = (~sq_mask).nonzero(as_tuple=True)[0]
 
@@ -152,9 +151,10 @@ class LinearFunction(torch.autograd.Function):
             sq_split = True
 
         elif cfg.input is not None:
-            x = quantize(x, cfg.input, scale=input_scale,
-                         mask=input_mask, scale_o=input_scale_o,
-                         sq_activation_mask=input_sq_activation_mask)
+            x = quantize(x, cfg.input, scale=buffers.input_scale,
+                         mask=buffers.input_mask, scale_o=buffers.input_scale_o,
+                         sq_activation_mask=buffers.input_sq_activation_mask,
+                         group_mask=buffers.input_group_mask)
             if emit_fn: emit_fn("input", 1, "input_pre_quant", x_raw, x, cfg.input)
 
         # weight: storage → compute (skipped when SQ split already handled it)
@@ -164,7 +164,7 @@ class LinearFunction(torch.autograd.Function):
                 if emit_fn: emit_fn("weight", 0, "weight_pre_quant", w_raw, w, cfg.storage)
             w_post_storage = w
             if cfg.weight is not None:
-                w = quantize(w, cfg.weight, importance=weight_importance)
+                w = quantize(w, cfg.weight, scale=buffers.weight_scale, importance=buffers.weight_importance)
                 if emit_fn: emit_fn("weight", 1, "weight_pre_quant", w_raw, w, cfg.weight)
 
             # bias: storage → compute
@@ -230,8 +230,9 @@ class LinearFunction(torch.autograd.Function):
 
         # output compute: calibrated scale applies here (per-channel / per-block)
         if cfg.output is not None:
-            y = quantize(y, cfg.output, scale=output_scale,
-                         mask=output_mask, scale_o=output_scale_o)
+            y = quantize(y, cfg.output, scale=buffers.output_scale,
+                         mask=buffers.output_mask, scale_o=buffers.output_scale_o,
+                         group_mask=buffers.output_group_mask)
             if emit_fn: emit_fn("output", 2, "output_post_quant", _true_full, y, cfg.output)
 
         # Emit total layer error: true fp32 output vs final quantized output
@@ -311,13 +312,10 @@ class LinearFunction(torch.autograd.Function):
             if cfg.grad_bias is not None:
                 grad_b = quantize(grad_b, cfg.grad_bias)
 
-        return grad_x, grad_w, grad_b, None, None, None, None, None, None, None, None, None, None, None
+        return grad_x, grad_w, grad_b, None, None, None, None
 
     @staticmethod
-    def symbolic(g, x, w, b, cfg, name, emit_fn, output_scale=None, input_scale=None,
-                 output_mask=None, output_scale_o=None,
-                 input_mask=None, input_scale_o=None,
-                 weight_importance=None, input_sq_activation_mask=None):
+    def symbolic(g, x, w, b, cfg, name, emit_fn, buffers=None):
         from src.onnx.helpers import _emit_quantize_node
         from src.session._context import _export_scales_var, _onnx_current_scale_var
 
@@ -386,26 +384,20 @@ class QuantizedLinear(ObservableMixin, nn.Linear):
             return F.linear(x, self.weight, self.bias)
 
         emit_fn = self._emit if self._observers else None
-        output_scale = self.get_buffer("_output_scale") \
-            if hasattr(self, "_output_scale") else None
-        input_scale = self.get_buffer("_input_scale") \
-            if hasattr(self, "_input_scale") else None
-        output_mask = self.get_buffer("_output_mask") \
-            if hasattr(self, "_output_mask") else None
-        output_scale_o = self.get_buffer("_output_scale_o") \
-            if hasattr(self, "_output_scale_o") else None
-        input_mask = self.get_buffer("_input_mask") \
-            if hasattr(self, "_input_mask") else None
-        input_scale_o = self.get_buffer("_input_scale_o") \
-            if hasattr(self, "_input_scale_o") else None
-        weight_importance = self.get_buffer("_sq_importance") \
-            if hasattr(self, "_sq_importance") else None
-        sq_activation_mask = self.get_buffer("_sq_activation_mask") \
-            if hasattr(self, "_sq_activation_mask") else None
+        buffers = CalibrationBuffers(
+            output_scale=self.get_buffer("_output_scale") if hasattr(self, "_output_scale") else None,
+            input_scale=self.get_buffer("_input_scale") if hasattr(self, "_input_scale") else None,
+            output_mask=self.get_buffer("_output_mask") if hasattr(self, "_output_mask") else None,
+            output_scale_o=self.get_buffer("_output_scale_o") if hasattr(self, "_output_scale_o") else None,
+            input_mask=self.get_buffer("_input_mask") if hasattr(self, "_input_mask") else None,
+            input_scale_o=self.get_buffer("_input_scale_o") if hasattr(self, "_input_scale_o") else None,
+            weight_importance=self.get_buffer("_sq_importance") if hasattr(self, "_sq_importance") else None,
+            input_sq_activation_mask=self.get_buffer("_sq_activation_mask") if hasattr(self, "_sq_activation_mask") else None,
+            output_group_mask=self.get_buffer("_output_group_mask") if hasattr(self, "_output_group_mask") else None,
+            input_group_mask=self.get_buffer("_input_group_mask") if hasattr(self, "_input_group_mask") else None,
+            weight_scale=self.get_buffer("_weight_scale") if hasattr(self, "_weight_scale") else None,
+        )
         return LinearFunction.apply(
             x, self.weight, self.bias, self.cfg, self._analysis_name, emit_fn,
-            output_scale, input_scale,
-            output_mask, output_scale_o,
-            input_mask, input_scale_o,
-            weight_importance, sq_activation_mask,
+            buffers,
         )
