@@ -771,6 +771,8 @@ class CalibrationSession:
 
         Args:
             samples: List of tensors, each the output of one forward pass.
+                     Each tensor may include a batch dimension; all batch
+                     elements are treated as independent calibration samples.
             gran: GranularitySpec instance.
             group_ratio: Fraction of groups to mark as H.
 
@@ -779,7 +781,22 @@ class CalibrationSession:
         """
         from src.quantize._group_mask import compute_group_mask
 
+        # Use torch.stack (not torch.cat) to preserve spatial structure.
+        #
+        # Unlike ADR-012's _compute_sparse_state which uses torch.cat to
+        # flatten batch into sample dim (needed for per-element voting),
+        # group sparse must preserve the group structure (channel/block/bank
+        # dims) within each forward pass.  torch.cat would reduce rank by
+        # removing the batch dim, making per-group amax reduction impossible
+        # when the channel axis is the only remaining dimension.
+        #
+        # With torch.stack, each sample retains its full spatial structure
+        # (including batch dim), and the S sample dim is separate.  Granularity
+        # axes refer to the same positions as inference-time tensors because
+        # the sample shape (x_calib.shape[1:]) matches the inference tensor
+        # shape (including batch dim).
         x_calib = torch.stack(samples, dim=0)  # (S, D1, D2, ...)
+
         return compute_group_mask(x_calib, gran, group_ratio)
 
     @staticmethod

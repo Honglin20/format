@@ -154,8 +154,7 @@ class FormatBase(ABC):
             if group_format is not None and group_ratio > 0.0:
                 return self._quantize_per_tensor_group_sparse(
                     x, group_format, round_mode, allow_denorm,
-                    scale=scale, scale_storage=scale_storage,
-                    group_mask=group_mask)
+                    scale=scale, scale_storage=scale_storage)
             return self._quantize_per_tensor(x, round_mode, allow_denorm, scale=scale,
                                               scale_storage=scale_storage)
         elif mode == GranularityMode.PER_CHANNEL:
@@ -413,9 +412,10 @@ class FormatBase(ABC):
         k = max(1, int(group_size * granularity.outlier_ratio))
         if k >= group_size:
             # Degenerate: all elements are outliers → standard per_bank
-            return self._quantize_per_bank(x, granularity, round_mode,
-                                           allow_denorm=allow_denorm,
-                                           scale_storage=scale_storage)
+            q_fmt = outlier_format if outlier_format is not None else self
+            return q_fmt._quantize_per_bank(x, granularity, round_mode,
+                                            allow_denorm=allow_denorm,
+                                            scale_storage=scale_storage)
 
         x_flat = x_b.reshape(num_banks, group_size)
         _, top_indices = torch.topk(torch.abs(x_flat), k, dim=1)
@@ -687,7 +687,8 @@ class FormatBase(ABC):
         N = x.numel()
         k = max(1, int(N * granularity.outlier_ratio))
         if k >= N:
-            return self._quantize_per_tensor(x, round_mode, allow_denorm=allow_denorm,
+            q_fmt = outlier_format if outlier_format is not None else self
+            return q_fmt._quantize_per_tensor(x, round_mode, allow_denorm=allow_denorm,
                                               scale_storage=scale_storage)
 
         # Top-k by magnitude
@@ -763,7 +764,8 @@ class FormatBase(ABC):
         N_per_channel = x_t[0].numel()
         k = max(1, int(N_per_channel * granularity.outlier_ratio))
         if k >= N_per_channel:
-            return self._quantize_per_channel(x, granularity, round_mode,
+            q_fmt = outlier_format if outlier_format is not None else self
+            return q_fmt._quantize_per_channel(x, granularity, round_mode,
                                                allow_denorm=allow_denorm,
                                                scale_storage=scale_storage)
 
@@ -1000,7 +1002,7 @@ class FormatBase(ABC):
 
     def _quantize_per_tensor_group_sparse(self, x, group_format, round_mode,
                                            allow_denorm=True, scale=None,
-                                           scale_storage="pot", group_mask=None):
+                                           scale_storage="pot"):
         """PER_TENSOR group-sparse: one group → whole tensor uses group_format."""
         if self.ebits > 0:
             return self._quantize_per_tensor(x, round_mode, allow_denorm=allow_denorm,

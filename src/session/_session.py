@@ -229,7 +229,10 @@ def run_quantization(
         adaptive_transform_selection(qmodel, config, calib_data, eval_fn)
 
     if _needs_calibration(cfg_for_calib):
-        track_input_flag = config.static_input_scale if isinstance(config, QuantConfig) else False
+        track_input_flag = (
+            (config.static_input_scale if isinstance(config, QuantConfig) else False)
+            or _any_input_group_sparse(qmodel)
+        )
         _sparse = _any_outlier_ratio(qmodel)
         _sq_mode = config.sq_mode if isinstance(config, QuantConfig) else None
         with CalibrationSession(qmodel, calibrator, track_input=track_input_flag,
@@ -321,7 +324,7 @@ def run_quantization(
 
 
 def _any_outlier_ratio(qmodel: nn.Module) -> bool:
-    """Check if any module's OpQuantConfig uses outlier_ratio > 0."""
+    """Check if any module's OpQuantConfig uses outlier_ratio > 0 or group_format."""
     for m in qmodel.modules():
         cfg = getattr(m, "cfg", None)
         if cfg is None or not isinstance(cfg, OpQuantConfig):
@@ -333,6 +336,21 @@ def _any_outlier_ratio(qmodel: nn.Module) -> bool:
             gran = getattr(s, "granularity", None)
             if gran is not None and gran.outlier_ratio > 0:
                 return True
+            # ADR-013: group sparse also needs sparse=True for sample collection
+            if getattr(s, "group_format", None) is not None and getattr(s, "group_ratio", 0.0) > 0:
+                return True
+    return False
+
+
+def _any_input_group_sparse(qmodel: nn.Module) -> bool:
+    """Check if any module's input scheme uses group_format (needs track_input=True)."""
+    for m in qmodel.modules():
+        cfg = getattr(m, "cfg", None)
+        if cfg is None or not isinstance(cfg, OpQuantConfig):
+            continue
+        s = getattr(cfg, "input", None)
+        if s is not None and getattr(s, "group_format", None) is not None and getattr(s, "group_ratio", 0.0) > 0:
+            return True
     return False
 
 

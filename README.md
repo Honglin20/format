@@ -2,7 +2,7 @@
 
 基于 [microsoft/microxcaling](https://github.com/microsoft/microxcaling) 的增量式重建。将量化拆为**格式 × 粒度 × 变换**三个正交轴，一个 `QuantConfig` 控制一切。
 
-全算子覆盖（Linear/Conv/Norm/Activation/Softmax/Pool）· MX per-block 位精确等价 · Sparse outlier 隔离 · 4 种校准策略 · 5 种 Transform · LSQ · ONNX 导出 · 误差分析 · 性能估算
+全算子覆盖（Linear/Conv/Norm/Activation/Softmax/Pool）· MX per-block 位精确等价 · Element Sparse / Group Sparse · 4 种校准策略 · 5 种 Transform · LSQ · ONNX 导出 · 误差分析 · 性能估算
 
 ## 安装
 
@@ -75,6 +75,27 @@ result.plot.per_role_qsnr_bars()          # 每层三 role 分组柱状图
 result.plot.per_layer_role_histogram(k=5) # 最差 k 层 × 三 role 直方图网格
 ```
 
+## Sparse 两种模式
+
+本库提供两种互补的 sparse 量化模式，互斥使用：
+
+**Element Sparse**（ADR-012）— per-element 离群点隔离。在 granularity group 内按 magnitude 选出 top-k 元素，分配到独立 scale 组（可用 `outlier_format` 指定更高精度格式）。适用于存在少量极端离群点的场景。
+
+```python
+# 5% 元素用 int8 量化，其余用 int4
+cfg = QuantConfig(w_format="int4", outlier_ratio=0.05, outlier_format="int8")
+```
+
+**Group Sparse**（ADR-013）— per-group 格式分配。按 granularity group 整体（channel / block / bank）分配高/低精度格式，组内统一。比 Element Sparse 更结构化，对硬件更友好。
+
+```python
+# 30% channel 用 int8 高精度，其余用 int4
+cfg = QuantConfig(w_format="int4", w_granularity="per_channel",
+                  group_format="int8", group_ratio=0.3)
+```
+
+> 详见 [Sparse Outlier 指南](docs/guides/sparse-outlier.md) · [粒度×Sparse 可视化分析](docs/guides/example/granularity-sparse-analysis.html)
+
 ## 文档导航
 
 一切从 Session 开始。以下按推荐阅读顺序排列：
@@ -104,7 +125,7 @@ result.plot.per_layer_role_histogram(k=5) # 最差 k 层 × 三 role 直方图�
 |------|------|
 | [格式选择](docs/guides/formats.md) | int8/fp8/nf4 等格式对比 & 自定义格式注册 |
 | [粒度配置](docs/guides/granularity.md) | per_tensor / per_channel / per_block |
-| [Sparse Outlier](docs/guides/sparse-outlier.md) | 离群点隔离量化 — per-element sparse 与 group sparse 两种模式 |
+| [Sparse Outlier](docs/guides/sparse-outlier.md) | **Element Sparse** — per-element 离群点隔离，按 magnitude 选 top-k 元素到独立 scale 组；**Group Sparse** — per-group 格式分配，整个 channel/block/bank 统一高/低精度 |
 | [Transform](docs/guides/transforms.md) | none / hadamard / smoothquant / prescale / adaptive |
 | [校准策略](docs/guides/calibration.md) | mse / max / percentile / kl |
 
