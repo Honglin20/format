@@ -274,6 +274,48 @@ class TestGPTQIntegration:
             # (it optimizes for layer-output error, not weight error)
             assert meta["mse_after"] >= 0
 
+    def test_gptq_weight_scale_buffer_set(self):
+        """After GPTQ, module should have _weight_scale buffer."""
+        from src.session import quantize_model
+
+        torch.manual_seed(42)
+        model = _TinyModel()
+        scheme = _per_channel_int4_scheme()
+        cfg = OpQuantConfig(weight=scheme)
+        qmodel = quantize_model(copy.deepcopy(model), cfg)
+
+        calib_data = [torch.randn(4, 8) for _ in range(4)]
+        opt = GPTQOptimizer(block_size=128)
+        opt.optimize(qmodel, calib_data)
+
+        assert hasattr(qmodel.linear, "_weight_scale")
+        assert qmodel.linear._weight_scale is not None
+
+    def test_gptq_idempotent_requant(self):
+        """Re-quantizing GPTQ weights with stored scale must produce same result."""
+        from src.session import quantize_model
+
+        torch.manual_seed(42)
+        model = _TinyModel()
+        scheme = _per_channel_int4_scheme()
+        cfg = OpQuantConfig(weight=scheme)
+        qmodel = quantize_model(copy.deepcopy(model), cfg)
+
+        calib_data = [torch.randn(4, 8) for _ in range(4)]
+        opt = GPTQOptimizer(block_size=128)
+        opt.optimize(qmodel, calib_data)
+
+        W_gptq = qmodel.linear.weight.data.clone()
+        scale = qmodel.linear._weight_scale
+
+        with torch.no_grad():
+            W_requant = quantize(W_gptq, scheme, scale=scale)
+
+        assert torch.allclose(W_gptq, W_requant, atol=1e-6), (
+            f"GPTQ weights not idempotent under re-quantization: "
+            f"max diff = {(W_gptq - W_requant).abs().max().item():.8f}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Session integration
