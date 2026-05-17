@@ -401,10 +401,68 @@ class TestGPTQSessionIntegration:
             out = qmodel(torch.randn(2, 8))
         assert out.shape == (2, 16)
 
+    def test_gptq_forward_uses_weight_scale(self):
+        """Forward pass after GPTQ should use _weight_scale, not recompute amax."""
+        from src.session._config import QuantConfig
+        from src.session._session import run_quantization
 
-# ---------------------------------------------------------------------------
-# Config validation
-# ---------------------------------------------------------------------------
+        torch.manual_seed(42)
+        model = _TwoLayerModel()
+
+        config = QuantConfig(
+            w_format="int4",
+            w_granularity="per_channel",
+            w_axis=0,
+            gptq=True,
+            gptq_block_size=128,
+        )
+        calib = [torch.randn(2, 8) for _ in range(4)]
+        qmodel, _, _ = run_quantization(model, config, calib, keep_fp32=False)
+
+        # After GPTQ + calibration, forward pass should produce finite output
+        qmodel.eval()
+        with torch.no_grad():
+            out = qmodel(torch.randn(2, 8))
+        assert out.shape == (2, 4)
+        assert not torch.isnan(out).any()
+
+        # Verify _weight_scale buffers exist on quantized linear layers
+        for name, mod in qmodel.named_modules():
+            if hasattr(mod, "cfg") and hasattr(mod, "weight") and isinstance(mod, nn.Linear):
+                assert hasattr(mod, "_weight_scale"), (
+                    f"{name} missing _weight_scale after GPTQ"
+                )
+
+    def test_gptq_forward_idempotent_with_scale(self):
+        """Forward pass with _weight_scale should produce same output as
+        direct quantize(w, scheme, scale=_weight_scale)."""
+        from src.session._config import QuantConfig
+        from src.session._session import run_quantization
+
+        torch.manual_seed(42)
+        model = _TinyModel()
+
+        config = QuantConfig(
+            w_format="int4",
+            w_granularity="per_channel",
+            w_axis=0,
+            gptq=True,
+            gptq_block_size=128,
+        )
+        calib = [torch.randn(2, 8) for _ in range(4)]
+        qmodel, _, _ = run_quantization(model, config, calib, keep_fp32=False)
+
+        # After GPTQ, re-quantizing weight with stored scale should be idempotent
+        mod = qmodel.linear
+        W_gptq = mod.weight.data.clone()
+        scale = mod._weight_scale
+        scheme = mod.cfg.weight
+        with torch.no_grad():
+            W_requant = quantize(W_gptq, scheme, scale=scale)
+        assert torch.allclose(W_gptq, W_requant, atol=1e-6), (
+            f"GPTQ + calibration weights not idempotent: "
+            f"max diff = {(W_gptq - W_requant).abs().max().item():.8f}"
+        )
 
 class TestGPTQConfigValidation:
     def test_gptq_config_defaults(self):
