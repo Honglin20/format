@@ -5,6 +5,51 @@
 
 ---
 
+## GPTQ 幂等修复 ✅ (2026-05-17)
+
+**问题：** GPTQ 量化不幂等 — GPTQ 用 `_precompute_scale()` 从原始 FP32 权重算出 per-channel amax 并写入 FP32 值到 `module.weight.data`，但 forward pass 中 `quantize(w, cfg.weight)` 不传 `scale`，重新从修改后权重算 amax，导致 re-quant 产出不同结果。GPTQ 不仅不提升精度，反而降低（int4-pc 从 -0.0050 降至 -0.0054）。
+
+**方案：** GPTQ 量化后注册 `_weight_scale` buffer，forward 读 buffer 而非重算 amax。
+
+**改动文件：**
+
+| 文件 | 变更 |
+|------|------|
+| `src/ops/_calib_buffers.py` | 新增 `weight_scale: Optional[torch.Tensor] = None` 字段 |
+| `src/calibration/gptq_optimizer.py` | `_gptq_quantize` 返回 `(W_q, full_scale)`；`optimize()` 注册 `_weight_scale` buffer |
+| `src/ops/linear.py` | `QuantizedLinear.forward()` 读取 `_weight_scale`；`LinearFunction.forward()` 传 `scale=buffers.weight_scale` |
+| `src/ops/conv.py` | 6 个 QuantizedConv 类 + 2 个 Function 类同上 |
+| `src/tests/test_gptq_optimizer.py` | 4 个新测试：buffer 存在、幂等 re-quant、forward buffer check、forward 幂等 |
+
+**E2E 结果（MNIST MLP, FP32=0.9789）：**
+
+| Config | 修复前 Δ | 修复后 Δ | GPTQ gain (修复前) | GPTQ gain (修复后) |
+|--------|---------|---------|-------------------|-------------------|
+| int4-pc | -0.0054 | -0.0046 | -0.0004 | **+0.0004** |
+| int4-pc + sparse | -0.0011 | -0.0011 | -0.0008 | -0.0008 |
+| int4-pc + gsparse | -0.0039 | -0.0034 | -0.0005 | -0.0018 |
+
+int4-pc baseline 上 GPTQ 从负增益变为正增益。QSNR 全面提升（13.3→17.1 dB）。
+
+**遗留问题：** GPTQ + sparse/group_sparse 仍有轻微负增益。根因：GPTQ 内部 `quantize()` 走 sparse 路径时，Hessian 补偿假设每列量化精度相同，但 sparse 打破了该假设。待讨论方案：GPTQ 用纯 int4 scheme 做 Hessian 补偿，sparse 在 forward 独立处理。详见 CURRENT.md。
+
+**Commit 历史：**
+
+| Commit | 内容 |
+|--------|------|
+| `7bde2c3` | feat(buffers): add weight_scale field to CalibrationBuffers |
+| `2ee78aa` | test(gptq): add failing tests for _weight_scale buffer and idempotency |
+| `3b289ae` | feat(gptq): register _weight_scale buffer for idempotent re-quantization |
+| `ecf7af3` | test(gptq): add forward-pass weight_scale integration test |
+| `052f430` | feat(linear): read _weight_scale buffer in forward pass |
+| `e43917d` | feat(conv): read _weight_scale buffer in forward pass |
+
+**设计文档**: `docs/plans/2026-05-17-gptq-idempotent-design.md`
+**实现计划**: `docs/plans/2026-05-17-gptq-idempotent-plan.md`
+**测试**: 28 GPTQ tests passed, 全量 2,627 passed, 40 预存在失败
+
+---
+
 ## ADR-013: Group Sparse 按粒度组格式分配 ✅ (2026-05-15)
 
 **六阶段实现，P1-P6 全部完成:**
