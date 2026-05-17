@@ -14,8 +14,9 @@ Follows the ``LayerwiseScaleOptimizer`` pattern:
    compute the Hessian, then run column-by-column GPTQ.
 3. Store the quantized weights directly on ``module.weight.data``.
 
-No new transforms, formats, or buffers.  The standard forward path
-re-quantizes via ``quantize(w, scheme)`` — idempotent on GPTQ weights.
+Registers ``_weight_scale`` buffer on each module so the forward path
+re-quantizes via ``quantize(w, scheme, scale=_weight_scale)`` —
+idempotent on GPTQ weights.
 
 Restrictions (v1)
 -----------------
@@ -157,8 +158,11 @@ class GPTQOptimizer:
 
             mse_before = (W - quantize(W, weight_scheme)).pow(2).mean().item()
 
-            W_q = self._gptq_quantize(W, X, weight_scheme)
+            W_q, full_scale = self._gptq_quantize(W, X, weight_scheme)
             module.weight.data = W_q
+
+            if full_scale is not None:
+                module.register_buffer("_weight_scale", full_scale.to(dtype=W.dtype))
 
             mse_after = (W - W_q).pow(2).mean().item()
             results[name] = {"mse_before": mse_before, "mse_after": mse_after}
@@ -174,7 +178,7 @@ class GPTQOptimizer:
         W: torch.Tensor,
         X: torch.Tensor,
         scheme,
-    ) -> torch.Tensor:
+    ) -> tuple:
         """Apply GPTQ to a single Linear weight matrix.
 
         Args:
@@ -183,7 +187,8 @@ class GPTQOptimizer:
             scheme: ``QuantScheme`` from ``module.cfg.weight``.
 
         Returns:
-            GPTQ-quantized weight tensor, same shape as ``W``.
+            (W_q, full_scale): GPTQ-quantized weight tensor and the
+            per-channel scale used during quantization.
         """
         in_features = W.shape[1]
         device = W.device
@@ -259,7 +264,7 @@ class GPTQOptimizer:
         if inv_perm is not None:
             W_q = W_q[:, inv_perm]
 
-        return W_q.to(dtype=dtype)
+        return W_q.to(dtype=dtype), full_scale
 
     # ------------------------------------------------------------------
     # Calibration input collection
