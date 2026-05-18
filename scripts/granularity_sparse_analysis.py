@@ -5,7 +5,7 @@ Usage:
     PYTHONPATH=. python scripts/granularity_sparse_analysis.py
 
 Output:
-    docs/guides/example/granularity-sparse-analysis.html
+    docs/guides/visualizations/granularity-sparse-analysis.html
 """
 
 import math
@@ -23,7 +23,7 @@ from src.transform import IdentityTransform
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "docs", "guides", "example")
+OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "docs", "guides", "visualizations")
 OUT_FILE = os.path.join(OUT_DIR, "granularity-sparse-analysis.html")
 
 INT4 = get_format("int4")

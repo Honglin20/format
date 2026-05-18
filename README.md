@@ -94,7 +94,7 @@ cfg = QuantConfig(w_format="int4", w_granularity="per_channel",
                   group_format="int8", group_ratio=0.3)
 ```
 
-> 详见 [Sparse Outlier 指南](docs/guides/sparse-outlier.md) · [粒度×Sparse 可视化分析](docs/guides/example/granularity-sparse-analysis.html)
+> 详见 [Sparse Outlier 指南](docs/guides/sparse-outlier.md) · [粒度×Sparse 可视化分析](docs/guides/visualizations/granularity-sparse-analysis.html)
 
 ## 文档导航
 
@@ -116,7 +116,7 @@ cfg = QuantConfig(w_format="int4", w_granularity="per_channel",
 
 ### 完整示例
 
-→ [系统化误差分析示例 — Transformer + AG News + int4](docs/guides/example/transformer_analysis.md)
+→ [系统化误差分析示例 — Transformer + AG News + int4](docs/guides/visualizations/transformer_analysis.md)
   ADR-010 四阶段闭环全流程演示：Diagnose → Characterize → Plan → Intervene → Verify
 
 ### 参考手册

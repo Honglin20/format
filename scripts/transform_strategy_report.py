@@ -12,7 +12,7 @@ Usage:
     PYTHONPATH=. python scripts/transform_strategy_report.py
 
 Output:
-    docs/guides/example/transform-strategy-report.html
+    docs/guides/visualizations/transform-strategy-report.html
 """
 
 import base64
@@ -37,7 +37,7 @@ from src.transform import HadamardTransform, SmoothQuantTransform, compute_smoot
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.join(SCRIPT_DIR, "..")
-OUT_DIR = os.path.join(PROJECT_DIR, "docs", "guides", "example")
+OUT_DIR = os.path.join(PROJECT_DIR, "docs", "guides", "visualizations")
 OUT_FILE = os.path.join(OUT_DIR, "transform-strategy-report.html")
 
 INT4 = get_format("int4")

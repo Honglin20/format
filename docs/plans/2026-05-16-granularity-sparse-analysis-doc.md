@@ -14,7 +14,7 @@
 |------|------|
 | `README.md` | 新增 Element Sparse / Group Sparse 命名段落 + QuantConfig 配置示例 |
 | `scripts/granularity_sparse_analysis.py` | 生成脚本，调用库 API 跑真实量化，输出 HTML |
-| `docs/guides/example/granularity-sparse-analysis.html` | 最终分析文档（单文件，内联 CSS） |
+| `docs/guides/visualizations/granularity-sparse-analysis.html` | 最终分析文档（单文件，内联 CSS） |
 
 ## Tensor 定义
 

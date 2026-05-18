@@ -1,0 +1,1500 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQ-Format Algorithm Deep Dive — ADR-014</title>
+<style>
+:root {
+  --high: #e8710a;
+  --high-bg: #fff3e0;
+  --high-border: #f57c00;
+  --low: #1565c0;
+  --low-bg: #e3f2fd;
+  --low-border: #1976d2;
+  --mask-true: #ff9800;
+  --mask-false: #42a5f5;
+  --vmask: #d32f2f;
+  --accent: #7c4dff;
+  --accent-bg: #ede7f6;
+  --reorder-arrow: #4caf50;
+  --bg: #fafafa;
+  --card: #ffffff;
+  --text: #212121;
+  --text-secondary: #616161;
+  --border: #e0e0e0;
+  --code-bg: #263238;
+  --code-fg: #eceff1;
+  --step-num: #7c4dff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  padding: 0;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+
+/* Hero */
+.hero {
+  background: linear-gradient(135deg, #1a237e 0%, #283593 50%, #3949ab 100%);
+  color: white;
+  padding: 3rem 2rem;
+  text-align: center;
+  margin-bottom: 2rem;
+  border-radius: 0 0 24px 24px;
+}
+.hero h1 { font-size: 2.2rem; margin-bottom: 0.5rem; font-weight: 700; }
+.hero .subtitle { font-size: 1.1rem; opacity: 0.85; }
+.hero .meta { font-size: 0.85rem; opacity: 0.65; margin-top: 0.8rem; }
+
+/* Section headers */
+.section-title {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin: 3rem 0 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 3px solid var(--accent);
+  color: #1a237e;
+}
+.subsection-title {
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin: 2rem 0 0.8rem;
+  color: #283593;
+}
+
+/* Cards */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin: 1rem 0;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.card-highlight {
+  border-left: 4px solid var(--accent);
+  background: var(--accent-bg);
+}
+
+/* Steps */
+.step {
+  margin: 2.5rem 0;
+  padding-left: 3.5rem;
+  position: relative;
+}
+.step::before {
+  content: attr(data-step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  background: var(--step-num);
+  color: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1rem;
+}
+.step-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #1a237e;
+  margin-bottom: 0.5rem;
+}
+.step-desc {
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+  font-size: 0.95rem;
+}
+
+/* Formula */
+.formula {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace;
+  font-size: 0.9rem;
+  margin: 0.8rem 0;
+  overflow-x: auto;
+  line-height: 1.8;
+}
+.formula-inline {
+  background: #f5f5f5;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+}
+
+/* Matrix tables */
+.matrix-container {
+  display: inline-block;
+  margin: 0.8rem 0.5rem;
+  vertical-align: top;
+}
+.matrix-label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.3rem;
+  color: #37474f;
+  text-align: center;
+}
+.matrix-shape {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-align: center;
+  margin-bottom: 0.3rem;
+}
+.matrix-wrap {
+  border: 2px solid #90a4ae;
+  border-radius: 6px;
+  padding: 4px;
+  display: inline-block;
+  position: relative;
+}
+.matrix-wrap::before, .matrix-wrap::after {
+  font-size: 1.4rem;
+  font-weight: 300;
+  color: #546e7a;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.matrix-wrap::before { content: '['; left: -10px; }
+.matrix-wrap::after { content: ']'; right: -10px; }
+
+.matrix-table {
+  border-collapse: collapse;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82rem;
+}
+.matrix-table td, .matrix-table th {
+  padding: 5px 10px;
+  text-align: center;
+  border: 1px solid #e0e0e0;
+  min-width: 55px;
+  transition: background 0.2s;
+}
+.matrix-table th {
+  background: #eceff1;
+  font-weight: 600;
+  font-size: 0.75rem;
+  color: #546e7a;
+}
+.matrix-table .row-header {
+  background: #eceff1;
+  font-weight: 600;
+  font-size: 0.75rem;
+  color: #546e7a;
+}
+
+/* Cell colors */
+.cell-high {
+  background: var(--high-bg) !important;
+  color: var(--high) !important;
+  font-weight: 700 !important;
+  border-color: var(--high-border) !important;
+}
+.cell-low {
+  background: var(--low-bg) !important;
+  color: var(--low) !important;
+  font-weight: 600 !important;
+  border-color: var(--low-border) !important;
+}
+.cell-vmask {
+  background: #ffebee !important;
+  color: var(--vmask) !important;
+  font-weight: 800 !important;
+  border-color: #e57373 !important;
+}
+.cell-mask-true {
+  background: #fff3e0 !important;
+  color: #e65100 !important;
+  font-weight: 700 !important;
+}
+.cell-mask-false {
+  background: #e3f2fd !important;
+  color: #0d47a1 !important;
+  font-weight: 600 !important;
+}
+.cell-importance-high {
+  background: #fff8e1 !important;
+  font-weight: 700 !important;
+}
+.cell-selected {
+  outline: 3px solid var(--high) !important;
+  outline-offset: -2px;
+}
+
+/* Bank divider */
+.bank-divider td {
+  border-top: 3px solid #546e7a !important;
+  padding-top: 2px !important;
+}
+.bank-label {
+  font-size: 0.7rem;
+  color: #78909c;
+  text-align: right;
+  padding-right: 8px !important;
+}
+
+/* Reorder arrows */
+.reorder-container {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  margin: 1rem 0;
+  flex-wrap: wrap;
+}
+.reorder-arrow {
+  font-size: 2rem;
+  color: var(--reorder-arrow);
+  font-weight: 700;
+}
+
+/* Two-column layout */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin: 1rem 0;
+}
+@media (max-width: 900px) {
+  .two-col { grid-template-columns: 1fr; }
+}
+
+/* Execution path diagram */
+.exec-path {
+  display: flex;
+  gap: 2rem;
+  margin: 1.5rem 0;
+  flex-wrap: wrap;
+}
+.path-box {
+  flex: 1;
+  min-width: 280px;
+  border: 2px solid;
+  border-radius: 10px;
+  padding: 1.2rem;
+}
+.path-high {
+  border-color: var(--high-border);
+  background: var(--high-bg);
+}
+.path-low {
+  border-color: var(--low-border);
+  background: var(--low-bg);
+}
+.path-title {
+  font-weight: 700;
+  font-size: 1.05rem;
+  margin-bottom: 0.5rem;
+}
+.path-high .path-title { color: var(--high); }
+.path-low .path-title { color: var(--low); }
+
+/* Result box */
+.result-box {
+  background: #e8f5e9;
+  border: 2px solid #4caf50;
+  border-radius: 10px;
+  padding: 1rem 1.5rem;
+  margin: 1rem 0;
+  text-align: center;
+  font-weight: 600;
+  color: #2e7d32;
+}
+
+/* Error note */
+.error-note {
+  background: #fff3e0;
+  border-left: 4px solid #ff9800;
+  padding: 1rem 1.5rem;
+  margin: 1rem 0;
+  border-radius: 0 8px 8px 0;
+}
+.error-note .label {
+  font-weight: 700;
+  color: #e65100;
+  font-size: 0.9rem;
+  margin-bottom: 0.3rem;
+}
+
+/* Legend */
+.legend {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin: 0.8rem 0;
+  font-size: 0.85rem;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.legend-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid #bdbdbd;
+}
+
+/* Params table */
+.params-table {
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+.params-table th, .params-table td {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.params-table th {
+  background: #eceff1;
+  font-weight: 600;
+}
+.params-table code {
+  background: #f5f5f5;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.85rem;
+}
+
+/* Scrollable row */
+.scroll-row {
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+}
+
+/* Note box */
+.note-box {
+  background: #e3f2fd;
+  border-left: 4px solid #1976d2;
+  padding: 0.8rem 1.2rem;
+  margin: 1rem 0;
+  border-radius: 0 8px 8px 0;
+  font-size: 0.9rem;
+}
+
+/* Inference diagram */
+.inference-diagram {
+  background: #fafafa;
+  border: 1px solid #e0e0e0;
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin: 1rem 0;
+}
+.inference-step {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin: 0.6rem 0;
+  font-size: 0.9rem;
+}
+.inference-step .num {
+  background: #7c4dff;
+  color: white;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* Comparison table */
+.comparison-table {
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.85rem;
+  width: 100%;
+}
+.comparison-table th, .comparison-table td {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.comparison-table th {
+  background: #eceff1;
+  font-weight: 600;
+}
+.comparison-table tr:nth-child(even) td {
+  background: #f5f5f5;
+}
+
+/* Chip / tag */
+.chip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.chip-high { background: #fff3e0; color: #e65100; border: 1px solid #ffb74d; }
+.chip-low { background: #e3f2fd; color: #0d47a1; border: 1px solid #64b5f6; }
+.chip-vmask { background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
+
+/* TOC */
+.toc {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.2rem 1.5rem;
+  margin: 1.5rem 0;
+}
+.toc a {
+  color: #1565c0;
+  text-decoration: none;
+}
+.toc a:hover { text-decoration: underline; }
+.toc ul { list-style: none; padding-left: 1.2rem; }
+.toc > ul { padding-left: 0; }
+.toc li { margin: 0.3rem 0; }
+.toc .toc-l1 { font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>SQ-Format Algorithm Deep Dive</h1>
+  <div class="subtitle">Sparse-Quantized Format — Algorithm 1 (Weights) & Algorithm 2 (Activations) 逐步拆解</div>
+  <div class="meta">基于 ADR-014 &amp; Huang et al. (2025) "SQ-format: A Unified Sparse-Quantized Hardware-friendly Data Format for LLMs"</div>
+</div>
+
+<div class="container">
+
+<!-- TOC -->
+<div class="toc">
+  <strong>目录</strong>
+  <ul>
+    <li class="toc-l1"><a href="#overview">0. SQ-Format 统一框架</a></li>
+    <li class="toc-l1"><a href="#algo1">1. Algorithm 1: SQ-format on Weights</a></li>
+    <li><a href="#a1-setup">1.0 实验参数 &amp; 初始矩阵</a></li>
+    <li><a href="#a1-s1">1.1 Step 1 — SmoothQuant 平滑</a></li>
+    <li><a href="#a1-s2">1.2 Step 2 — GPTQ 重要性打分</a></li>
+    <li><a href="#a1-s3">1.3 Step 3 — Per-bank Per-column Mask 生成</a></li>
+    <li><a href="#a1-s4">1.4 Step 4 — 分组量化</a></li>
+    <li><a href="#a1-s5">1.5 Step 5 — 紧凑存储 (vmask)</a></li>
+    <li><a href="#a1-s6">1.6 Step 6 — 硬件执行模型</a></li>
+    <li class="toc-l1"><a href="#algo2">2. Algorithm 2: SQ-format on Activations (Static)</a></li>
+    <li><a href="#a2-s1">2.1 Step 1 — SmoothQuant + 收集统计量</a></li>
+    <li><a href="#a2-s2">2.2 Step 2 — Per-channel 重要性打分 (A·W)</a></li>
+    <li><a href="#a2-s3">2.3 Step 3 — Per-bank Per-channel Mask 生成</a></li>
+    <li><a href="#a2-s4">2.4 Step 4 — 权重量化</a></li>
+    <li><a href="#a2-s5">2.5 Step 5 — 权重行重排 (关键步骤)</a></li>
+    <li><a href="#a2-s6">2.6 Step 6 — 推理时激活值拆分与计算</a></li>
+    <li><a href="#a2-dynamic">2.7 动态策略 (对比)</a></li>
+    <li class="toc-l1"><a href="#diff">3. ADR-014 与论文差异 &amp; 勘误</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 class="section-title" id="overview">0. SQ-Format 统一框架</h2>
+<!-- ============================================================ -->
+
+<div class="card">
+  <p>SQ-format 是一种<strong>混合精度稀疏量化格式</strong>，核心思想：</p>
+  <ul style="margin:0.5rem 0 0 1.2rem;">
+    <li>将矩阵按 <strong>bank</strong> 分组，每个 bank 内固定 <strong>(1−s)·b</strong> 个元素用高精度 (h<sub>high</sub>)，其余 <strong>s·b</strong> 个用低精度 (h<sub>low</sub>)</li>
+    <li>SQ-format 只作用于 matmul 的<strong>一个操作数</strong>（权或激活），另一个用普通 uniform 格式</li>
+    <li>是 NVIDIA 2:4 半结构化稀疏的泛化 (2:4 = s=0.5, h<sub>low</sub>=0, b=4)</li>
+  </ul>
+  <div class="formula">
+SQ-format(𝐗) = ([𝐗<sub>quant</sub>], [𝐒<sub>quant</sub>], [𝐦], h<sub>high</sub>, h<sub>low</sub>, b, s)
+  </div>
+  <div class="formula">
+等效比特数: y = (1−s) × h<sub>high</sub> + s × h<sub>low</sub>
+  </div>
+
+  <table class="params-table" style="margin-top:1rem;">
+    <tr><th>参数</th><th>含义</th><th>本文示例</th></tr>
+    <tr><td><code>b</code></td><td>bank size — 每 bank 包含的行数（沿输入通道轴）</td><td>4</td></tr>
+    <tr><td><code>s</code></td><td>sparsity — 低精度元素占比</td><td>0.5</td></tr>
+    <tr><td><code>h<sub>high</sub></code></td><td>高精度格式</td><td>INT8 (对称, 量程 -127~127)</td></tr>
+    <tr><td><code>h<sub>low</sub></code></td><td>低精度格式</td><td>INT4 (对称, 量程 -7~7)</td></tr>
+    <tr><td><code>vmask</code></td><td>低精度格式中未使用的最大整数值，作为高精度哨兵</td><td>15 (INT4 无符号表示)</td></tr>
+  </table>
+
+  <div class="legend" style="margin-top:1rem;">
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--high-bg);border-color:var(--high-border);"></div> 高精度 (INT8)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:var(--low-bg);border-color:var(--low-border);"></div> 低精度 (INT4)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#ffebee;border-color:#e57373;"></div> vmask 哨兵</div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 class="section-title" id="algo1">1. Algorithm 1: SQ-format on Weights</h2>
+<!-- ============================================================ -->
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;">
+场景：权重使用 SQ-format（混合 INT8/INT4），激活使用普通 INT4。记为 <strong>W(SQ6)A4</strong>。
+</p>
+
+<!-- 1.0 Setup -->
+<h3 class="subsection-title" id="a1-setup">1.0 实验参数 &amp; 初始矩阵</h3>
+
+<div class="card">
+  <p>我们使用一个 <strong>W ∈ R<sup>8×4</sup></strong> 的权重矩阵（K=8 输入通道，N=4 输出特征），配合以下参数：</p>
+  <table class="params-table">
+    <tr><th>参数</th><th>值</th><th>含义</th></tr>
+    <tr><td><code>b</code></td><td>4</td><td>bank size → 2 个 bank (rows 0-3, rows 4-7)</td></tr>
+    <tr><td><code>s</code></td><td>0.5</td><td>sparsity → 每 bank 每列选 top 2 高精度，2 低精度</td></tr>
+    <tr><td><code>h<sub>high</sub></code></td><td>INT8</td><td>高精度，对称量化，量程 [-127, 127]</td></tr>
+    <tr><td><code>h<sub>low</sub></code></td><td>INT4</td><td>低精度，对称量化，量程 [-7, 7]</td></tr>
+  </table>
+
+  <div class="matrix-container">
+    <div class="matrix-label">原始权重 𝐖 [8×4]</div>
+    <div class="matrix-wrap">
+      <table class="matrix-table">
+        <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+        <tr><td class="row-header">in_0</td><td> 2.0</td><td>-0.5</td><td> 1.2</td><td> 0.8</td></tr>
+        <tr><td class="row-header">in_1</td><td>-0.3</td><td> 3.0</td><td>-1.0</td><td> 0.5</td></tr>
+        <tr><td class="row-header">in_2</td><td> 0.4</td><td> 0.8</td><td>-2.5</td><td>-0.2</td></tr>
+        <tr><td class="row-header">in_3</td><td> 1.5</td><td>-1.8</td><td> 0.6</td><td> 2.2</td></tr>
+        <tr class="bank-divider"><td class="row-header">in_4</td><td>-1.2</td><td> 0.5</td><td> 1.0</td><td>-0.4</td></tr>
+        <tr><td class="row-header">in_5</td><td> 0.2</td><td>-2.0</td><td> 0.7</td><td> 1.8</td></tr>
+        <tr><td class="row-header">in_6</td><td> 2.3</td><td> 1.0</td><td>-0.3</td><td>-1.5</td></tr>
+        <tr><td class="row-header">in_7</td><td>-0.6</td><td> 0.3</td><td> 2.0</td><td> 0.5</td></tr>
+      </table>
+    </div>
+  </div>
+  <div style="font-size:0.8rem;color:#78909c;margin-top:0.3rem;">Bank 0 = rows 0~3 (in_0 ~ in_3) &nbsp;|&nbsp; Bank 1 = rows 4~7 (in_4 ~ in_7)</div>
+</div>
+
+<!-- 1.1 Step 1 -->
+<div class="step" data-step="1" id="a1-s1">
+  <div class="step-title">SmoothQuant 平滑</div>
+  <div class="step-desc">将激活 outlier 通过对角缩放迁移到权重侧，使两侧都更易量化。</div>
+
+  <div class="formula">
+    𝐖' = diag(𝐒) · 𝐖 &nbsp;&nbsp;(S 是 per-input-channel 的缩放因子)
+    <br>𝐇 ← 标定集上的 Hessian 对角矩阵 (GPTQ 框架)
+  </div>
+
+  <p>SmoothQuant 为每个输入通道计算缩放因子 𝐒，将激活的难度"转移"到权重：</p>
+
+  <div class="scroll-row">
+  <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:flex-start;">
+    <div class="matrix-container">
+      <div class="matrix-label">缩放因子 𝐒 [8]</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th>ch</th><th>S</th></tr>
+          <tr><td>0</td><td>0.8</td></tr>
+          <tr><td>1</td><td>1.2</td></tr>
+          <tr><td>2</td><td>0.9</td></tr>
+          <tr><td>3</td><td>1.1</td></tr>
+          <tr><td>4</td><td>0.7</td></tr>
+          <tr><td>5</td><td>1.3</td></tr>
+          <tr><td>6</td><td>0.6</td></tr>
+          <tr><td>7</td><td>1.4</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="matrix-container">
+      <div class="matrix-label">平滑后权重 𝐖' = diag(𝐒)·𝐖 [8×4]</div>
+      <div class="matrix-shape">每行 r 乘以 S[r]</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+          <tr><td class="row-header">in_0</td><td> 1.60</td><td>-0.40</td><td> 0.96</td><td> 0.64</td></tr>
+          <tr><td class="row-header">in_1</td><td>-0.36</td><td> 3.60</td><td>-1.20</td><td> 0.60</td></tr>
+          <tr><td class="row-header">in_2</td><td> 0.36</td><td> 0.72</td><td>-2.25</td><td>-0.18</td></tr>
+          <tr><td class="row-header">in_3</td><td> 1.65</td><td>-1.98</td><td> 0.66</td><td> 2.42</td></tr>
+          <tr class="bank-divider"><td class="row-header">in_4</td><td>-0.84</td><td> 0.35</td><td> 0.70</td><td>-0.28</td></tr>
+          <tr><td class="row-header">in_5</td><td> 0.26</td><td>-2.60</td><td> 0.91</td><td> 2.34</td></tr>
+          <tr><td class="row-header">in_6</td><td> 1.38</td><td> 0.60</td><td>-0.18</td><td>-0.90</td></tr>
+          <tr><td class="row-header">in_7</td><td>-0.84</td><td> 0.42</td><td> 2.80</td><td> 0.70</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="matrix-container">
+      <div class="matrix-label">Hessian 逆对角 𝐇⁻¹ [4]</div>
+      <div class="matrix-shape">per output feature</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th>out</th><th>H⁻¹</th><th>(H⁻¹)²</th></tr>
+          <tr><td>0</td><td>0.50</td><td>0.25</td></tr>
+          <tr><td>1</td><td>0.30</td><td>0.09</td></tr>
+          <tr><td>2</td><td>0.40</td><td>0.16</td></tr>
+          <tr><td>3</td><td>0.60</td><td>0.36</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <div class="note-box">
+    <strong>直观理解</strong>：H⁻¹ 大的输出列 → loss 曲率平缓 → 该列权重对量化不敏感，重要性低。H⁻¹ 小 → 曲率陡峭 → 量化敏感，重要性高。
+  </div>
+</div>
+
+<!-- 1.2 Step 2 -->
+<div class="step" data-step="2" id="a1-s2">
+  <div class="step-title">GPTQ 重要性打分</div>
+  <div class="step-desc">对每个权重元素，计算其量化重要性分数。综合了权重自身幅度和模型对其扰动的敏感度。</div>
+
+  <div class="formula">
+    I<sub>r,i</sub> = (W'<sub>r,i</sub>)² / (H⁻¹<sub>i,i</sub>)²
+    <br><br>含义：
+    <br>&nbsp; • (W')² 大 → 绝对值大的权重量化扰动影响大
+    <br>&nbsp; • 1/(H⁻¹)² 大 → loss 曲率陡峭方向上权重量化敏感度高
+    <br>&nbsp; • 两者相乘 → 综合"谁最不该被低精度量化"
+  </div>
+
+  <div class="scroll-row">
+  <div class="matrix-container">
+    <div class="matrix-label">重要性分数 𝐈 = (𝐖')² / (𝐇⁻¹)² [8×4]</div>
+    <div class="matrix-shape">值越大 → 越重要 → 越应该用高精度</div>
+    <div class="matrix-wrap">
+      <table class="matrix-table">
+        <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+        <tr><td class="row-header">in_0</td><td> 10.24</td><td>  1.78</td><td>  5.76</td><td>  1.14</td></tr>
+        <tr><td class="row-header">in_1</td><td>  0.52</td><td>144.00</td><td>  9.00</td><td>  1.00</td></tr>
+        <tr><td class="row-header">in_2</td><td>  0.52</td><td>  5.76</td><td> 31.64</td><td>  0.09</td></tr>
+        <tr><td class="row-header">in_3</td><td> 10.89</td><td> 43.56</td><td>  2.72</td><td> 16.27</td></tr>
+        <tr class="bank-divider"><td class="row-header">in_4</td><td>  2.82</td><td>  1.36</td><td>  3.06</td><td>  0.22</td></tr>
+        <tr><td class="row-header">in_5</td><td>  0.27</td><td> 75.11</td><td>  5.18</td><td> 15.21</td></tr>
+        <tr><td class="row-header">in_6</td><td>  7.62</td><td>  4.00</td><td>  0.20</td><td>  2.25</td></tr>
+        <tr><td class="row-header">in_7</td><td>  2.82</td><td>  1.96</td><td> 49.00</td><td>  1.36</td></tr>
+      </table>
+    </div>
+  </div>
+  </div>
+
+  <div class="note-box">
+    <strong>观察</strong>：in_1 在 out_1 列的重要性高达 144.00（因为 W'=3.60 且 H⁻¹=0.30），意味着这个位置绝对不能用低精度。相反，in_2 在 out_3 列只有 0.09，用低精度代价极小。
+  </div>
+</div>
+
+<!-- 1.3 Step 3 -->
+<div class="step" data-step="3" id="a1-s3">
+  <div class="step-title">Per-bank Per-column Mask 生成</div>
+  <div class="step-desc">在每个 bank 内，对每一列独立选 top-(1−s)×b = 2 个最高重要性元素 → 高精度 (H)，剩余 2 个 → 低精度 (L)。</div>
+
+  <div class="formula">
+    对每个 bank 𝐰，对每列 c:
+    &nbsp;&nbsp;选 I[:, c] 中最大的 2 个 → 𝐦[对应位置] = True (高精度)
+    &nbsp;&nbsp;剩余 2 个 → 𝐦[对应位置] = False (低精度)
+  </div>
+
+  <div class="two-col">
+    <div>
+      <div class="matrix-container">
+        <div class="matrix-label">Bank 0 (rows 0~3) — 每列选 top 2</div>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+            <tr><td class="row-header">in_0</td><td class="cell-importance-high">10.24 <span class="chip chip-high">H</span></td><td>1.78 <span class="chip chip-low">L</span></td><td>5.76 <span class="chip chip-low">L</span></td><td class="cell-importance-high">1.14 <span class="chip chip-high">H</span></td></tr>
+            <tr><td class="row-header">in_1</td><td>0.52 <span class="chip chip-low">L</span></td><td class="cell-importance-high">144.00 <span class="chip chip-high">H</span></td><td class="cell-importance-high">9.00 <span class="chip chip-high">H</span></td><td>1.00 <span class="chip chip-low">L</span></td></tr>
+            <tr><td class="row-header">in_2</td><td>0.52 <span class="chip chip-low">L</span></td><td>5.76 <span class="chip chip-low">L</span></td><td class="cell-importance-high">31.64 <span class="chip chip-high">H</span></td><td>0.09 <span class="chip chip-low">L</span></td></tr>
+            <tr><td class="row-header">in_3</td><td class="cell-importance-high">10.89 <span class="chip chip-high">H</span></td><td class="cell-importance-high">43.56 <span class="chip chip-high">H</span></td><td>2.72 <span class="chip chip-low">L</span></td><td class="cell-importance-high">16.27 <span class="chip chip-high">H</span></td></tr>
+          </table>
+        </div>
+      </div>
+      <div style="font-size:0.8rem;color:#78909c;margin-top:0.3rem;">
+        out_0 列: top2 = in_0(10.24), in_3(10.89) → H<br>
+        out_1 列: top2 = in_1(144.00), in_3(43.56) → H<br>
+        out_2 列: top2 = in_2(31.64), in_1(9.00) → H<br>
+        out_3 列: top2 = in_3(16.27), in_0(1.14) → H
+      </div>
+    </div>
+    <div>
+      <div class="matrix-container">
+        <div class="matrix-label">Bank 1 (rows 4~7) — 每列选 top 2</div>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+            <tr><td class="row-header">in_4</td><td class="cell-importance-high">2.82 <span class="chip chip-high">H</span></td><td>1.36 <span class="chip chip-low">L</span></td><td>3.06 <span class="chip chip-low">L</span></td><td>0.22 <span class="chip chip-low">L</span></td></tr>
+            <tr><td class="row-header">in_5</td><td>0.27 <span class="chip chip-low">L</span></td><td class="cell-importance-high">75.11 <span class="chip chip-high">H</span></td><td class="cell-importance-high">5.18 <span class="chip chip-high">H</span></td><td class="cell-importance-high">15.21 <span class="chip chip-high">H</span></td></tr>
+            <tr><td class="row-header">in_6</td><td class="cell-importance-high">7.62 <span class="chip chip-high">H</span></td><td class="cell-importance-high">4.00 <span class="chip chip-high">H</span></td><td>0.20 <span class="chip chip-low">L</span></td><td class="cell-importance-high">2.25 <span class="chip chip-high">H</span></td></tr>
+            <tr><td class="row-header">in_7</td><td>2.82 <span class="chip chip-low">L</span></td><td>1.96 <span class="chip chip-low">L</span></td><td class="cell-importance-high">49.00 <span class="chip chip-high">H</span></td><td>1.36 <span class="chip chip-low">L</span></td></tr>
+          </table>
+        </div>
+      </div>
+      <div style="font-size:0.8rem;color:#78909c;margin-top:0.3rem;">
+        out_0 列: top2 = in_6(7.62), in_4(2.82) → H (in_7=2.82 同值，取先)<br>
+        out_1 列: top2 = in_5(75.11), in_6(4.00) → H<br>
+        out_2 列: top2 = in_7(49.00), in_5(5.18) → H<br>
+        out_3 列: top2 = in_5(15.21), in_6(2.25) → H
+      </div>
+    </div>
+  </div>
+
+  <p style="margin-top:1rem;font-weight:600;">合并后的精度掩码 𝐦 (完整 8×4)：</p>
+  <div class="scroll-row">
+  <div class="matrix-container">
+    <div class="matrix-label">精度掩码 𝐦 — True=高精度, False=低精度</div>
+    <div class="matrix-wrap">
+      <table class="matrix-table">
+        <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+        <tr><td class="row-header">in_0</td><td class="cell-mask-true">T</td><td class="cell-mask-false">F</td><td class="cell-mask-false">F</td><td class="cell-mask-true">T</td></tr>
+        <tr><td class="row-header">in_1</td><td class="cell-mask-false">F</td><td class="cell-mask-true">T</td><td class="cell-mask-true">T</td><td class="cell-mask-false">F</td></tr>
+        <tr><td class="row-header">in_2</td><td class="cell-mask-false">F</td><td class="cell-mask-false">F</td><td class="cell-mask-true">T</td><td class="cell-mask-false">F</td></tr>
+        <tr><td class="row-header">in_3</td><td class="cell-mask-true">T</td><td class="cell-mask-true">T</td><td class="cell-mask-false">F</td><td class="cell-mask-true">T</td></tr>
+        <tr class="bank-divider"><td class="row-header">in_4</td><td class="cell-mask-true">T</td><td class="cell-mask-false">F</td><td class="cell-mask-false">F</td><td class="cell-mask-false">F</td></tr>
+        <tr><td class="row-header">in_5</td><td class="cell-mask-false">F</td><td class="cell-mask-true">T</td><td class="cell-mask-true">T</td><td class="cell-mask-true">T</td></tr>
+        <tr><td class="row-header">in_6</td><td class="cell-mask-true">T</td><td class="cell-mask-true">T</td><td class="cell-mask-false">F</td><td class="cell-mask-true">T</td></tr>
+        <tr><td class="row-header">in_7</td><td class="cell-mask-false">F</td><td class="cell-mask-false">F</td><td class="cell-mask-true">T</td><td class="cell-mask-false">F</td></tr>
+      </table>
+    </div>
+  </div>
+  </div>
+
+  <div class="note-box">
+    <strong>关键特征</strong>：mask 是 <strong>per-element</strong> 的——同一行不同列可以是不同精度。这是因为不同输出特征对同一输入通道的敏感度不同。这与 Algorithm 2 的 per-channel mask 形成鲜明对比。
+  </div>
+</div>
+
+<!-- 1.4 Step 4 -->
+<div class="step" data-step="4" id="a1-s4">
+  <div class="step-title">分组量化</div>
+  <div class="step-desc">将 W' 按 mask 分为两组，各自独立做对称均匀量化。高精度组用 INT8，低精度组用 INT4。</div>
+
+  <div class="formula">
+    高精度组: (𝐰'<sub>high</sub>, 𝐬'<sub>high</sub>) ← Quant(𝐖' ⊙ 𝐦, h<sub>high</sub>)
+    &nbsp;&nbsp;选取 𝐦=True 的元素，scale = max|𝐰'<sub>high</sub>| / 127, &nbsp;&nbsp;w<sub>q</sub> = round(w' / scale)
+    <br>低精度组: (𝐰'<sub>low</sub>, 𝐬'<sub>low</sub>) ← Quant(𝐖' ⊙ ∼𝐦, h<sub>low</sub>)
+    &nbsp;&nbsp;选取 𝐦=False 的元素，scale = max|𝐰'<sub>low</sub>| / 7, &nbsp;&nbsp;w<sub>q</sub> = round(w' / scale)
+    <br><br>注意：⊙ 𝐦 不是逐元素乘法（那样会把非选中元素清零），而是"选取 mask 中为 True 的元素"。
+    <br>两组各自独立计算 scale 和量化，互不影响。
+  </div>
+
+  <p>对每 bank 的每列，高/低精度组各自计算 scale 并量化。以 Bank 0 为例，展示所有 4 列的完整量化过程：</p>
+
+  <div class="card" style="margin:1rem 0;">
+    <p><strong>Bank 0, out_0 列</strong>：W' = [<strong>1.60</strong>, -0.36, 0.36, <strong>1.65</strong>]</p>
+    <div class="formula">
+      高精度 (in_0=1.60, in_3=1.65): scale_high = 1.65/127 = 0.0130
+      <br>&nbsp;&nbsp;in_0: round(1.60/0.0130) = 123, &nbsp;in_3: round(1.65/0.0130) = 127
+      <br>低精度 (in_1=−0.36, in_2=0.36): scale_low = 0.36/7 = 0.0514
+      <br>&nbsp;&nbsp;in_1: round(−0.36/0.0514) = −7, &nbsp;in_2: round(0.36/0.0514) = 7
+    </div>
+  </div>
+
+  <div class="card" style="margin:1rem 0;">
+    <p><strong>Bank 0, out_1 列</strong>：W' = [-0.40, <strong>3.60</strong>, 0.72, <strong>-1.98</strong>]</p>
+    <div class="formula">
+      高精度 (in_1=3.60, in_3=−1.98): scale_high = 3.60/127 = 0.0283
+      <br>&nbsp;&nbsp;in_1: round(3.60/0.0283) = 127, &nbsp;in_3: round(−1.98/0.0283) = −70
+      <br>低精度 (in_0=−0.40, in_2=0.72): scale_low = 0.72/7 = 0.1029
+      <br>&nbsp;&nbsp;in_0: round(−0.40/0.1029) = −4, &nbsp;in_2: round(0.72/0.1029) = 7
+    </div>
+  </div>
+
+  <div class="card" style="margin:1rem 0;">
+    <p><strong>Bank 0, out_2 列</strong>：W' = [0.96, <strong>-1.20</strong>, <strong>-2.25</strong>, 0.66]</p>
+    <div class="formula">
+      高精度 (in_1=−1.20, in_2=−2.25): scale_high = 2.25/127 = 0.0177
+      <br>&nbsp;&nbsp;in_1: round(−1.20/0.0177) = −68, &nbsp;in_2: round(−2.25/0.0177) = −127
+      <br>低精度 (in_0=0.96, in_3=0.66): scale_low = 0.96/7 = 0.1371
+      <br>&nbsp;&nbsp;in_0: round(0.96/0.1371) = 7, &nbsp;in_3: round(0.66/0.1371) = 5
+    </div>
+  </div>
+
+  <div class="card" style="margin:1rem 0;">
+    <p><strong>Bank 0, out_3 列</strong>：W' = [<strong>0.64</strong>, 0.60, -0.18, <strong>2.42</strong>]</p>
+    <div class="formula">
+      高精度 (in_0=0.64, in_3=2.42): scale_high = 2.42/127 = 0.0191
+      <br>&nbsp;&nbsp;in_0: round(0.64/0.0191) = 34, &nbsp;in_3: round(2.42/0.0191) = 127
+      <br>低精度 (in_1=0.60, in_2=−0.18): scale_low = 0.60/7 = 0.0857
+      <br>&nbsp;&nbsp;in_1: round(0.60/0.0857) = 7, &nbsp;in_2: round(−0.18/0.0857) = −2
+    </div>
+  </div>
+
+  <p style="margin-top:1rem;font-weight:600;">Per-bank Per-column Scale 矩阵：</p>
+  <div class="two-col">
+    <div>
+      <div class="matrix-container">
+        <div class="matrix-label">𝐒<sub>high</sub> [K/b × N] = [2×4]</div>
+        <div class="matrix-shape">每 bank 每列一个 scale</div>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+            <tr><td class="row-header">Bank 0</td><td>0.0130</td><td>0.0283</td><td>0.0177</td><td>0.0191</td></tr>
+            <tr><td class="row-header">Bank 1</td><td>0.0109</td><td>0.0205</td><td>0.0220</td><td>0.0184</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="matrix-container">
+        <div class="matrix-label">𝐒<sub>low</sub> [K/b × N] = [2×4]</div>
+        <div class="matrix-shape">每 bank 每列一个 scale</div>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+            <tr><td class="row-header">Bank 0</td><td>0.0514</td><td>0.1029</td><td>0.1371</td><td>0.0857</td></tr>
+            <tr><td class="row-header">Bank 1</td><td>0.1200</td><td>0.0600</td><td>0.1000</td><td>0.1000</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note-box">
+    <strong>per-bank per-column scale</strong>：每 bank 的每列有独立的 scale_high 和 scale_low，因为不同列的数值范围差异很大。例如 out_1 列高精度组最大值 3.60 (scale=0.0283)，而 out_0 列高精度组最大值仅 1.65 (scale=0.0130)——它们需要不同的 scale。
+  </div>
+</div>
+
+<!-- 1.5 Step 5 -->
+<div class="step" data-step="5" id="a1-s5">
+  <div class="step-title">紧凑存储 (vmask 隐式掩码)</div>
+  <div class="step-desc">高精度元素紧凑排列（无空隙），低精度元素保持原位，高精度位置填入 vmask 哨兵值。</div>
+
+  <div class="two-col">
+    <div>
+      <div class="matrix-container">
+        <div class="matrix-label">𝐖<sub>high</sub> [(1-s)·K × N] = [4×4]</div>
+        <div class="matrix-shape">紧凑排列，仅含高精度元素</div>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+            <tr><td class="row-header">H_0</td><td class="cell-high"> 123</td><td class="cell-high"> 127</td><td class="cell-high"> -68</td><td class="cell-high">  34</td></tr>
+            <tr><td class="row-header">H_1</td><td class="cell-high"> 127</td><td class="cell-high"> -70</td><td class="cell-high">-127</td><td class="cell-high"> 127</td></tr>
+            <tr class="bank-divider"><td class="row-header">H_2</td><td class="cell-high"> -77</td><td class="cell-high">-127</td><td class="cell-high">  41</td><td class="cell-high"> 127</td></tr>
+            <tr><td class="row-header">H_3</td><td class="cell-high"> 127</td><td class="cell-high">  29</td><td class="cell-high"> 127</td><td class="cell-high"> -49</td></tr>
+          </table>
+        </div>
+      </div>
+      <div style="font-size:0.8rem;color:#78909c;margin-top:0.3rem;">
+        每列的 2 个高精度元素紧凑堆叠<br>
+        无空隙，硬件直接读取
+      </div>
+    </div>
+    <div>
+      <div class="matrix-container">
+        <div class="matrix-label">𝐖<sub>low</sub> [K × N] = [8×4]</div>
+        <div class="matrix-shape">保持原形状，高精度位置填 vmask=15</div>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+            <tr><td class="row-header">in_0</td><td class="cell-vmask">15</td><td class="cell-low">-4</td><td class="cell-low"> 7</td><td class="cell-vmask">15</td></tr>
+            <tr><td class="row-header">in_1</td><td class="cell-low">-7</td><td class="cell-vmask">15</td><td class="cell-vmask">15</td><td class="cell-low"> 7</td></tr>
+            <tr><td class="row-header">in_2</td><td class="cell-low"> 7</td><td class="cell-low"> 7</td><td class="cell-vmask">15</td><td class="cell-low">-2</td></tr>
+            <tr><td class="row-header">in_3</td><td class="cell-vmask">15</td><td class="cell-vmask">15</td><td class="cell-low"> 5</td><td class="cell-vmask">15</td></tr>
+            <tr class="bank-divider"><td class="row-header">in_4</td><td class="cell-vmask">15</td><td class="cell-low"> 6</td><td class="cell-low"> 7</td><td class="cell-low">-3</td></tr>
+            <tr><td class="row-header">in_5</td><td class="cell-low"> 2</td><td class="cell-vmask">15</td><td class="cell-vmask">15</td><td class="cell-vmask">15</td></tr>
+            <tr><td class="row-header">in_6</td><td class="cell-vmask">15</td><td class="cell-vmask">15</td><td class="cell-low">-2</td><td class="cell-vmask">15</td></tr>
+            <tr><td class="row-header">in_7</td><td class="cell-low">-7</td><td class="cell-low"> 7</td><td class="cell-vmask">15</td><td class="cell-low"> 7</td></tr>
+          </table>
+        </div>
+      </div>
+      <div style="font-size:0.8rem;color:#78909c;margin-top:0.3rem;">
+        <span class="chip chip-vmask">15</span> = vmask 哨兵，表示"此处取高精度值"<br>
+        普通值 = INT4 量化结果 (-7~7)
+      </div>
+    </div>
+  </div>
+
+  <div class="card-highlight card" style="margin-top:1rem;">
+    <p><strong>vmask 机制详解</strong>：</p>
+    <ul style="margin:0.3rem 0 0 1.2rem;">
+      <li>INT4 对称量化，合法整数值范围：{-7, -6, ..., 6, 7}，共 15 个值</li>
+      <li>4 bit 可表示 16 个值 (0~15 无符号)，剩余 1 个值 <strong>15</strong> (0b1111) 未被使用</li>
+      <li>用 15 作为哨兵 = "这个位置的高精度真值存在 W<sub>high</sub> 里"</li>
+      <li>硬件检测到 W<sub>low</sub> 中的 15 → MUX → 从 W<sub>high</sub> 取对应值 → 送入高精度 Tensor Core</li>
+      <li>类似地，若 h<sub>low</sub>=INT2，合法值 {-1, 0, 1}，vmask = 2</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 1.6 Step 6 -->
+<div class="step" data-step="6" id="a1-s6">
+  <div class="step-title">硬件执行模型 (Figure 2a)</div>
+  <div class="step-desc">推理时，两条并行计算路径同时执行，低精度路径吞吐高，高精度路径因稀疏其时延被隐藏。</div>
+
+  <div class="exec-path">
+    <div class="path-box path-low">
+      <div class="path-title">Path 1: 低精度 (Dense)</div>
+      <p style="font-size:0.9rem;">
+        𝐖<sub>low</sub> [8×4] × 𝐀 [8×M]<br>
+        → 低精度 Tensor Core (INT4 matmul)<br>
+        → 高吞吐 (W4A4 级)<br>
+        <span style="font-size:0.8rem;color:#546e7a;">vmask 位置（值=15）在低精度乘法中不参与计算——硬件将其视为 0，由高精度路径补偿</span>
+      </p>
+    </div>
+    <div class="path-box path-high">
+      <div class="path-title">Path 2: 高精度 (Sparse)</div>
+      <p style="font-size:0.9rem;">
+        ① 检测 𝐖<sub>low</sub> 中的 vmask=15<br>
+        ② MUX 选出对应 𝐀 的行 (共 (1-s)K=4 行)<br>
+        ③ 𝐖<sub>high</sub> [4×4] × 𝐀<sub>selected</sub> [4×M]<br>
+        → 高精度 Tensor Core (INT8 matmul)<br>
+        <span style="font-size:0.8rem;color:#546e7a;">因 2x 稀疏，时延被 Path 1 完全隐藏</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="result-box">
+    Y = Low Result + High Result
+  </div>
+
+  <div class="note-box">
+    <strong>为什么高精度路径时延能被隐藏？</strong> 假设 INT4 Tensor Core 算力是 INT8 的 2×，则 Path 1 处理 8 行 INT4 的时间 = Path 2 处理 4 行 INT8 的时间。当 s ≥ 0.5 时，高精度元素 ≤ 一半，其计算量总 ≤ 低精度路径。
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<h2 class="section-title" id="algo2">2. Algorithm 2: SQ-format on Activations (Static)</h2>
+<!-- ============================================================ -->
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;">
+场景：激活使用 SQ-format（混合 INT8/INT4），权重使用普通 INT4。记为 <strong>W4A(SQ6)</strong>。<br>
+核心差异：激活值是运行时动态产生的，不能预先量化，但可以用标定集预计算 mask。
+</p>
+
+<!-- 2.1 Step 1 -->
+<div class="step" data-step="1" id="a2-s1">
+  <div class="step-title">SmoothQuant + 收集统计量</div>
+  <div class="step-desc">SmoothQuant 流程与 Algorithm 1 相同，但输出不同：Algorithm 1 额外返回 Hessian 𝐇（用于重要性打分），Algorithm 2 额外返回平均激活幅度 𝐀̄（用于重要性打分）。</div>
+
+  <div class="formula">
+    𝐖', 𝐀̄ ← Smooth(𝐖, 𝒟)
+    <br>𝐀̄<sub>j</sub> = 标定集上第 j 个输入通道的平均激活幅度（对所有 sample 和 token 取均值）
+  </div>
+
+  <div class="scroll-row">
+  <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:flex-start;">
+    <div class="matrix-container">
+      <div class="matrix-label">平滑后权重 𝐖' [8×4]</div>
+      <div class="matrix-shape">与 Algorithm 1 相同</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th></th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+          <tr><td class="row-header">in_0</td><td> 1.60</td><td>-0.40</td><td> 0.96</td><td> 0.64</td></tr>
+          <tr><td class="row-header">in_1</td><td>-0.36</td><td> 3.60</td><td>-1.20</td><td> 0.60</td></tr>
+          <tr><td class="row-header">in_2</td><td> 0.36</td><td> 0.72</td><td>-2.25</td><td>-0.18</td></tr>
+          <tr><td class="row-header">in_3</td><td> 1.65</td><td>-1.98</td><td> 0.66</td><td> 2.42</td></tr>
+          <tr class="bank-divider"><td class="row-header">in_4</td><td>-0.84</td><td> 0.35</td><td> 0.70</td><td>-0.28</td></tr>
+          <tr><td class="row-header">in_5</td><td> 0.26</td><td>-2.60</td><td> 0.91</td><td> 2.34</td></tr>
+          <tr><td class="row-header">in_6</td><td> 1.38</td><td> 0.60</td><td>-0.18</td><td>-0.90</td></tr>
+          <tr><td class="row-header">in_7</td><td>-0.84</td><td> 0.42</td><td> 2.80</td><td> 0.70</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="matrix-container">
+      <div class="matrix-label">平均激活幅度 𝐀̄ [8]</div>
+      <div class="matrix-shape">per-input-channel, 从标定集统计</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th>ch</th><th>Ā</th></tr>
+          <tr><td>0</td><td>3.0</td></tr>
+          <tr><td>1</td><td>1.5</td></tr>
+          <tr><td>2</td><td>4.2</td></tr>
+          <tr><td>3</td><td>2.0</td></tr>
+          <tr><td>4</td><td>0.8</td></tr>
+          <tr><td>5</td><td>3.5</td></tr>
+          <tr><td>6</td><td>1.2</td></tr>
+          <tr><td>7</td><td>2.8</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+</div>
+
+<!-- 2.2 Step 2 -->
+<div class="step" data-step="2" id="a2-s2">
+  <div class="step-title">Per-channel 重要性打分 (A·W Product)</div>
+  <div class="step-desc">对每个输入通道 j，计算其对 dot product 的总贡献。不能只用 |Ā_j|，因为激活大的通道若乘以零权重，对结果无影响。</div>
+
+  <div class="formula">
+    I<sub>j</sub> = |Ā<sub>j</sub> · Σ<sub>i</sub> W'<sub>j,i</sub>| &nbsp;&nbsp; ∀j ∈ bank
+    <br><br>其中：
+    <br>&nbsp; • W'<sub>j,i</sub>：第 j 行第 i 列的权重（注意：没有对 W' 取绝对值！）
+    <br>&nbsp; • Σ<sub>i</sub> W'<sub>j,i</sub>：通道 j 与所有输出特征的权重之和（保留符号）
+    <br>&nbsp; • Ā<sub>j</sub>：通道 j 的平均激活幅度
+    <br>&nbsp; • |·|：对整个乘积取绝对值
+  </div>
+
+  <div class="error-note" style="margin-bottom:1rem;">
+    <div class="label">ADR-014 勘误</div>
+    ADR-014 描述为"连接权重<strong>绝对值</strong>之和" (Σ|W'|)，但论文公式是 Σ<sub>i</sub> W'<sub>j,i</sub>（不对 W' 元素取绝对值）。符号信息在求和时是有意义的——正负权重可能相互抵消，表明该通道对输出的净贡献小。取绝对值会丢失这个信息。
+  </div>
+
+  <p><strong>逐行计算 Σ<sub>i</sub> W'<sub>j,i</sub> 和 I<sub>j</sub>：</strong></p>
+  <div class="scroll-row">
+  <table class="matrix-table" style="margin:0.8rem 0;">
+    <tr><th>ch j</th><th>Ā<sub>j</sub></th><th>Σ<sub>i</sub> W'<sub>j,i</sub></th><th>计算过程</th><th>I<sub>j</sub> = |Ā<sub>j</sub> · Σ<sub>i</sub> W'<sub>j,i</sub>|</th></tr>
+    <tr><td>0</td><td>3.0</td><td>1.60−0.40+0.96+0.64 = 2.80</td><td>|3.0 × 2.80|</td><td class="cell-importance-high">8.40</td></tr>
+    <tr><td>1</td><td>1.5</td><td>−0.36+3.60−1.20+0.60 = 2.64</td><td>|1.5 × 2.64|</td><td>3.96</td></tr>
+    <tr><td>2</td><td>4.2</td><td>0.36+0.72−2.25−0.18 = −1.35</td><td>|4.2 × (−1.35)|</td><td class="cell-importance-high">5.67</td></tr>
+    <tr><td>3</td><td>2.0</td><td>1.65−1.98+0.66+2.42 = 2.75</td><td>|2.0 × 2.75|</td><td>5.50</td></tr>
+    <tr class="bank-divider"><td>4</td><td>0.8</td><td>−0.84+0.35+0.70−0.28 = −0.07</td><td>|0.8 × (−0.07)|</td><td>0.06</td></tr>
+    <tr><td>5</td><td>3.5</td><td>0.26−2.60+0.91+2.34 = 0.91</td><td>|3.5 × 0.91|</td><td>3.19</td></tr>
+    <tr><td>6</td><td>1.2</td><td>1.38+0.60−0.18−0.90 = 0.90</td><td>|1.2 × 0.90|</td><td>1.08</td></tr>
+    <tr><td>7</td><td>2.8</td><td>−0.84+0.42+2.80+0.70 = 3.08</td><td>|2.8 × 3.08|</td><td class="cell-importance-high">8.62</td></tr>
+  </table>
+  </div>
+
+  <div class="note-box">
+    <strong>关键观察</strong>：通道 2 的 Ā=4.2 是最大的，但其 I=5.67 不是最大——因为其权重之和 Σ=−1.35，正负权重相互抵消，净贡献小。如果只用 |Ā|，通道 2 会被错误地选为最重要。论文实验证实：仅用 |Ā| 会导致 "significant performance degradation"。
+  </div>
+</div>
+
+<!-- 2.3 Step 3 -->
+<div class="step" data-step="3" id="a2-s3">
+  <div class="step-title">Per-bank Per-channel Mask 生成</div>
+  <div class="step-desc">在每个 bank 内，按 I<sub>j</sub> 选 top-(1−s)×b = 2 个通道 → 高精度，剩余 2 个 → 低精度。注意：mask 是 <strong>per-channel</strong> 的（整行统一），不是 per-element。</div>
+
+  <div class="two-col">
+    <div>
+      <div class="matrix-container">
+        <div class="matrix-label">Bank 0 (ch 0~3)</div>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <tr><th>ch</th><th>I<sub>j</sub></th><th>精度</th></tr>
+            <tr><td>0</td><td class="cell-importance-high">8.40</td><td><span class="chip chip-high">HIGH</span></td></tr>
+            <tr><td>1</td><td>3.96</td><td><span class="chip chip-low">LOW</span></td></tr>
+            <tr><td>2</td><td class="cell-importance-high">5.67</td><td><span class="chip chip-high">HIGH</span></td></tr>
+            <tr><td>3</td><td>5.50</td><td><span class="chip chip-low">LOW</span></td></tr>
+          </table>
+        </div>
+      </div>
+      <div style="font-size:0.8rem;color:#78909c;margin-top:0.3rem;">
+        top 2 = ch 0 (8.40), ch 2 (5.67) → HIGH<br>
+        ch 3 (5.50) 仅差 0.17 但落入 LOW
+      </div>
+    </div>
+    <div>
+      <div class="matrix-container">
+        <div class="matrix-label">Bank 1 (ch 4~7)</div>
+        <div class="matrix-wrap">
+          <table class="matrix-table">
+            <tr><th>ch</th><th>I<sub>j</sub></th><th>精度</th></tr>
+            <tr><td>4</td><td>0.06</td><td><span class="chip chip-low">LOW</span></td></tr>
+            <tr><td>5</td><td class="cell-importance-high">3.19</td><td><span class="chip chip-high">HIGH</span></td></tr>
+            <tr><td>6</td><td>1.08</td><td><span class="chip chip-low">LOW</span></td></tr>
+            <tr><td>7</td><td class="cell-importance-high">8.62</td><td><span class="chip chip-high">HIGH</span></td></tr>
+          </table>
+        </div>
+      </div>
+      <div style="font-size:0.8rem;color:#78909c;margin-top:0.3rem;">
+        top 2 = ch 7 (8.62), ch 5 (3.19) → HIGH<br>
+        ch 4 (0.06) 几乎无贡献
+      </div>
+    </div>
+  </div>
+
+  <p style="margin-top:1rem;font-weight:600;">完整的 per-channel 精度掩码 𝐦：</p>
+  <div class="scroll-row">
+  <table class="matrix-table" style="margin:0.5rem 0;">
+    <tr><th>ch</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th></tr>
+    <tr>
+      <td class="row-header">精度</td>
+      <td class="cell-mask-true">HIGH</td>
+      <td class="cell-mask-false">LOW</td>
+      <td class="cell-mask-true">HIGH</td>
+      <td class="cell-mask-false">LOW</td>
+      <td class="cell-mask-false">LOW</td>
+      <td class="cell-mask-true">HIGH</td>
+      <td class="cell-mask-false">LOW</td>
+      <td class="cell-mask-true">HIGH</td>
+    </tr>
+  </table>
+  </div>
+
+  <div class="note-box">
+    <strong>与 Algorithm 1 的关键区别</strong>：Algorithm 1 的 mask 是 per-element 的（同一行不同列可以不同精度），Algorithm 2 的 mask 是 per-channel 的（整行统一精度）。因为激活值是运行时才能获得的，我们需要在通道维度做决策——"这个通道的激活值整体用高精度还是低精度"。
+  </div>
+</div>
+
+<!-- 2.4 Step 4 -->
+<div class="step" data-step="4" id="a2-s4">
+  <div class="step-title">权重量化</div>
+  <div class="step-desc">对权重 W' 进行量化。注意：这里量化的是<strong>权重</strong>，不是激活。权重量化为两个精度组以配合激活侧的通道分离。</div>
+
+  <div class="formula">
+    对每个 bank 𝐰:
+    &nbsp;&nbsp;(𝐰', 𝐬') ← Quant(𝐰, h<sub>high</sub>, h<sub>low</sub>)
+    <br>其中 HIGH 通道的权重用 INT8 量化，LOW 通道的权重用 INT4 量化
+  </div>
+
+  <p>以 Bank 0 为例，展示量化过程：</p>
+  <div class="card" style="margin:1rem 0;">
+    <p><strong>Bank 0, out_0 列</strong>：W' = [<strong>1.60</strong>, -0.36, <strong>0.36</strong>, 1.65]</p>
+    <div class="formula">
+      HIGH 通道 (in_0=1.60, in_2=0.36): scale = 1.60/127 = 0.0126
+      <br>&nbsp;&nbsp;in_0: round(1.60/0.0126) = 127, &nbsp;in_2: round(0.36/0.0126) = 29
+      <br>LOW 通道 (in_1=−0.36, in_3=1.65): scale = 1.65/7 = 0.2357
+      <br>&nbsp;&nbsp;in_1: round(−0.36/0.2357) = −2, &nbsp;in_3: round(1.65/0.2357) = 7
+    </div>
+    <p style="margin-top:0.5rem;"><strong>Bank 0, out_1 列</strong>：W' = [<strong>-0.40</strong>, 3.60, <strong>0.72</strong>, -1.98]</p>
+    <div class="formula">
+      HIGH 通道 (in_0=−0.40, in_2=0.72): scale = 0.72/127 = 0.0057
+      <br>&nbsp;&nbsp;in_0: round(−0.40/0.0057) = −71, &nbsp;in_2: round(0.72/0.0057) = 127
+      <br>LOW 通道 (in_1=3.60, in_3=−1.98): scale = 3.60/7 = 0.5143
+      <br>&nbsp;&nbsp;in_1: round(3.60/0.5143) = 7, &nbsp;in_3: round(−1.98/0.5143) = −4
+    </div>
+  </div>
+
+  <div class="note-box">
+    <strong>为什么权重也要分两组量化？</strong> 虽然 SQ-format 作用在激活侧，但为了让两条计算路径的精度匹配，权重也需要按同样的通道分组分别量化。HIGH 通道的权重用 INT8（与 INT8 激活相乘），LOW 通道的权重用 INT4（与 INT4 激活相乘）。注意：此处 mask 是 per-channel 的，因此同一行的所有列用同一精度量化——这与 Algorithm 1 的 per-element mask 不同。
+  </div>
+
+  <div class="error-note" style="margin-top:1rem;">
+    <div class="label">与 Algorithm 1 的量化差异</div>
+    Algorithm 1 中，mask 是 per-element 的，同一行不同列可能分属不同精度组，因此 <strong>scale 也是 per-column</strong> 的。Algorithm 2 中，mask 是 per-channel 的，整行统一精度，但不同行的数值范围不同，scale 仍然需要 <strong>per-column per-precision-group</strong> 计算。
+  </div>
+</div>
+
+<!-- 2.5 Step 5 — THE KEY STEP -->
+<div class="step" data-step="5" id="a2-s5">
+  <div class="step-title">权重行重排 (关键步骤)</div>
+  <div class="step-desc">将 W' 的行按照 mask 重排，使每个 bank 内高精度通道聚集在前、低精度通道聚集在后。这使得推理时可以用连续内存访问，而非 scatter/gather。</div>
+
+  <div class="card-highlight card" style="margin-bottom:1rem;">
+    <p><strong>重排规则</strong>：在<strong>每个 bank 内</strong>，将 HIGH 通道对应的行移到前面，LOW 通道对应的行移到后面。不同 bank 之间不交叉重排。</p>
+  </div>
+
+  <p><strong>Bank 0 重排过程</strong>：</p>
+  <div class="scroll-row">
+  <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin:0.8rem 0;">
+    <div class="matrix-container">
+      <div class="matrix-label">重排前 (Bank 0)</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th>ch</th><th>精度</th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+          <tr><td class="row-header">0</td><td class="cell-mask-true">H</td><td> 1.60</td><td>-0.40</td><td> 0.96</td><td> 0.64</td></tr>
+          <tr><td class="row-header">1</td><td class="cell-mask-false">L</td><td>-0.36</td><td> 3.60</td><td>-1.20</td><td> 0.60</td></tr>
+          <tr><td class="row-header">2</td><td class="cell-mask-true">H</td><td> 0.36</td><td> 0.72</td><td>-2.25</td><td>-0.18</td></tr>
+          <tr><td class="row-header">3</td><td class="cell-mask-false">L</td><td> 1.65</td><td>-1.98</td><td> 0.66</td><td> 2.42</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="reorder-arrow">→</div>
+
+    <div class="matrix-container">
+      <div class="matrix-label">重排后 (Bank 0)</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th>原ch</th><th>精度</th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+          <tr><td class="row-header">0</td><td class="cell-mask-true">H</td><td> 1.60</td><td>-0.40</td><td> 0.96</td><td> 0.64</td></tr>
+          <tr><td class="row-header">2</td><td class="cell-mask-true">H</td><td> 0.36</td><td> 0.72</td><td>-2.25</td><td>-0.18</td></tr>
+          <tr style="border-top:3px solid #546e7a;"><td class="row-header">1</td><td class="cell-mask-false">L</td><td>-0.36</td><td> 3.60</td><td>-1.20</td><td> 0.60</td></tr>
+          <tr><td class="row-header">3</td><td class="cell-mask-false">L</td><td> 1.65</td><td>-1.98</td><td> 0.66</td><td> 2.42</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <p style="font-size:0.85rem;color:#546e7a;margin-left:1rem;">
+    重排索引: [0, 1, 2, 3] → [0, 2, 1, 3] &nbsp; (H 通道 0,2 聚前; L 通道 1,3 聚后)
+  </p>
+
+  <p style="margin-top:1.5rem;"><strong>Bank 1 重排过程</strong>：</p>
+  <div class="scroll-row">
+  <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin:0.8rem 0;">
+    <div class="matrix-container">
+      <div class="matrix-label">重排前 (Bank 1)</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th>ch</th><th>精度</th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+          <tr><td class="row-header">4</td><td class="cell-mask-false">L</td><td>-0.84</td><td> 0.35</td><td> 0.70</td><td>-0.28</td></tr>
+          <tr><td class="row-header">5</td><td class="cell-mask-true">H</td><td> 0.26</td><td>-2.60</td><td> 0.91</td><td> 2.34</td></tr>
+          <tr><td class="row-header">6</td><td class="cell-mask-false">L</td><td> 1.38</td><td> 0.60</td><td>-0.18</td><td>-0.90</td></tr>
+          <tr><td class="row-header">7</td><td class="cell-mask-true">H</td><td>-0.84</td><td> 0.42</td><td> 2.80</td><td> 0.70</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="reorder-arrow">→</div>
+
+    <div class="matrix-container">
+      <div class="matrix-label">重排后 (Bank 1)</div>
+      <div class="matrix-wrap">
+        <table class="matrix-table">
+          <tr><th>原ch</th><th>精度</th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+          <tr><td class="row-header">5</td><td class="cell-mask-true">H</td><td> 0.26</td><td>-2.60</td><td> 0.91</td><td> 2.34</td></tr>
+          <tr><td class="row-header">7</td><td class="cell-mask-true">H</td><td>-0.84</td><td> 0.42</td><td> 2.80</td><td> 0.70</td></tr>
+          <tr style="border-top:3px solid #546e7a;"><td class="row-header">4</td><td class="cell-mask-false">L</td><td>-0.84</td><td> 0.35</td><td> 0.70</td><td>-0.28</td></tr>
+          <tr><td class="row-header">6</td><td class="cell-mask-false">L</td><td> 1.38</td><td> 0.60</td><td>-0.18</td><td>-0.90</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <p style="font-size:0.85rem;color:#546e7a;margin-left:1rem;">
+    重排索引: [4, 5, 6, 7] → [5, 7, 4, 6] &nbsp; (H 通道 5,7 聚前; L 通道 4,6 聚后)
+  </p>
+
+  <p style="margin-top:1.5rem;font-weight:600;">完整的重排后权重矩阵 𝐖'<sub>reordered</sub>：</p>
+  <div class="scroll-row">
+  <div class="matrix-container">
+    <div class="matrix-label">𝐖'<sub>reordered</sub> [8×4]</div>
+    <div class="matrix-shape">高精度行聚前，低精度行聚后，每个 bank 内</div>
+    <div class="matrix-wrap">
+      <table class="matrix-table">
+        <tr><th>原ch</th><th>精度</th><th>out_0</th><th>out_1</th><th>out_2</th><th>out_3</th></tr>
+        <tr><td class="row-header">0</td><td class="cell-high">H</td><td class="cell-high"> 1.60</td><td class="cell-high">-0.40</td><td class="cell-high"> 0.96</td><td class="cell-high"> 0.64</td></tr>
+        <tr><td class="row-header">2</td><td class="cell-high">H</td><td class="cell-high"> 0.36</td><td class="cell-high"> 0.72</td><td class="cell-high">-2.25</td><td class="cell-high">-0.18</td></tr>
+        <tr style="border-top:3px solid var(--high-border);"><td class="row-header">1</td><td class="cell-low">L</td><td class="cell-low">-0.36</td><td class="cell-low"> 3.60</td><td class="cell-low">-1.20</td><td class="cell-low"> 0.60</td></tr>
+        <tr><td class="row-header">3</td><td class="cell-low">L</td><td class="cell-low"> 1.65</td><td class="cell-low">-1.98</td><td class="cell-low"> 0.66</td><td class="cell-low"> 2.42</td></tr>
+        <tr class="bank-divider"><td class="row-header">5</td><td class="cell-high">H</td><td class="cell-high"> 0.26</td><td class="cell-high">-2.60</td><td class="cell-high"> 0.91</td><td class="cell-high"> 2.34</td></tr>
+        <tr><td class="row-header">7</td><td class="cell-high">H</td><td class="cell-high">-0.84</td><td class="cell-high"> 0.42</td><td class="cell-high"> 2.80</td><td class="cell-high"> 0.70</td></tr>
+        <tr style="border-top:3px solid var(--high-border);"><td class="row-header">4</td><td class="cell-low">L</td><td class="cell-low">-0.84</td><td class="cell-low"> 0.35</td><td class="cell-low"> 0.70</td><td class="cell-low">-0.28</td></tr>
+        <tr><td class="row-header">6</td><td class="cell-low">L</td><td class="cell-low"> 1.38</td><td class="cell-low"> 0.60</td><td class="cell-low">-0.18</td><td class="cell-low">-0.90</td></tr>
+      </table>
+    </div>
+  </div>
+  </div>
+
+  <div class="card-highlight card" style="margin-top:1rem;">
+    <p><strong>重排的物理意义</strong>：</p>
+    <ul style="margin:0.3rem 0 0 1.2rem;">
+      <li><strong>数据局部性</strong>：推理时高/低精度计算各取一段连续内存，无需 scatter/gather</li>
+      <li><strong>硬件友好</strong>：GPU Tensor Core 偏好连续内存访问，重排后两条路径可高效并行</li>
+      <li><strong>存储开销极小</strong>：只需存储 per-channel 1-bit mask。Llama-3-70B 仅 5.94 MB</li>
+      <li><strong>一次性操作</strong>：重排在 PTQ 阶段完成，推理时无需任何额外开销</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 2.6 Step 6 -->
+<div class="step" data-step="6" id="a2-s6">
+  <div class="step-title">推理时激活值拆分与计算</div>
+  <div class="step-desc">当激活 𝐀 到来时，使用预计算的 mask 将其拆分为高/低精度两部分，分别与重排后的权重做 matmul。</div>
+
+  <div class="inference-diagram">
+    <div class="inference-step">
+      <span class="num">1</span>
+      <span>激活 𝐀 到来 (原始通道顺序): 𝐀 = [a<sub>0</sub>, a<sub>1</sub>, a<sub>2</sub>, a<sub>3</sub>, a<sub>4</sub>, a<sub>5</sub>, a<sub>6</sub>, a<sub>7</sub>]</span>
+    </div>
+    <div class="inference-step">
+      <span class="num">2</span>
+      <span>使用预计算 mask 拆分激活 (与权重行重排相同的顺序):</span>
+    </div>
+    <div style="margin-left:2.5rem;margin-top:0.3rem;">
+      <div class="scroll-row">
+      <table class="matrix-table" style="margin:0.3rem 0;">
+        <tr><th></th><th>ch</th><th>精度</th><th>激活值</th></tr>
+        <tr><td rowspan="4" class="row-header" style="vertical-align:middle;">𝐀<sub>high</sub></td><td>0</td><td class="cell-mask-true">H</td><td class="cell-high">a<sub>0</sub></td></tr>
+        <tr><td>2</td><td class="cell-mask-true">H</td><td class="cell-high">a<sub>2</sub></td></tr>
+        <tr><td>5</td><td class="cell-mask-true">H</td><td class="cell-high">a<sub>5</sub></td></tr>
+        <tr><td>7</td><td class="cell-mask-true">H</td><td class="cell-high">a<sub>7</sub></td></tr>
+        <tr style="border-top:2px solid #546e7a;"><td rowspan="4" class="row-header" style="vertical-align:middle;">𝐀<sub>low</sub></td><td>1</td><td class="cell-mask-false">L</td><td class="cell-low">a<sub>1</sub></td></tr>
+        <tr><td>3</td><td class="cell-mask-false">L</td><td class="cell-low">a<sub>3</sub></td></tr>
+        <tr><td>4</td><td class="cell-mask-false">L</td><td class="cell-low">a<sub>4</sub></td></tr>
+        <tr><td>6</td><td class="cell-mask-false">L</td><td class="cell-low">a<sub>6</sub></td></tr>
+      </table>
+      </div>
+    </div>
+    <div class="inference-step">
+      <span class="num">3</span>
+      <span>对 𝐀<sub>high</sub> 用 INT8 量化，对 𝐀<sub>low</sub> 用 INT4 量化</span>
+    </div>
+    <div class="inference-step">
+      <span class="num">4</span>
+      <span>两条计算路径 (串行执行，但低精度路径更快):</span>
+    </div>
+  </div>
+
+  <div class="exec-path">
+    <div class="path-box path-high">
+      <div class="path-title">高精度路径 (INT8 × INT8)</div>
+      <p style="font-size:0.9rem;">
+        𝐖<sub>high_part</sub> [4×4] × 𝐀<sub>high</sub> [4×M]<br>
+        <span style="font-size:0.8rem;color:#546e7a;">
+          rows 0-1 (原ch 0,2) → Bank 0 HIGH<br>
+          rows 4-5 (原ch 5,7) → Bank 1 HIGH<br>
+          连续内存，直接 Tensor Core 读取
+        </span>
+      </p>
+    </div>
+    <div style="display:flex;align-items:center;font-size:1.5rem;color:#546e7a;font-weight:700;">+</div>
+    <div class="path-box path-low">
+      <div class="path-title">低精度路径 (INT4 × INT4)</div>
+      <p style="font-size:0.9rem;">
+        𝐖<sub>low_part</sub> [4×4] × 𝐀<sub>low</sub> [4×M]<br>
+        <span style="font-size:0.8rem;color:#546e7a;">
+          rows 2-3 (原ch 1,3) → Bank 0 LOW<br>
+          rows 6-7 (原ch 4,6) → Bank 1 LOW<br>
+          INT4 matmul, 2× 吞吐优势
+        </span>
+      </p>
+    </div>
+  </div>
+
+  <div class="result-box">
+    Y = W<sub>high_part</sub> ⊗ A<sub>high</sub> &nbsp;+&nbsp; W<sub>low_part</sub> ⊗ A<sub>low</sub>
+  </div>
+
+  <div class="note-box" style="margin-top:1rem;">
+    <strong>重排带来的关键优势</strong>：如果没有重排，高/低精度通道在 𝐖' 中交错排列，硬件需要 gather 操作来选取非连续的行。重排后，每个 bank 内 H 行和 L 行各自连续，硬件只需做简单的切片操作 (slice)——这在 GPU 上可以高效实现。
+  </div>
+
+  <div class="note-box">
+    <strong>SmoothQuant 对激活的影响</strong>：SmoothQuant 将激活的 outlier 通过 S 缩放迁移到权重侧。推理时，激活 A 需要除以 S（即 𝐀 = 𝐀<sub>raw</sub> / 𝐒），而权重已经乘以 S（𝐖' = 𝐒 · 𝐖）。因此，上面的 𝐀 是 SmoothQuant 缩放后的激活，其通道幅度分布已经比原始激活更均匀，这使得 per-channel 的 H/L 分组更有效。
+  </div>
+
+  <div class="card" style="margin-top:1rem;">
+    <p><strong>完整的推理数据流示意 (以单个输出特征 out_0 为例)</strong>：</p>
+    <div class="formula" style="font-size:0.85rem;line-height:2;">
+      out_0 = Σ<sub>j</sub> A<sub>j</sub> · W'<sub>j,0</sub>
+
+      <br><br>= (高精度路径)
+      <br>&nbsp;&nbsp;  a<sub>0</sub> · 1.60 &nbsp;+&nbsp; a<sub>2</sub> · 0.36 &nbsp;+&nbsp; a<sub>5</sub> · 0.26 &nbsp;+&nbsp; a<sub>7</sub> · (−0.84) &nbsp;&nbsp;[INT8 × INT8]
+
+      <br>+ (低精度路径)
+      <br>&nbsp;&nbsp;  a<sub>1</sub> · (−0.36) &nbsp;+&nbsp; a<sub>3</sub> · 1.65 &nbsp;+&nbsp; a<sub>4</sub> · (−0.84) &nbsp;+&nbsp; a<sub>6</sub> · 1.38 &nbsp;&nbsp;[INT4 × INT4]
+
+      <br><br>= 完整的 dot product，但高重要性部分用 INT8 精度保证，低重要性部分用 INT4 提升吞吐
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 class="subsection-title" id="a2-dynamic" style="margin-top:2.5rem;">Algorithm 2 动态策略 (对比)</h2>
+<!-- ============================================================ -->
+
+<div class="card">
+  <p>静态策略需要标定集预计算 mask，而动态策略在推理时对每个激活 tensor 做 <strong>per-bank TopK</strong>，按 |A| 绝对值选 top-(1−s) 通道。</p>
+
+  <div class="two-col">
+    <div>
+      <div class="path-box path-high" style="border-color:var(--accent);background:var(--accent-bg);">
+        <div class="path-title" style="color:var(--accent);">静态策略 (Algorithm 2)</div>
+        <ul style="margin:0.3rem 0 0 1.2rem;font-size:0.85rem;">
+          <li>Mask 在 PTQ 阶段预计算，存储为 per-channel 1-bit 向量</li>
+          <li>推理时只需查表 + 激活切片</li>
+          <li>存储开销极小 (Llama-3-70B 仅 5.94 MB)</li>
+          <li>权重可在 PTQ 阶段按 mask 重排</li>
+          <li>适合 GPU 部署</li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <div class="path-box" style="border-color:#4caf50;background:#e8f5e9;">
+        <div class="path-title" style="color:#2e7d32;">动态策略</div>
+        <ul style="margin:0.3rem 0 0 1.2rem;font-size:0.85rem;">
+          <li>推理时对每个激活 tensor 做 per-bank TopK（按 |A|）</li>
+          <li>无需标定集，mask 自适应每个输入</li>
+          <li>TopK 引入额外时延，需专用硬件流水线单元 (Figure 4)</li>
+          <li>权重无法预先重排（mask 动态变化）</li>
+          <li>需要专用 AI 加速器支持</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="note-box" style="margin-top:1rem;">
+    <strong>动态策略为什么用 |A| 而不是 A·W？</strong> 动态策略在推理时执行，无法访问权重 W（W 在 Tensor Core 中计算）。因此只能用 |A| 绝对值作为重要性指标。这也是论文推荐静态策略的原因之一——静态策略能利用 A·W 信息生成更准确的 mask。
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 class="section-title" id="diff">3. ADR-014 与论文差异 &amp; 勘误</h2>
+<!-- ============================================================ -->
+
+<div class="card">
+  <p>在仔细对比 ADR-014 与论文原文后，发现以下差异和需要注意之处：</p>
+
+  <table class="comparison-table" style="margin-top:1rem;">
+    <tr><th>维度</th><th>ADR-014 描述</th><th>论文原文</th><th>判定</th></tr>
+    <tr>
+      <td>Algorithm 2 重要性公式中 Σ<sub>i</sub> W'<sub>j,i</sub> 的描述</td>
+      <td>"连接权重<strong>绝对值</strong>之和" (即 Σ|W'|)</td>
+      <td>Σ<sub>i</sub> W'<sub>j,i</sub> (不对 W' 取绝对值，外层 |·| 取绝对值)</td>
+      <td style="color:#c62828;font-weight:600;">ADR-014 错误</td>
+    </tr>
+    <tr>
+      <td>Algorithm 1 mask 选择粒度</td>
+      <td>"within each column" of each bank</td>
+      <td>"select the top (1−s) fraction of weights within each column"</td>
+      <td style="color:#2e7d32;">一致</td>
+    </tr>
+    <tr>
+      <td>Algorithm 2 "Reorder rows of W'"</td>
+      <td>注意到伪代码写 "rows"，正文写 "columns"，解释为取决于 shape 约定</td>
+      <td>伪代码: "Reorder rows of W'"，正文: "columns of the weight matrices can be reordered"</td>
+      <td style="color:#e65100;">ADR-014 解释正确。W' ∈ R<sup>K×N</sup>，j 是行索引 = 输入通道，重排行 = 重排输入通道</td>
+    </tr>
+    <tr>
+      <td>Algorithm 2 量化的对象</td>
+      <td>"这里 quant 的是权重"</td>
+      <td>Quant(w, h<sub>high</sub>, h<sub>low</sub>) — 量化权重 w</td>
+      <td style="color:#2e7d32;">一致</td>
+    </tr>
+    <tr>
+      <td>vmask 值</td>
+      <td>INT2: vmask=2, UINT4: vmask=15</td>
+      <td>INT2: vmask=2, INT4 (Figure 1): vmask=15</td>
+      <td style="color:#e65100;">ADR-014 用 "UINT4" 不准确——论文用对称 INT4，但存储为无符号 4-bit，vmask=15 是无符号表示的哨兵</td>
+    </tr>
+    <tr>
+      <td>Algorithm 1 量化方式</td>
+      <td>"Quant 是 symmetric uniform quantization"</td>
+      <td>"we adopt the symmetric quantization"</td>
+      <td style="color:#2e7d32;">一致</td>
+    </tr>
+    <tr>
+      <td>等效比特数公式</td>
+      <td>y = (1−s) × h<sub>high</sub> + s × h<sub>low</sub></td>
+      <td>x = (1−s) × h<sub>high</sub> + s × h<sub>low</sub></td>
+      <td style="color:#2e7d32;">一致</td>
+    </tr>
+  </table>
+
+  <div class="error-note" style="margin-top:1.5rem;">
+    <div class="label">最重要的勘误：Σ|W'| vs ΣW'</div>
+    <p style="margin-top:0.3rem;">
+      论文公式 <code>I<sub>j</sub> = |Ā<sub>j</sub> · Σ<sub>i</sub> W'<sub>j,i</sub>|</code> 中，Σ<sub>i</sub> W'<sub>j,i</sub>
+      是<strong>带符号求和</strong>，不是对绝对值求和。这在实际中会产生显著差异：
+    </p>
+    <ul style="margin:0.3rem 0 0 1.2rem;font-size:0.9rem;">
+      <li>若通道 j 的权重正负抵消（如本例 ch 2: Σ = −1.35），说明该通道对输出的净贡献小</li>
+      <li>若取绝对值求和 (Σ|W'|)，则正负不抵消，会高估该通道的重要性</li>
+      <li>论文明确指出只用 |Ā| 就会导致 "significant performance degradation"，而 Σ|W'| 同样会丢失符号抵消信息</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 class="section-title" style="margin-top:3rem;">附：两个算法对比总结</h2>
+<!-- ============================================================ -->
+
+<div class="card">
+  <table class="comparison-table">
+    <tr><th>维度</th><th>Algorithm 1 (SQ on Weights)</th><th>Algorithm 2 (SQ on Activations)</th></tr>
+    <tr><td>应用场景</td><td>W(SQy)A4 — 权重用 SQ-format</td><td>W4A(SQy) — 激活用 SQ-format</td></tr>
+    <tr><td>重要性度量</td><td>I<sub>r,i</sub> = (W')² / (H⁻¹)² <br><em>per-element, GPTQ Hessian</em></td><td>I<sub>j</sub> = |Ā<sub>j</sub> · Σ<sub>i</sub> W'<sub>j,i</sub>| <br><em>per-channel, A·W product</em></td></tr>
+    <tr><td>Mask 粒度</td><td>per-element (同一行不同列可不同精度)</td><td>per-channel (整行统一精度)</td></tr>
+    <tr><td>Mask 选择范围</td><td>per-bank per-column</td><td>per-bank (整行)</td></tr>
+    <tr><td>量化对象</td><td>权重 (分两组量化)</td><td>权重 (分两组量化，配合激活)</td></tr>
+    <tr><td>存储方式</td><td>W<sub>high</sub> 紧凑 + W<sub>low</sub> 含 vmask</td><td>W<sub>quant</sub> + mask 向量</td></tr>
+    <tr><td>行重排</td><td>不需要 (mask 是 per-element)</td><td>必须 (mask 是 per-channel，重排使 H/L 行各自连续)</td></tr>
+    <tr><td>推理时开销</td><td>vmask 检测 + MUX (硬件)</td><td>mask 查表 + 激活切片 (软件即可)</td></tr>
+    <tr><td>计算路径</td><td>两条并行 (高精度稀疏 + 低精度稠密)</td><td>两条串行 (低精度先，高精度后；GPU 上可实现为并行流)</td></tr>
+    <tr><td>动态策略</td><td>不适用 (权重静态)</td><td>可选: 运行时 per-bank TopK 按 |A| (需专用硬件流水线)</td></tr>
+  </table>
+</div>
+
+<div style="text-align:center;margin:3rem 0 1rem;color:#9e9e9e;font-size:0.85rem;">
+  Generated from ADR-014 &amp; Huang et al. (2025) arXiv:2512.05409
+</div>
+
+</div><!-- container -->
+</body>
+</html>

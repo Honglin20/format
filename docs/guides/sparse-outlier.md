@@ -141,7 +141,7 @@ Per_channel 受益最大——outlier 隔离 + 逐 channel 精细 scale 形成�
 
 在 64×128 tensor 上，对 3 种分布的 int4 量化，扫描 outlier_ratio ∈ [0, 0.5]：
 
-![QSNR vs Ratio curve](sparse_qsnr_vs_ratio.png)
+![QSNR vs Ratio curve](visualizations/sparse_qsnr_vs_ratio.png)
 
 ### 解读
 

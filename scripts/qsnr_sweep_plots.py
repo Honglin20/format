@@ -9,8 +9,8 @@ Usage:
     PYTHONPATH=. python scripts/qsnr_sweep_plots.py
 
 Output:
-    docs/guides/example/qsnr-sweep-outlier-amplitude.png
-    docs/guides/example/qsnr-sweep-variance.png
+    docs/guides/visualizations/qsnr-sweep-outlier-amplitude.png
+    docs/guides/visualizations/qsnr-sweep-variance.png
 """
 
 import math
@@ -32,7 +32,7 @@ import matplotlib.ticker as ticker
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "docs", "guides", "example")
+OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "docs", "guides", "visualizations")
 
 INT4 = get_format("int4")
 INT8 = get_format("int8")

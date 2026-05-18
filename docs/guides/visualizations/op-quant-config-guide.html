@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpQuantConfig 完全指南 — microxcaling</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #1c2333; --border: #30363d;
+    --text: #e6edf3; --text2: #8b949e;
+    --accent: #58a6ff; --accent2: #3fb950; --accent3: #d2a8ff; --accent4: #f0883e; --accent5: #ff7b72; --accent6: #79c0ff;
+    --ch0: #ff6b6b; --ch1: #4ecdc4; --ch2: #45b7d1; --ch3: #96ceb4;
+    --outlier: #ff4757; --normal: #2ed573; --high: #ffa502; --low: #3742fa;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: -apple-system, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+  .hero { background: linear-gradient(135deg, #0d1117, #161b22, #1a1e2e); border-bottom: 1px solid var(--border); padding: 50px 40px 36px; text-align: center; }
+  .hero h1 { font-size: 2.6em; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent3), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 10px; }
+  .hero p { color: var(--text2); font-size: 1.1em; max-width: 700px; margin: 0 auto; }
+  .hero .tags { margin-top: 18px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .hero .tag { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 13px; font-size: 0.82em; color: var(--text2); }
+  .container { max-width: 1200px; margin: 0 auto; padding: 30px 24px; }
+  .nav { position: sticky; top: 0; z-index: 100; background: rgba(13,17,23,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 10px 24px; }
+  .nav-inner { max-width: 1200px; margin: 0 auto; display: flex; gap: 5px; overflow-x: auto; }
+  .nav a { color: var(--text2); text-decoration: none; font-size: 0.82em; padding: 5px 11px; border-radius: 6px; white-space: nowrap; transition: all 0.2s; }
+  .nav a:hover { color: var(--text); background: var(--surface2); }
+  .nav a.active { color: var(--accent); background: rgba(88,166,255,0.1); }
+  .section { margin-bottom: 48px; scroll-margin-top: 56px; }
+  .section-title { font-size: 1.7em; font-weight: 700; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .section-desc { color: var(--text2); margin-bottom: 22px; font-size: 1em; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 14px; transition: border-color 0.2s; }
+  .card:hover { border-color: var(--accent); }
+  .card-header { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; }
+  .card-title { font-size: 1.2em; font-weight: 600; }
+  .badge { font-size: 0.72em; padding: 2px 7px; border-radius: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .badge-format { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .badge-gran { background: rgba(63,185,80,0.15); color: var(--accent2); }
+  .badge-transform { background: rgba(210,168,255,0.15); color: var(--accent3); }
+  .badge-role { background: rgba(240,136,62,0.15); color: var(--accent4); }
+  .badge-sparse { background: rgba(255,123,114,0.15); color: var(--accent5); }
+  .badge-calib { background: rgba(121,192,255,0.15); color: var(--accent6); }
+  .card p { color: var(--text2); margin-bottom: 10px; font-size: 0.95em; }
+  .tensor-row { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
+  .tensor-label { font-weight: 600; min-width: 110px; color: var(--text2); font-size: 0.88em; }
+  .tensor-grid { display: inline-grid; gap: 2px; border-radius: 5px; overflow: hidden; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.76em; }
+  .tensor-cell { padding: 4px 6px; text-align: center; min-width: 50px; transition: transform 0.15s; }
+  .tensor-cell:hover { transform: scale(1.12); z-index: 2; }
+  .ch0 { background: rgba(255,107,107,0.2); color: var(--ch0); border-left: 3px solid var(--ch0); }
+  .ch1 { background: rgba(78,205,196,0.2); color: var(--ch1); border-left: 3px solid var(--ch1); }
+  .ch2 { background: rgba(69,183,209,0.2); color: var(--ch2); border-left: 3px solid var(--ch2); }
+  .ch3 { background: rgba(150,206,180,0.2); color: var(--ch3); border-left: 3px solid var(--ch3); }
+  .cell-outlier { background: rgba(255,71,87,0.25) !important; color: var(--outlier) !important; border-left-color: var(--outlier) !important; font-weight: 700; }
+  .cell-normal { background: rgba(46,213,115,0.15) !important; color: var(--normal) !important; border-left-color: var(--normal) !important; }
+  .cell-high { background: rgba(255,165,2,0.25) !important; color: var(--high) !important; border-left-color: var(--high) !important; font-weight: 600; }
+  .cell-low { background: rgba(55,66,250,0.2) !important; color: var(--low) !important; border-left-color: var(--low) !important; }
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; overflow-x: auto; font-size: 0.86em; line-height: 1.5; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; color: #e6edf3; }
+  .kw { color: #ff7b72; } .fn { color: #d2a8ff; } .str { color: #a5d6ff; } .num { color: #79c0ff; } .cmt { color: #8b949e; font-style: italic; } .cls { color: #ffa657; } .var { color: #e6edf3; }
+  .formula { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-family: 'SF Mono', monospace; font-size: 0.9em; margin: 10px 0; color: var(--accent6); overflow-x: auto; }
+  .cmp-table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 0.88em; }
+  .cmp-table th { background: var(--surface2); padding: 7px 10px; text-align: left; border-bottom: 2px solid var(--border); color: var(--text2); font-weight: 600; }
+  .cmp-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  .cmp-table tr:hover td { background: rgba(88,166,255,0.05); }
+  .role-diagram { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding: 14px; background: var(--surface2); border-radius: 8px; margin: 10px 0; font-family: 'SF Mono', monospace; font-size: 0.88em; }
+  .role-box { padding: 5px 12px; border-radius: 6px; font-weight: 600; font-size: 0.82em; }
+  .role-storage { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
+  .role-input { background: rgba(63,185,80,0.15); color: var(--accent2); border: 1px solid rgba(63,185,80,0.3); }
+  .role-weight { background: rgba(210,168,255,0.15); color: var(--accent3); border: 1px solid rgba(210,168,255,0.3); }
+  .role-bias { background: rgba(240,136,62,0.15); color: var(--accent4); border: 1px solid rgba(240,136,62,0.3); }
+  .role-output { background: rgba(255,123,114,0.15); color: var(--accent5); border: 1px solid rgba(255,123,114,0.3); }
+  .role-grad { background: rgba(121,192,255,0.1); color: var(--accent6); border: 1px dashed rgba(121,192,255,0.3); }
+  .op-sym { color: var(--text2); font-size: 1.1em; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 7px 0; font-size: 0.82em; }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-swatch { width: 13px; height: 13px; border-radius: 3px; }
+  .highlight-box { border-left: 3px solid var(--accent); padding-left: 12px; margin: 10px 0; }
+  .metric-good { color: var(--accent2); } .metric-warn { color: var(--accent4); } .metric-bad { color: var(--accent5); }
+  .sq-viz { display: flex; gap: 12px; align-items: stretch; margin: 14px 0; flex-wrap: wrap; }
+  .sq-col { flex: 1; min-width: 180px; background: var(--surface2); border-radius: 8px; padding: 12px; }
+  .sq-col-title { font-size: 0.82em; font-weight: 600; margin-bottom: 6px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; }
+  .tab { padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 0.86em; background: var(--surface2); color: var(--text2); border: 1px solid transparent; transition: all 0.2s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-color: var(--accent); background: rgba(88,166,255,0.08); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 14px; }
+  .verified { color: var(--accent2); font-size: 0.78em; }
+  @media (max-width: 768px) { .hero h1 { font-size: 1.7em; } .grid-2 { grid-template-columns: 1fr; } .tensor-grid { font-size: 0.68em; } .tensor-cell { padding: 3px 4px; min-width: 38px; } }
+  ::-webkit-scrollbar { width: 7px; height: 7px; } ::-webkit-scrollbar-track { background: var(--bg); } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>OpQuantConfig 完全指南</h1>
+  <p>三轴量化方案 (Format &times; Granularity &times; Transform) + 算子级配置 + 稀疏 &amp; 校准策略</p>
+  <div class="tags">
+    <span class="tag">Format 轴</span><span class="tag">Granularity 轴</span><span class="tag">Transform 轴</span>
+    <span class="tag">OpQuantConfig 角色</span><span class="tag">Sparse / SQ</span><span class="tag">GPTQ</span>
+  </div>
+</div>
+
+<nav class="nav"><div class="nav-inner">
+  <a href="#overview" class="active">总览</a><a href="#int4-battle">int4 大比拼</a><a href="#format">Format</a><a href="#granularity">Granularity</a>
+  <a href="#transform">Transform</a><a href="#opconfig">OpQuantConfig</a><a href="#sparse">Sparse</a><a href="#group-sparse">Group Sparse</a>
+  <a href="#sq-format">SQ-Format</a><a href="#gptq">GPTQ</a><a href="#round-scale">Round &amp; Scale</a><a href="#session">Session</a>
+</div></nav>
+
+<div class="container">
+
+<!-- ===== OVERVIEW ===== -->
+<section class="section" id="overview">
+  <h2 class="section-title">📐 量化三轴总览</h2>
+  <p class="section-desc">量化 = Format &times; Granularity &times; Transform，三个轴正交组合。OpQuantConfig 在此基础上为每个张量角色分配独立的 QuantScheme。</p>
+  <div class="card">
+    <div class="role-diagram">
+      <span class="role-box" style="background:rgba(88,166,255,0.15);color:var(--accent)">x (FP32)</span>
+      <span class="op-sym">→</span>
+      <span class="role-box" style="background:rgba(210,168,255,0.15);color:var(--accent3)">Transform.forward(x)</span>
+      <span class="op-sym">→</span>
+      <span class="role-box" style="background:rgba(63,185,80,0.15);color:var(--accent2)">Format.quantize(x<sub>t</sub>, granularity)</span>
+      <span class="op-sym">→</span>
+      <span class="role-box" style="background:rgba(210,168,255,0.15);color:var(--accent3)">Transform.inverse(x<sub>q</sub>)</span>
+      <span class="op-sym">→</span>
+      <span class="role-box" style="background:rgba(255,123,114,0.15);color:var(--accent5)">x<sub>q</sub> (量化后)</span>
+    </div>
+    <pre><span class="cmt"># 统一入口</span>
+<span class="kw">from</span> <span class="cls">src.quantize.elemwise</span> <span class="kw">import</span> <span class="fn">quantize</span>
+<span class="var">x_q</span> = <span class="fn">quantize</span>(<span class="var">x</span>, <span class="var">scheme</span>)  <span class="cmt"># scheme = format × granularity × transform</span></pre>
+  </div>
+  <div class="card">
+    <h3 style="margin-bottom:10px">示例张量 W (4&times;4) — 本页统一使用 <span class="verified">✓ 数值已验证</span></h3>
+    <div class="tensor-row">
+      <span class="tensor-label">FP32 原始</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0">0.12</span><span class="tensor-cell ch0">-0.85</span><span class="tensor-cell ch0">0.33</span><span class="tensor-cell ch0">0.07</span>
+        <span class="tensor-cell ch1">2.41</span><span class="tensor-cell ch1">-0.19</span><span class="tensor-cell ch1">1.56</span><span class="tensor-cell ch1">-0.44</span>
+        <span class="tensor-cell ch2">-0.03</span><span class="tensor-cell ch2">0.71</span><span class="tensor-cell ch2">-1.28</span><span class="tensor-cell ch2">0.55</span>
+        <span class="tensor-cell ch3">0.98</span><span class="tensor-cell ch3">-0.62</span><span class="tensor-cell ch3">0.15</span><span class="tensor-cell ch3">-0.38</span>
+      </div>
+    </div>
+    <div class="legend">
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--ch0)"></span> Channel 0 (amax=0.85)</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--ch1)"></span> Channel 1 (amax=2.41, outlier!)</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--ch2)"></span> Channel 2 (amax=1.28)</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--ch3)"></span> Channel 3 (amax=0.98)</div>
+    </div>
+    <p>Channel 1 有大 outlier (2.41)，是粒度/sparse/GPTQ 方案的核心挑战。</p>
+  </div>
+</section>
+
+<!-- ===== INT4 BATTLE ===== -->
+<section class="section" id="int4-battle">
+  <h2 class="section-title">⚔️ int4 配置大比拼 — 同一 tensor，不同方案 <span class="verified">✓ 全部实测</span></h2>
+  <p class="section-desc">以 int4 为基础格式，展示粒度、sparse、transform、GPTQ 的实际效果。MSE 越小越好。</p>
+  <div class="card" style="border-color: var(--accent2);">
+    <table class="cmp-table">
+      <tr><th>配置</th><th>Channel 0</th><th>Channel 1</th><th>Channel 2</th><th>Channel 3</th><th>MSE</th></tr>
+      <tr>
+        <td><strong>FP32 (参考)</strong></td>
+        <td style="color:var(--ch0)">0.12, -0.85, 0.33, 0.07</td>
+        <td style="color:var(--ch1)">2.41, -0.19, 1.56, -0.44</td>
+        <td style="color:var(--ch2)">-0.03, 0.71, -1.28, 0.55</td>
+        <td style="color:var(--ch3)">0.98, -0.62, 0.15, -0.38</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td>int4 per_tensor (POT)</td>
+        <td style="color:var(--ch0)">0.00, -1.00, 0.50, 0.00</td>
+        <td style="color:var(--ch1)">2.50, 0.00, 1.50, -0.50</td>
+        <td style="color:var(--ch2)">0.00, 0.50, -1.50, 0.50</td>
+        <td style="color:var(--ch3)">1.00, -0.50, 0.00, -0.50</td>
+        <td class="metric-bad">0.0169</td>
+      </tr>
+      <tr>
+        <td>int4 per_channel</td>
+        <td style="color:var(--ch0)">0.00, -0.75, 0.25, 0.00</td>
+        <td style="color:var(--ch1)">2.50, 0.00, 1.50, -0.50</td>
+        <td style="color:var(--ch2)">0.00, 0.75, -1.25, 0.50</td>
+        <td style="color:var(--ch3)">1.00, -0.50, 0.25, -0.50</td>
+        <td class="metric-warn">0.0083</td>
+      </tr>
+      <tr>
+        <td>int4 per_ch + Hadamard</td>
+        <td style="color:var(--ch0)">0.13, -0.88, 0.38, 0.13</td>
+        <td style="color:var(--ch1)">2.50, -0.50, 1.50, -0.50</td>
+        <td style="color:var(--ch2)">0.00, 0.75, -1.25, 0.50</td>
+        <td style="color:var(--ch3)">0.88, -0.63, 0.13, -0.38</td>
+        <td class="metric-warn">0.0084</td>
+      </tr>
+      <tr>
+        <td>int4 per_ch + sparse(25%)</td>
+        <td style="color:var(--ch0)">0.13, -0.75, 0.31, 0.06</td>
+        <td style="color:var(--ch1)">2.50, 0.00, 1.50, -0.50</td>
+        <td style="color:var(--ch2)">0.00, 0.75, -1.25, 0.50</td>
+        <td style="color:var(--ch3)">1.00, -0.63, 0.13, -0.38</td>
+        <td class="metric-good">0.0043</td>
+      </tr>
+      <tr>
+        <td>int4 per_ch + sparse + outlier=int8</td>
+        <td style="color:var(--ch0)">0.13, -0.84, 0.31, 0.06</td>
+        <td style="color:var(--ch1)">2.41, 0.00, 1.50, -0.50</td>
+        <td style="color:var(--ch2)">0.00, 0.75, -1.28, 0.50</td>
+        <td style="color:var(--ch3)">0.98, -0.63, 0.13, -0.38</td>
+        <td class="metric-good">0.0031</td>
+      </tr>
+      <tr>
+        <td>int4 per_ch + group_sparse(int8, 25%)</td>
+        <td style="color:var(--ch0)">0.00, -0.75, 0.25, 0.00</td>
+        <td style="color:var(--ch1)">2.41, -0.19, 1.56, -0.44</td>
+        <td style="color:var(--ch2)">0.00, 0.75, -1.25, 0.50</td>
+        <td style="color:var(--ch3)">1.00, -0.50, 0.25, -0.50</td>
+        <td class="metric-good">0.0051</td>
+      </tr>
+      <tr>
+        <td>SQ-format (int4+int8, sparsity=0.5)</td>
+        <td style="color:var(--ch0)">0.13, -0.84, 0.38, 0.13</td>
+        <td style="color:var(--ch1)">2.41, -0.25, 1.56, -0.44</td>
+        <td style="color:var(--ch2)">0.00, 0.72, -1.28, 0.56</td>
+        <td style="color:var(--ch3)">0.97, -0.63, 0.13, -0.38</td>
+        <td class="metric-good">0.0007</td>
+      </tr>
+      <tr>
+        <td>int8 per_tensor (参考基线)</td>
+        <td style="color:var(--ch0)">0.13, -0.84, 0.34, 0.06</td>
+        <td style="color:var(--ch1)">2.41, -0.19, 1.56, -0.44</td>
+        <td style="color:var(--ch2)">-0.03, 0.72, -1.28, 0.56</td>
+        <td style="color:var(--ch3)">0.97, -0.63, 0.16, -0.38</td>
+        <td class="metric-good">0.00005</td>
+      </tr>
+    </table>
+    <div class="highlight-box">
+      <p><strong>关键洞察</strong>：int4 per_tensor 的 MSE 是 per_channel 的 2 倍，因为 outlier (2.41) 拉高全局 scale。sparse 和 SQ-format 能将 MSE 再降低 2~10 倍。Hadamard 在此小 tensor 上效果有限，在大模型上优势更明显。</p>
+      <p style="font-size:0.82em;color:var(--text2)">SQ-format MSE=0.00067，int8 per_tensor MSE=0.00005。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== FORMAT ===== -->
+<section class="section" id="format">
+  <h2 class="section-title">🎯 Format 轴 — 数值格式</h2>
+  <p class="section-desc">Format 决定每个数值用多少 bit、如何分配指数/尾数位。</p>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-format">Integer</span><span class="card-title">IntFormat — 整数量化</span></div>
+    <p>符号-幅度表示 (ebits=0)。量化时需先归一化到 [-1,1] 再取整。int4 的 9 个量化级别：</p>
+    <div style="display:flex;gap:2px;flex-wrap:wrap;font-family:monospace;font-size:0.78em;margin:8px 0">
+      <span style="background:rgba(255,71,87,0.2);color:var(--outlier);padding:3px 6px;border-radius:3px">-1.00</span>
+      <span style="background:rgba(255,107,107,0.12);padding:3px 6px;border-radius:3px">-0.75</span>
+      <span style="background:rgba(255,107,107,0.08);padding:3px 6px;border-radius:3px">-0.50</span>
+      <span style="background:rgba(255,107,107,0.05);padding:3px 6px;border-radius:3px">-0.25</span>
+      <span style="background:rgba(128,128,128,0.1);padding:3px 6px;border-radius:3px">0.00</span>
+      <span style="background:rgba(46,213,115,0.05);padding:3px 6px;border-radius:3px">0.25</span>
+      <span style="background:rgba(46,213,115,0.08);padding:3px 6px;border-radius:3px">0.50</span>
+      <span style="background:rgba(46,213,115,0.12);padding:3px 6px;border-radius:3px">0.75</span>
+      <span style="background:rgba(46,213,115,0.2);color:var(--normal);padding:3px 6px;border-radius:3px">1.00</span>
+    </div>
+    <table class="cmp-table">
+      <tr><th>格式</th><th>bit</th><th>量化级别数</th><th>max_norm</th><th>典型场景</th></tr>
+      <tr><td><code>int8</code></td><td>8</td><td>257</td><td>1.75</td><td>权重/激活默认</td></tr>
+      <tr><td><code>int4</code></td><td>4</td><td>9</td><td>1.75</td><td>权重压缩、W4A8</td></tr>
+      <tr><td><code>int2</code></td><td>2</td><td>3</td><td>1.50</td><td>极限压缩、研究</td></tr>
+    </table>
+    <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>(<span class="var">format</span>=<span class="str">"int4"</span>)  <span class="cmt"># 默认 per_tensor</span></pre>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-format">Float</span><span class="card-title">FPFormat — 浮点量化 (MX sub-byte)</span></div>
+    <p>有指数位，动态范围大，不需要归一化。per_block 路径使用 MX 共享指数。</p>
+    <table class="cmp-table">
+      <tr><th>格式</th><th>ebits</th><th>mbits</th><th>max_norm</th><th>特点</th></tr>
+      <tr><td><code>fp8_e4m3</code></td><td>4</td><td>5</td><td>448</td><td>MX 推荐格式，无 Inf/NaN</td></tr>
+      <tr><td><code>fp8_e5m2</code></td><td>5</td><td>4</td><td>57344</td><td>范围最大，有 Inf/NaN，适合梯度</td></tr>
+      <tr><td><code>fp6_e3m2</code></td><td>3</td><td>4</td><td>6</td><td>MX 6-bit 偏指数</td></tr>
+      <tr><td><code>fp4_e2m1</code></td><td>2</td><td>3</td><td>6</td><td>MX 4-bit，需 per_block 使用</td></tr>
+    </table>
+    <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>.<span class="fn">mxfp</span>(<span class="str">"fp8_e4m3"</span>, <span class="var">block_size</span>=<span class="num">32</span>)</pre>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header"><span class="badge badge-format">Storage</span><span class="card-title">BFloat16 / Float16</span></div>
+      <p>用作 <code>storage</code>：所有量化点前先 cast 到存储精度。硬件原生支持。</p>
+      <pre><span class="var">cfg</span> = <span class="cls">OpQuantConfig</span>(
+    <span class="var">storage</span>=<span class="cls">QuantScheme</span>(<span class="var">format</span>=<span class="str">"bfloat16"</span>),
+    <span class="var">weight</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_channel</span>(<span class="str">"int4"</span>),
+)</pre>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="badge badge-format">LUT</span><span class="card-title">NF4Format (QLoRA)</span></div>
+      <p>4-bit 查找表格式，16 个非对称级别优化正态分布权重。零附近更密集。</p>
+      <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>.<span class="fn">mxfp</span>(<span class="str">"nf4"</span>, <span class="var">block_size</span>=<span class="num">64</span>)</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ===== GRANULARITY ===== -->
+<section class="section" id="granularity">
+  <h2 class="section-title">📏 Granularity 轴 — 量化粒度</h2>
+  <p class="section-desc">Granularity 决定 scale 的共享范围。粒度越细，scale 越贴合局部值域，精度越高。</p>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-gran">PER_TENSOR</span><span class="card-title">Per-Tensor — 全张量共享一个 scale</span></div>
+    <p>最简单，但 outlier 拉高 scale，拖累正常值。<strong>POT 模式下 scale=2.0 (而非 2.41)</strong>。</p>
+    <div class="tensor-row">
+      <span class="tensor-label">int4 量化结果</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0">0.00</span><span class="tensor-cell ch0">-1.00</span><span class="tensor-cell ch0">0.50</span><span class="tensor-cell ch0">0.00</span>
+        <span class="tensor-cell ch1">2.50</span><span class="tensor-cell ch1">0.00</span><span class="tensor-cell ch1">1.50</span><span class="tensor-cell ch1">-0.50</span>
+        <span class="tensor-cell ch2">0.00</span><span class="tensor-cell ch2">0.50</span><span class="tensor-cell ch2">-1.50</span><span class="tensor-cell ch2">0.50</span>
+        <span class="tensor-cell ch3">1.00</span><span class="tensor-cell ch3">-0.50</span><span class="tensor-cell ch3">0.00</span><span class="tensor-cell ch3">-0.50</span>
+      </div>
+    </div>
+    <div class="formula">scale = 2^round(log2(2.41)) = 2^1 = 2.0 → 归一化到 [-1,1] 后取 int4 → 反归一化 ×2.0</div>
+    <p>Channel 0 的值 (0.12, 0.33, 0.07) 归一化后全部 &lt;0.25，量化为 0 或 0.25 — <strong>浪费了 9 个级别中的 6 个</strong>。</p>
+    <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"int4"</span>)</pre>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-gran">PER_CHANNEL</span><span class="card-title">Per-Channel — 每 channel 独立 scale</span></div>
+    <p>每个输出 channel 各算一个 amax。解决了 outlier 问题，是权重量化的标准选择。</p>
+    <div class="tensor-row">
+      <span class="tensor-label">int4 量化结果</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0">0.00</span><span class="tensor-cell ch0">-0.75</span><span class="tensor-cell ch0">0.25</span><span class="tensor-cell ch0">0.00</span>
+        <span class="tensor-cell ch1">2.50</span><span class="tensor-cell ch1">0.00</span><span class="tensor-cell ch1">1.50</span><span class="tensor-cell ch1">-0.50</span>
+        <span class="tensor-cell ch2">0.00</span><span class="tensor-cell ch2">0.75</span><span class="tensor-cell ch2">-1.25</span><span class="tensor-cell ch2">0.50</span>
+        <span class="tensor-cell ch3">1.00</span><span class="tensor-cell ch3">-0.50</span><span class="tensor-cell ch3">0.25</span><span class="tensor-cell ch3">-0.50</span>
+      </div>
+    </div>
+    <div class="formula">scale₀=0.85 | scale₁=2.41 | scale₂=1.28 | scale₃=0.98 — 每个 channel 用自己的 scale</div>
+    <p>Channel 0 用 scale=0.85，0.33 归一化后为 0.39 → 量化为 0.25 → 反归一化为 0.25。比 per_tensor 的 0.50 精确得多。</p>
+    <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>.<span class="fn">per_channel</span>(<span class="str">"int4"</span>, <span class="var">axis</span>=<span class="num">0</span>)</pre>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-gran">PER_BLOCK (MX)</span><span class="card-title">Per-Block — MX 共享指数</span></div>
+    <p>沿指定轴切成 block_size 大小的块，每块共享一个 exponent。OCP MX 标准核心。</p>
+    <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>.<span class="fn">mxfp</span>(<span class="str">"fp4_e2m1"</span>, <span class="var">block_size</span>=<span class="num">32</span>)</pre>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-gran">BANK</span><span class="card-title">Per-Bank — 银行粒度</span></div>
+    <p>沿 bank_axis 切成 bank_size 段，每段内所有元素共享一个 scale。是 SQ-format 的基础粒度。bank_size 必须整除对应维度。</p>
+    <pre><span class="kw">from</span> <span class="cls">src.scheme.granularity</span> <span class="kw">import</span> <span class="cls">GranularitySpec</span>, <span class="cls">GranularityMode</span>
+<span class="cmt"># bank_size 必须整除 bank_axis 对应的维度</span>
+<span class="var">gran</span> = <span class="cls">GranularitySpec</span>(<span class="var">mode</span>=<span class="cls">GranularityMode</span>.<span class="var">BANK</span>, <span class="var">bank_size</span>=<span class="num">16</span>, <span class="var">bank_axis</span>=<span class="num">0</span>)
+<span class="var">scheme</span> = <span class="cls">QuantScheme</span>(<span class="var">format</span>=<span class="str">"int4"</span>, <span class="var">granularity</span>=<span class="var">gran</span>)</pre>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:8px">粒度对比</h3>
+    <table class="cmp-table">
+      <tr><th>模式</th><th>Scale 数量</th><th>精度</th><th>存储</th><th>用途</th></tr>
+      <tr><td>PER_TENSOR</td><td>1</td><td class="metric-bad">最低</td><td>最小</td><td>简单基准</td></tr>
+      <tr><td>PER_CHANNEL</td><td>C</td><td class="metric-good">高</td><td>小</td><td>权重首选</td></tr>
+      <tr><td>PER_BLOCK (MX)</td><td>num_blocks</td><td class="metric-good">高</td><td>中</td><td>MX 标准</td></tr>
+      <tr><td>BANK</td><td>num_banks</td><td class="metric-warn">中高</td><td>中</td><td>SQ-format 基础</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ===== TRANSFORM ===== -->
+<section class="section" id="transform">
+  <h2 class="section-title">🔄 Transform 轴 — 量化变换</h2>
+  <p class="section-desc">Transform 在量化前/后对张量做变换，降低量化误差。正交于 Format 和 Granularity。</p>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-transform">Hadamard</span><span class="card-title">HadamardTransform — 正交旋转</span></div>
+    <p>量化前做 Fast Walsh-Hadamard Transform，将信息均匀分散。自逆变换：H(H(x)) = x。</p>
+    <div class="sq-viz">
+      <div class="sq-col">
+        <div class="sq-col-title" style="color:var(--accent5)">问题：Outlier 集中</div>
+        <p style="font-size:0.82em;color:var(--text2)">少数元素值很大，大部分值很小。scale 被拉高，小值精度丢失。</p>
+      </div>
+      <div style="font-size:1.8em;color:var(--accent3);align-self:center">H(·)</div>
+      <div class="sq-col">
+        <div class="sq-col-title" style="color:var(--accent2)">解决：能量分散</div>
+        <p style="font-size:0.82em;color:var(--text2)">Hadamard 旋转后值分布更均匀，量化更高效。inverse 恢复原域。</p>
+      </div>
+    </div>
+    <h4 style="margin:10px 0 6px">实测效果 (int4 per_channel)</h4>
+    <div class="tensor-row">
+      <span class="tensor-label">+ Hadamard</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0">0.13</span><span class="tensor-cell ch0">-0.88</span><span class="tensor-cell ch0">0.38</span><span class="tensor-cell ch0">0.13</span>
+        <span class="tensor-cell ch1">2.50</span><span class="tensor-cell ch1">-0.50</span><span class="tensor-cell ch1">1.50</span><span class="tensor-cell ch1">-0.50</span>
+        <span class="tensor-cell ch2">0.00</span><span class="tensor-cell ch2">0.75</span><span class="tensor-cell ch2">-1.25</span><span class="tensor-cell ch2">0.50</span>
+        <span class="tensor-cell ch3">0.88</span><span class="tensor-cell ch3">-0.63</span><span class="tensor-cell ch3">0.13</span><span class="tensor-cell ch3">-0.38</span>
+      </div>
+    </div>
+    <p>MSE=0.0084 (vs 无 Hadamard 0.0083)。在此 4&times;4 小 tensor 上差异不大，但大模型上 Hadamard 通常带来显著 QSNR 提升。</p>
+    <pre><span class="kw">from</span> <span class="cls">src.transform</span> <span class="kw">import</span> <span class="cls">HadamardTransform</span>
+<span class="var">scheme</span> = <span class="cls">QuantScheme</span>(<span class="var">format</span>=<span class="str">"int4"</span>, <span class="var">granularity</span>=<span class="cls">GranularitySpec</span>.<span class="fn">per_channel</span>(<span class="num">0</span>), <span class="var">transform</span>=<span class="cls">HadamardTransform</span>())</pre>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-transform">SmoothQuant</span><span class="card-title">SmoothQuantTransform — 激活平滑</span></div>
+    <p>将激活的量化难度迁移到权重：激活 ÷ s，权重 × s。乘法结果不变，但激活分布更平滑。</p>
+    <div class="formula">s_j = max(|X_j|)^α / max(|W_j|)^(1-α) &nbsp;&nbsp; α=0.5 (默认)<br>forward(x) = x / s &nbsp;|&nbsp; inverse(x_q) = x_q (权重融合 W×s 补偿)</div>
+    <pre><span class="kw">from</span> <span class="cls">src.transform</span> <span class="kw">import</span> <span class="cls">SmoothQuantTransform</span>
+<span class="var">sq</span> = <span class="cls">SmoothQuantTransform</span>.<span class="fn">from_calibration</span>(<span class="var">X_act</span>=<span class="var">act_stats</span>, <span class="var">W</span>=<span class="var">weight</span>, <span class="var">alpha</span>=<span class="num">0.5</span>)
+<span class="cmt"># 权重融合 (校准时一次性操作，之后权重用 IdentityTransform)</span>
+<span class="kw">from</span> <span class="cls">src.transform.smooth_quant</span> <span class="kw">import</span> <span class="fn">fuse_smoothquant_weights</span>
+<span class="var">fused_model</span> = <span class="fn">fuse_smoothquant_weights</span>(<span class="var">model</span>, {<span class="str">"layer"</span>: <span class="var">sq</span>})</pre>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-transform">PreScale</span><span class="card-title">PreScaleTransform — 可学习预缩放</span></div>
+    <p>量化前 ×scale，量化后 ÷scale。scale 可为 nn.Parameter (LSQ 学习) 或 buffer (校准写入)。</p>
+    <pre><span class="kw">from</span> <span class="cls">src.transform</span> <span class="kw">import</span> <span class="cls">PreScaleTransform</span>
+<span class="var">scale</span> = <span class="var">torch</span>.<span class="var">nn</span>.<span class="cls">Parameter</span>(<span class="var">torch</span>.<span class="fn">ones</span>(<span class="num">128</span>))
+<span class="var">pre_scale</span> = <span class="cls">PreScaleTransform</span>(<span class="var">scale</span>, <span class="var">pot</span>=<span class="kw">True</span>, <span class="var">channel_axis</span>=<span class="num">-1</span>)</pre>
+  </div>
+</section>
+
+<!-- ===== OpQuantConfig ===== -->
+<section class="section" id="opconfig">
+  <h2 class="section-title">⚙️ OpQuantConfig — 算子级角色配置</h2>
+  <p class="section-desc">二级模型：storage (统一存储精度) + 每个 role 独立的 compute scheme。</p>
+
+  <div class="card">
+    <h3 style="margin-bottom:10px">Linear 层角色流</h3>
+    <div class="role-diagram">
+      <span class="role-box role-storage">storage (bf16)</span><span class="op-sym">→</span>
+      <span class="role-box role-input">input (int8)</span><span class="op-sym">×</span>
+      <span class="role-box role-weight">weight (int4)</span><span class="op-sym">+</span>
+      <span class="role-box role-bias">bias (int8)</span><span class="op-sym">→</span>
+      <span class="role-box role-output">output (int8)</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:10px">所有角色</h3>
+    <table class="cmp-table">
+      <tr><th>角色</th><th>作用</th><th>典型 Scheme</th></tr>
+      <tr><td><code class="role-storage">storage</code></td><td>存储精度 (先于所有角色执行)</td><td>BFloat16 per_tensor</td></tr>
+      <tr><td><code class="role-input">input</code></td><td>输入激活量化</td><td>int8 per_tensor</td></tr>
+      <tr><td><code class="role-weight">weight</code></td><td>权重量化</td><td>int4 per_channel</td></tr>
+      <tr><td><code class="role-bias">bias</code></td><td>偏置量化</td><td>int8 per_tensor</td></tr>
+      <tr><td><code class="role-output">output</code></td><td>输出量化</td><td>int8 per_tensor</td></tr>
+      <tr style="background:rgba(121,192,255,0.05)"><td><code class="role-grad">grad_output/input/weight/bias</code></td><td>QAT 梯度量化</td><td>fp8_e5m2 per_tensor</td></tr>
+      <tr style="background:rgba(121,192,255,0.03)"><td><code class="role-grad">input_gw / grad_output_gw / weight_gi / grad_output_gi</code></td><td>GEMM 重量化</td><td>fp8_e5m2</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:10px">常用配置</h3>
+    <div class="tabs" id="config-tabs">
+      <div class="tab active" data-tab="w4a8">W4A8</div>
+      <div class="tab" data-tab="w8a8">W8A8</div>
+      <div class="tab" data-tab="mx">MX</div>
+      <div class="tab" data-tab="qat">QAT</div>
+    </div>
+    <div class="tab-content active" id="tab-w4a8">
+      <pre><span class="var">cfg</span> = <span class="cls">OpQuantConfig</span>(
+    <span class="var">weight</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_channel</span>(<span class="str">"int4"</span>),
+    <span class="var">input</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"int8"</span>),
+)</pre>
+    </div>
+    <div class="tab-content" id="tab-w8a8">
+      <pre><span class="var">cfg</span> = <span class="cls">OpQuantConfig</span>(
+    <span class="var">weight</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_channel</span>(<span class="str">"int8"</span>),
+    <span class="var">input</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"int8"</span>),
+)</pre>
+    </div>
+    <div class="tab-content" id="tab-mx">
+      <pre><span class="var">cfg</span> = <span class="cls">OpQuantConfig</span>(
+    <span class="var">storage</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"bfloat16"</span>),
+    <span class="var">weight</span>=<span class="cls">QuantScheme</span>.<span class="fn">mxfp</span>(<span class="str">"fp8_e4m3"</span>, <span class="var">block_size</span>=<span class="num">32</span>),
+    <span class="var">input</span>=<span class="cls">QuantScheme</span>.<span class="fn">mxfp</span>(<span class="str">"fp8_e4m3"</span>, <span class="var">block_size</span>=<span class="num">32</span>),
+)</pre>
+    </div>
+    <div class="tab-content" id="tab-qat">
+      <pre><span class="var">cfg</span> = <span class="cls">OpQuantConfig</span>(
+    <span class="var">weight</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_channel</span>(<span class="str">"int4"</span>),
+    <span class="var">input</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"int8"</span>),
+    <span class="var">grad_output</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"fp8_e5m2"</span>),
+    <span class="var">grad_input</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"fp8_e5m2"</span>),
+    <span class="var">grad_weight</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"fp8_e5m2"</span>),
+)</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SPARSE ===== -->
+<section class="section" id="sparse">
+  <h2 class="section-title">💎 Sparse — 元素级稀疏量化</h2>
+  <p class="section-desc">outlier/normal 分组，各组用独立 scale。outlier 还可用高精度格式。</p>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-sparse">outlier_ratio</span><span class="card-title">per_channel + sparse (outlier_ratio=0.25)</span></div>
+    <div class="tensor-row">
+      <span class="tensor-label">Sparse 分组</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0 cell-normal">0.12</span><span class="tensor-cell ch0 cell-outlier">-0.85</span><span class="tensor-cell ch0 cell-normal">0.33</span><span class="tensor-cell ch0 cell-normal">0.07</span>
+        <span class="tensor-cell ch1 cell-outlier">2.41</span><span class="tensor-cell ch1 cell-normal">-0.19</span><span class="tensor-cell ch1 cell-outlier">1.56</span><span class="tensor-cell ch1 cell-normal">-0.44</span>
+        <span class="tensor-cell ch2 cell-normal">-0.03</span><span class="tensor-cell ch2 cell-normal">0.71</span><span class="tensor-cell ch2 cell-outlier">-1.28</span><span class="tensor-cell ch2 cell-normal">0.55</span>
+        <span class="tensor-cell ch3 cell-outlier">0.98</span><span class="tensor-cell ch3 cell-normal">-0.62</span><span class="tensor-cell ch3 cell-normal">0.15</span><span class="tensor-cell ch3 cell-normal">-0.38</span>
+      </div>
+    </div>
+    <div class="legend">
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--outlier)"></span> Outlier (每 channel top-1)</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--normal)"></span> Normal (剩余 75%)</div>
+    </div>
+    <div class="tensor-row">
+      <span class="tensor-label">量化结果 (全部int4)</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0">0.13</span><span class="tensor-cell ch0">-0.75</span><span class="tensor-cell ch0">0.31</span><span class="tensor-cell ch0">0.06</span>
+        <span class="tensor-cell ch1">2.50</span><span class="tensor-cell ch1">0.00</span><span class="tensor-cell ch1">1.50</span><span class="tensor-cell ch1">-0.50</span>
+        <span class="tensor-cell ch2">0.00</span><span class="tensor-cell ch2">0.75</span><span class="tensor-cell ch2">-1.25</span><span class="tensor-cell ch2">0.50</span>
+        <span class="tensor-cell ch3">1.00</span><span class="tensor-cell ch3">-0.63</span><span class="tensor-cell ch3">0.13</span><span class="tensor-cell ch3">-0.38</span>
+      </div>
+    </div>
+    <div class="tensor-row">
+      <span class="tensor-label">+ outlier=int8</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0">0.13</span><span class="tensor-cell ch0">-0.84</span><span class="tensor-cell ch0">0.31</span><span class="tensor-cell ch0">0.06</span>
+        <span class="tensor-cell ch1">2.41</span><span class="tensor-cell ch1">0.00</span><span class="tensor-cell ch1">1.50</span><span class="tensor-cell ch1">-0.50</span>
+        <span class="tensor-cell ch2">0.00</span><span class="tensor-cell ch2">0.75</span><span class="tensor-cell ch2">-1.28</span><span class="tensor-cell ch2">0.50</span>
+        <span class="tensor-cell ch3">0.98</span><span class="tensor-cell ch3">-0.63</span><span class="tensor-cell ch3">0.13</span><span class="tensor-cell ch3">-0.38</span>
+      </div>
+    </div>
+    <p>outlier=int8 后 MSE 从 0.0043 降至 0.0031 — outlier 位置精度接近 int8。</p>
+    <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>(
+    <span class="var">format</span>=<span class="str">"int4"</span>,
+    <span class="var">granularity</span>=<span class="cls">GranularitySpec</span>(<span class="var">mode</span>=<span class="cls">GranularityMode</span>.<span class="var">PER_CHANNEL</span>, <span class="var">channel_axis</span>=<span class="num">0</span>, <span class="var">outlier_ratio</span>=<span class="num">0.25</span>),
+    <span class="var">outlier_format</span>=<span class="str">"int8"</span>,
+)</pre>
+  </div>
+</section>
+
+<!-- ===== GROUP SPARSE ===== -->
+<section class="section" id="group-sparse">
+  <h2 class="section-title">📊 Group Sparse — 组级稀疏量化</h2>
+  <p class="section-desc">按 granularity 组的 amax 排名，top-k 组用高精度格式。与元素级 sparse 互斥。</p>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-sparse">group_format + group_ratio</span><span class="card-title">per_channel + group_sparse (int8, 25%)</span></div>
+    <div class="tensor-row">
+      <span class="tensor-label">量化结果</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0 cell-low">0.00</span><span class="tensor-cell ch0 cell-low">-0.75</span><span class="tensor-cell ch0 cell-low">0.25</span><span class="tensor-cell ch0 cell-low">0.00</span>
+        <span class="tensor-cell ch1 cell-high">2.41</span><span class="tensor-cell ch1 cell-high">-0.19</span><span class="tensor-cell ch1 cell-high">1.56</span><span class="tensor-cell ch1 cell-high">-0.44</span>
+        <span class="tensor-cell ch2 cell-low">0.00</span><span class="tensor-cell ch2 cell-low">0.75</span><span class="tensor-cell ch2 cell-low">-1.25</span><span class="tensor-cell ch2 cell-low">0.50</span>
+        <span class="tensor-cell ch3 cell-low">1.00</span><span class="tensor-cell ch3 cell-low">-0.50</span><span class="tensor-cell ch3 cell-low">0.25</span><span class="tensor-cell ch3 cell-low">-0.50</span>
+      </div>
+    </div>
+    <div class="legend">
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--high)"></span> Channel 1 (amax=2.41, top 25%) → int8</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--low)"></span> 其余 → int4</div>
+    </div>
+    <div class="formula">Channel amax: ch0=0.85, <strong>ch1=2.41</strong>, ch2=1.28, ch3=0.98 → top 25% = ch1 → int8</div>
+    <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>(
+    <span class="var">format</span>=<span class="str">"int4"</span>, <span class="var">granularity</span>=<span class="cls">GranularitySpec</span>.<span class="fn">per_channel</span>(<span class="num">0</span>),
+    <span class="var">group_format</span>=<span class="str">"int8"</span>, <span class="var">group_ratio</span>=<span class="num">0.25</span>,
+)</pre>
+  </div>
+</section>
+
+<!-- ===== SQ-FORMAT ===== -->
+<section class="section" id="sq-format">
+  <h2 class="section-title">🧬 SQ-Format — 结构化稀疏量化</h2>
+  <p class="section-desc">BANK 粒度 + Hessian 重要性选择高/低精度元素。实测 MSE 0.0007，接近 int8 水平。</p>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-sparse">sq_importance + sq_sparsity</span><span class="card-title">Algorithm 1 — 权重量化</span></div>
+    <div class="formula">I_{r,i} = W_{r,i}² · H_i² (Hessian importance)<br>每 bank 每列: top-(1-sparsity) → outlier_format (int8), 其余 → self (int4)</div>
+    <div class="tensor-row">
+      <span class="tensor-label">SQ-format 结果</span>
+      <div class="tensor-grid" style="grid-template-columns: repeat(4, auto);">
+        <span class="tensor-cell ch0">0.13</span><span class="tensor-cell ch0">-0.84</span><span class="tensor-cell ch0">0.38</span><span class="tensor-cell ch0">0.13</span>
+        <span class="tensor-cell ch1">2.41</span><span class="tensor-cell ch1">-0.25</span><span class="tensor-cell ch1">1.56</span><span class="tensor-cell ch1">-0.44</span>
+        <span class="tensor-cell ch2">0.00</span><span class="tensor-cell ch2">0.72</span><span class="tensor-cell ch2">-1.28</span><span class="tensor-cell ch2">0.56</span>
+        <span class="tensor-cell ch3">0.97</span><span class="tensor-cell ch3">-0.63</span><span class="tensor-cell ch3">0.13</span><span class="tensor-cell ch3">-0.38</span>
+      </div>
+    </div>
+    <p>MSE=0.0007 — 比 int4 per_channel (0.0083) 好 <strong>12 倍</strong>，接近 int8 per_tensor (0.00005)。</p>
+    <pre><span class="var">scheme</span> = <span class="cls">QuantScheme</span>(
+    <span class="var">format</span>=<span class="str">"int4"</span>,
+    <span class="var">granularity</span>=<span class="cls">GranularitySpec</span>(<span class="var">mode</span>=<span class="cls">GranularityMode</span>.<span class="var">BANK</span>, <span class="var">bank_size</span>=<span class="num">16</span>, <span class="var">bank_axis</span>=<span class="num">0</span>),
+    <span class="var">outlier_format</span>=<span class="str">"int8"</span>, <span class="var">sq_importance</span>=<span class="kw">True</span>, <span class="var">sq_sparsity</span>=<span class="num">0.5</span>,
+)
+<span class="cmt"># 量化时需传入 importance</span>
+<span class="var">x_q</span> = <span class="fn">quantize</span>(<span class="var">x</span>, <span class="var">scheme</span>, <span class="var">importance</span>=<span class="var">hessian_importance</span>)</pre>
+  </div>
+</section>
+
+<!-- ===== GPTQ ===== -->
+<section class="section" id="gptq">
+  <h2 class="section-title">🧮 GPTQ — Hessian 感知权重量化</h2>
+  <p class="section-desc">GPTQ 是校准优化器 (不是 QuantScheme 的轴)，用 Hessian 信息逐列量化权重，补偿量化误差对后续列的影响。</p>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-calib">Calibration</span><span class="card-title">GPTQOptimizer 原理</span></div>
+    <div class="sq-viz">
+      <div class="sq-col">
+        <div class="sq-col-title" style="color:var(--accent5)">朴素量化 (RTN)</div>
+        <p style="font-size:0.82em;color:var(--text2)">每列独立量化。第 j 列的误差影响后续列输出，但不考虑。</p>
+      </div>
+      <div class="sq-col">
+        <div class="sq-col-title" style="color:var(--accent2)">GPTQ</div>
+        <p style="font-size:0.82em;color:var(--text2)">量化第 j 列后，用 Hessian 将误差补偿到后续列。后续列"预吸收"误差。</p>
+      </div>
+    </div>
+    <table class="cmp-table">
+      <tr><th>参数</th><th>默认值</th><th>说明</th></tr>
+      <tr><td><code>block_size</code></td><td>128</td><td>每次 Hessian 更新处理的列数</td></tr>
+      <tr><td><code>damp_percent</code></td><td>0.01</td><td>Hessian 对角线阻尼 (防除零)</td></tr>
+      <tr><td><code>act_order</code></td><td>False</td><td>按 Hessian 降序量化列 (高影响列先量化)</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="badge badge-calib">Idempotent</span><span class="card-title">GPTQ 幂等性 — _weight_scale</span></div>
+    <p>GPTQ 量化后写入 <code>module._weight_scale</code> buffer，forward 读取该 buffer 传入 <code>quantize(w, scheme, scale=_weight_scale)</code>，确保 re-quantization 幂等。</p>
+    <div class="formula">修复前: GPTQ 写入 FP32 权重 → forward 重新算 amax → re-quant 不幂等 → 精度下降<br>修复后: GPTQ 写入 _weight_scale buffer → forward 读 buffer → 幂等 → int4-pc QSNR 13.3→17.1 dB</div>
+  </div>
+
+  <div class="card" style="border-color: var(--accent6);">
+    <h3 style="margin-bottom:8px">GPTQ 通过 QuantConfig 使用 (正确 API)</h3>
+    <pre><span class="cmt"># 方式 1: QuantConfig (推荐 — 高层 API)</span>
+<span class="kw">from</span> <span class="cls">src.session._config</span> <span class="kw">import</span> <span class="cls">QuantConfig</span>
+
+<span class="var">cfg</span> = <span class="cls">QuantConfig</span>(
+    <span class="var">w_format</span>=<span class="str">"int4"</span>,
+    <span class="var">w_granularity</span>=<span class="str">"per_channel"</span>,
+    <span class="var">w_axis</span>=<span class="num">0</span>,
+    <span class="var">gptq</span>=<span class="kw">True</span>,                <span class="cmt"># 启用 GPTQ</span>
+    <span class="var">gptq_block_size</span>=<span class="num">128</span>,       <span class="cmt"># Hessian 更新块大小</span>
+    <span class="var">gptq_damp</span>=<span class="num">0.01</span>,            <span class="cmt"># 阻尼系数</span>
+    <span class="var">gptq_act_order</span>=<span class="kw">True</span>,       <span class="cmt"># 按 Hessian 降序量化</span>
+)</pre>
+  </div>
+</section>
+
+<!-- ===== ROUND & SCALE ===== -->
+<section class="section" id="round-scale">
+  <h2 class="section-title">🔧 Round Mode &amp; Scale Storage</h2>
+  <div class="grid-2">
+    <div class="card">
+      <h3 style="margin-bottom:10px">Round Mode</h3>
+      <table class="cmp-table">
+        <tr><th>模式</th><th>说明</th><th>场景</th></tr>
+        <tr><td><code>"nearest"</code></td><td>四舍五入</td><td>默认</td></tr>
+        <tr><td><code>"even"</code></td><td>向偶数取整</td><td>无偏、bf16/fp16 硬件路径</td></tr>
+        <tr><td><code>"floor"</code></td><td>向下取整</td><td>保守估计</td></tr>
+        <tr><td><code>"dither"</code></td><td>随机抖动</td><td>消除量化偏差</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:10px">Scale Storage</h3>
+      <table class="cmp-table">
+        <tr><th>方式</th><th>说明</th><th>场景</th></tr>
+        <tr><td><code>"pot"</code> (默认)</td><td>Scale 取最近 2 的幂</td><td>硬件友好 (位移)</td></tr>
+        <tr><td><code>"fp32"</code></td><td>Scale 保持 FP32</td><td>最高精度</td></tr>
+      </table>
+      <div class="formula">POT: scale=2^round(log2(2.41))=2.0<br>FP32: scale=2.41 (精确)</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SESSION ===== -->
+<section class="section" id="session">
+  <h2 class="section-title">🚀 Session — 完整使用流程</h2>
+  <p class="section-desc">两种 API 风格：低层 OpQuantConfig (精细控制) 和高层 QuantConfig (字符串配置)。</p>
+
+  <div class="card">
+    <h3 style="margin-bottom:10px">方式 1: QuantConfig (推荐 — 字符串配置)</h3>
+    <pre><span class="kw">from</span> <span class="cls">src.session._config</span> <span class="kw">import</span> <span class="cls">QuantConfig</span>
+<span class="kw">from</span> <span class="cls">src.session._session</span> <span class="kw">import</span> <span class="fn">run_quantization</span>
+
+<span class="var">cfg</span> = <span class="cls">QuantConfig</span>(
+    <span class="var">w_format</span>=<span class="str">"int4"</span>,
+    <span class="var">w_granularity</span>=<span class="str">"per_channel"</span>,
+    <span class="var">w_axis</span>=<span class="num">0</span>,
+    <span class="var">a_format</span>=<span class="str">"int8"</span>,           <span class="cmt"># 激活格式 (None = 跟随 w_format)</span>
+    <span class="var">transform</span>=<span class="str">"hadamard"</span>,       <span class="cmt"># none | hadamard | smoothquant | prescale</span>
+    <span class="var">gptq</span>=<span class="kw">True</span>,                   <span class="cmt"># 启用 GPTQ</span>
+    <span class="var">outlier_ratio</span>=<span class="num">0.1</span>,            <span class="cmt"># 10% outlier</span>
+    <span class="var">outlier_format</span>=<span class="str">"int8"</span>,        <span class="cmt"># outlier 用 int8</span>
+    <span class="var">scale_storage</span>=<span class="str">"pot"</span>,          <span class="cmt"># pot | fp32</span>
+    <span class="var">storage_bits</span>=<span class="num">16</span>,              <span class="cmt"># bfloat16 存储精度</span>
+)
+
+<span class="var">qmodel</span>, <span class="var">fp32_model</span>, <span class="var">result</span> = <span class="fn">run_quantization</span>(<span class="var">model</span>, <span class="var">cfg</span>, <span class="var">calib_data</span>)</pre>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:10px">方式 2: OpQuantConfig (精细控制)</h3>
+    <pre><span class="kw">from</span> <span class="cls">src.scheme</span> <span class="kw">import</span> <span class="cls">QuantScheme</span>, <span class="cls">OpQuantConfig</span>
+<span class="kw">from</span> <span class="cls">src.transform</span> <span class="kw">import</span> <span class="cls">HadamardTransform</span>
+
+<span class="var">cfg</span> = <span class="cls">OpQuantConfig</span>(
+    <span class="var">storage</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"bfloat16"</span>),
+    <span class="var">weight</span>=<span class="cls">QuantScheme</span>(
+        <span class="var">format</span>=<span class="str">"int4"</span>,
+        <span class="var">granularity</span>=<span class="cls">GranularitySpec</span>.<span class="fn">per_channel</span>(<span class="num">0</span>),
+        <span class="var">transform</span>=<span class="cls">HadamardTransform</span>(),
+        <span class="var">outlier_format</span>=<span class="str">"int8"</span>,
+    ),
+    <span class="var">input</span>=<span class="cls">QuantScheme</span>.<span class="fn">per_tensor</span>(<span class="str">"int8"</span>),
+)
+
+<span class="var">qmodel</span>, <span class="var">fp32_model</span>, <span class="var">result</span> = <span class="fn">run_quantization</span>(<span class="var">model</span>, <span class="var">cfg</span>, <span class="var">calib_data</span>)</pre>
+  </div>
+
+  <div class="card" style="border-color: var(--accent2);">
+    <h3 style="margin-bottom:10px">配置速查表</h3>
+    <table class="cmp-table">
+      <tr><th>需求</th><th>Format</th><th>Granularity</th><th>Transform</th><th>额外参数</th></tr>
+      <tr><td>最简量化</td><td>int8</td><td>per_tensor</td><td>Identity</td><td>—</td></tr>
+      <tr><td>权重压缩</td><td>int4</td><td>per_channel</td><td>Identity</td><td>—</td></tr>
+      <tr><td>MX 标准</td><td>fp8_e4m3</td><td>per_block(32)</td><td>Identity</td><td>—</td></tr>
+      <tr><td>Outlier 保护</td><td>int4</td><td>per_channel</td><td>Identity</td><td>outlier_ratio=0.1, outlier_format="int8"</td></tr>
+      <tr><td>激活平滑</td><td>int8</td><td>per_tensor</td><td>SmoothQuant</td><td>alpha=0.5</td></tr>
+      <tr><td>能量分散</td><td>int4</td><td>per_channel</td><td>Hadamard</td><td>—</td></tr>
+      <tr><td>Group Sparse</td><td>int4</td><td>per_channel</td><td>Identity</td><td>group_format="int8", group_ratio=0.25</td></tr>
+      <tr><td>SQ 权重</td><td>int4</td><td>BANK(16)</td><td>Identity</td><td>sq_importance=True, sq_sparsity=0.5</td></tr>
+      <tr><td>GPTQ 校准</td><td>int4</td><td>per_channel</td><td>Identity</td><td>QuantConfig: gptq=True</td></tr>
+      <tr><td>QAT 训练</td><td>int4/int8</td><td>per_channel</td><td>Identity</td><td>+ grad_* = fp8_e5m2</td></tr>
+    </table>
+  </div>
+</section>
+
+</div>
+
+<script>
+document.querySelectorAll('.tabs').forEach(tabs => {
+  tabs.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const card = tab.closest('.card');
+      tab.closest('.tabs').querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      card.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+      card.querySelector(`#tab-${tab.dataset.tab}`).classList.add('active');
+    });
+  });
+});
+const sections = document.querySelectorAll('.section');
+const navLinks = document.querySelectorAll('.nav a');
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) navLinks.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + entry.target.id));
+  });
+}, { rootMargin: '-20% 0px -70% 0px' });
+sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>
