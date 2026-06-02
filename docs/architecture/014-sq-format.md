@@ -167,9 +167,9 @@ for each bank of W' [j_start : j_end] and Ā [j_start : j_end]:
 ```
 
 其中 `W'` 形状为 `[K, N]`（K = input channels, N = output features）：
-- `Σ_i W'_{j,i}`：输入通道 j 与所有输出特征的连接权重绝对值之和
+- `Σ_i W'_{j,i}`：输入通道 j 与所有输出特征的连接权重之和（带符号，非绝对值。正负权重可抵消，反映该通道对输出的净贡献）
 - `Ā_j`：通道 j 的平均激活幅度
-- 乘积度量该通道对 dot product 的总贡献
+- 乘积度量该通道对 dot product 的总贡献（外层 `|·|` 对整个乘积取绝对值）
 
 **为什么不能只用 |Ā_j|？** 论文明确发现这会导致 "significant performance degradation"——激活大的通道如果乘以零权重，对结果无影响。必须同时考虑权重侧。
 
