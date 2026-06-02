@@ -14,6 +14,7 @@ from src.analysis.observers import (
     DistributionObserver,
     HistogramObserver,
     MSEObserver,
+    PerBlockQSNRObserver,
     QSNRObserver,
 )
 from src.calibration.strategies import (
@@ -72,6 +73,7 @@ _OBSERVER_MAP: Dict[str, type] = {
     "histogram": HistogramObserver,
     "distribution": DistributionObserver,
     "fit": DistributionFitObserver,
+    "per_block_qsnr": PerBlockQSNRObserver,
 }
 
 _SMOOTH_INPUT_ROLES = frozenset({"input", "grad_input", "input_gw"})
