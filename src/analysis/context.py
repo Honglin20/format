@@ -6,6 +6,12 @@ from src.analysis.report import Report
 class AnalysisContext:
     """Context manager that attaches observers to ObservableMixin modules.
 
+    Also injects observers into the quantized model's ``_quantize_observers``
+    attribute so that ``_wrapped_forward`` (installed by ``quantize_model``)
+    passes them to ``QuantizeContext``, enabling inline-op observer tracking
+    for custom modules (e.g. a plain ``nn.Module`` that calls ``torch.matmul``)
+    without re-quantizing.
+
     Usage:
         with AnalysisContext(model, [QSNRObserver()]) as ctx:
             eval_fn(model, data)
@@ -18,15 +24,32 @@ class AnalysisContext:
         self.observers = observers or []
         self.warmup_batches = warmup_batches
         self._batch_count = 0
+        self._saved_quantize_observers = None
 
     def __enter__(self):
         for name, module in self.model.named_modules():
             if isinstance(module, ObservableMixin):
                 module._observers = self.observers
                 module._analysis_name = name
+
+        # Inject observers so QuantizeContext (inside _wrapped_forward)
+        # carries them for inline-op (torch.matmul etc.) observer events.
+        self._saved_quantize_observers = getattr(
+            self.model, '_quantize_observers', None)
+        self.model._quantize_observers = self.observers
+
         return self
 
     def __exit__(self, *args):
+        # Restore model._quantize_observers
+        if self._saved_quantize_observers is not None:
+            self.model._quantize_observers = self._saved_quantize_observers
+        else:
+            try:
+                delattr(self.model, '_quantize_observers')
+            except AttributeError:
+                pass
+
         for module in self.model.modules():
             if isinstance(module, ObservableMixin):
                 module._observers = []

@@ -1,4 +1,6 @@
 from src.viz._helpers import _compute_best_transform_per_layer
+from src.viz._layer_classify import classify_layer_type, filter_layers_by_type
+from src.viz._per_role import plot_per_layer_role_qsnr_line
 from src.viz.figures import (
     qsnr_line_chart,
     mse_box_plot,
@@ -9,6 +11,9 @@ from src.viz.figures import (
     transform_delta,
     error_vs_distribution,
     layer_type_qsnr,
+    per_layer_role_histogram,
+    smoothquant_distrib_comparison,
+    kurtosis_analysis,
     _get_acc_val,
 )
 from src.viz.figures import save_figure
@@ -36,6 +41,12 @@ __all__ = [
     "transform_delta",
     "error_vs_distribution",
     "layer_type_qsnr",
+    "per_layer_role_histogram",
+    "smoothquant_distrib_comparison",
+    "kurtosis_analysis",
+    "classify_layer_type",
+    "filter_layers_by_type",
+    "plot_per_layer_role_qsnr_line",
     "_compute_best_transform_per_layer",
     "_get_acc_val",
 ]

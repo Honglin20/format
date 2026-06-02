@@ -372,8 +372,8 @@ def test_export_onnx_nn_linear(tmp_path):
 
     m = onnx.load(str(tmp_path / "linear.onnx"))
     onnx.checker.check_model(m)
-    node_types = {n.op_type for n in m.graph.node}
-    assert "QuantizeLinear" in node_types or "MxQuantize" in node_types
+    node_types = {(n.domain or "onnx", n.op_type) for n in m.graph.node}
+    assert ("com.microxscaling", "Scale") in node_types or ("com.microxscaling", "Quantize") in node_types
 
 
 def test_export_onnx_inline_matmul(tmp_path):

@@ -1,38 +1,77 @@
 """
-ONNX export helper utilities.
+ONNX export helpers — unified three-axis (format × granularity × transform).
 
-_is_standard_format: int8/int4/int2/fp8 + non-PER_BLOCK → True (standard QDQ).
-_emit_quantize_node: emit QuantizeLinear/DequantizeLinear or MxQuantize node.
+Every quantization emits up to three nodes:
+  1. Scale node         — granularity axis (how scale is shared)
+  2. Quantize node      — format axis (element-wise quantization levels)
+  3. Transform node     — transform axis (optional, TBD)
+
+The graph pattern is always:
+  x → Scale(mode, ...) → Quantize(format, bits/ebits/mbits/levels) → out
+
+For truncation formats (bf16, fp16), Scale is not needed — Truncate is used directly.
 """
 import torch
 from src.scheme.granularity import GranularityMode
 
-# Formats that map to ONNX standard QDQ nodes (opset 13+).
-# Per-block variants of these formats are excluded (MX block style → custom op).
-_STANDARD_NAMES = {"int8", "int4", "fp8_e4m3", "fp8_e5m2"}
 
+def _emit_scale_node(g, x, granularity):
+    """Emit a Scale node representing the granularity axis.
 
-def _is_standard_format(scheme) -> bool:
-    """Return True if scheme should export as ONNX QDQ (QuantizeLinear/DequantizeLinear).
-
-    Rules:
-    - PER_BLOCK granularity → always False (MX block quantization → custom op)
-    - int8/int4/int2/fp8_e4m3/fp8_e5m2 + per_tensor or per_channel → True
-    - All other formats → False (custom op)
+    Returns the scale-tensor output that feeds into the Quantize node.
     """
-    if scheme.granularity.mode == GranularityMode.PER_BLOCK:
-        return False
-    return scheme.format.name in _STANDARD_NAMES
+    mode = granularity.mode
+    if mode == GranularityMode.PER_TENSOR:
+        return g.op("com.microxscaling::Scale", x,
+                    mode_s="per_tensor")
+    elif mode == GranularityMode.PER_CHANNEL:
+        return g.op("com.microxscaling::Scale", x,
+                    mode_s="per_channel",
+                    axis_i=granularity.channel_axis)
+    elif mode == GranularityMode.PER_BLOCK:
+        return g.op("com.microxscaling::Scale", x,
+                    mode_s="per_block",
+                    block_size_i=granularity.block_size,
+                    axis_i=granularity.block_axis)
+    raise ValueError(f"Unknown granularity mode: {mode}")
+
+
+def _emit_format_node(g, x, scale, format_obj):
+    """Emit a Quantize node representing the format axis.
+
+    The Quantize node does: normalize by scale → quantize to format levels
+    → rescale by scale (i.e. a full quantize+dequantize round-trip).
+    """
+    from src.formats.lookup_formats import LookupFormat
+    from src.formats.bf16_fp16 import BFloat16Format, Float16Format
+
+    if isinstance(format_obj, BFloat16Format):
+        return _emit_truncate(g, x, "bfloat16")
+    if isinstance(format_obj, Float16Format):
+        return _emit_truncate(g, x, "float16")
+    if isinstance(format_obj, LookupFormat):
+        levels = format_obj.levels.detach().cpu().tolist()
+        return g.op("com.microxscaling::Quantize", x, scale,
+                    format_s=format_obj.name,
+                    ebits_i=format_obj.ebits,
+                    mbits_i=format_obj.mbits,
+                    levels_f=levels)
+    return g.op("com.microxscaling::Quantize", x, scale,
+                format_s=format_obj.name,
+                ebits_i=format_obj.ebits,
+                mbits_i=format_obj.mbits)
+
+
+def _emit_truncate(g, x, dtype):
+    """Emit a Truncate node for bf16/fp16 — no scale needed."""
+    return g.op("com.microxscaling::Truncate", x, dtype_s=dtype)
 
 
 def _emit_quantize_node(g, x, scheme):
-    """Emit a quantize+dequantize pair in the ONNX graph for the given scheme.
+    """Emit the unified three-axis node sequence for a QuantScheme.
 
-    Delegates to scheme.format.export_onnx() — each format controls its own
-    ONNX representation (Strategy pattern, consistent with FormatBase.quantize()).
-
-    Standard formats → QuantizeLinear(x, scale=1.0, zp=0) → DequantizeLinear.
-    Non-standard / MX formats → com.microxscaling::MxQuantize custom node.
+    Delegates to scheme.format.export_onnx() which produces:
+      Scale(granularity) → Quantize/Truncate(format) → output
     """
     return scheme.format.export_onnx(g, x, scheme)
 

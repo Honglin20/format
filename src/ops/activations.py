@@ -20,6 +20,7 @@ from src.ops.vec_ops import (
     vec_exp, vec_recip, vec_tanh,
 )
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 
 _torch_relu = torch.relu
 _torch_relu_ = torch.relu_
@@ -36,16 +37,24 @@ _f_gelu = F.gelu
 
 class SigmoidFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, inner_scheme, quantize_backprop=True, name=None, emit_fn=None):
+    def forward(ctx, input, inner_scheme, quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         ctx.name = name
         ctx.emit_fn = emit_fn
 
-        fp_in = input
+        _input_ref = raw_input if raw_input is not None else input
         input = vec_quantize(input, inner_scheme)
-        if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, inner_scheme)
+        if emit_fn: emit_fn("input", 0, "input_pre_quant", _input_ref, input, inner_scheme)
         exp_nx = vec_exp(-input, inner_scheme)
         exp_nx_plus_1 = vec_add(exp_nx, 1., inner_scheme)
         output = vec_recip(exp_nx_plus_1, inner_scheme)
+
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                true_output = torch.sigmoid(_input_ref)
+            finally:
+                _exit_quantize()
+            emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         ctx.save_for_backward(output)
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
@@ -64,7 +73,7 @@ class SigmoidFunction(torch.autograd.Function):
         grad_sigmoid = vec_mul(output, temp, scheme)
         grad_input = vec_mul(grad_sigmoid, grad_output, scheme)
 
-        return (grad_input, None, None, None, None)
+        return (grad_input, None, None, None, None, None)
 
 
 class QuantizedSigmoid(_QuantizedModuleMixin, ObservableMixin, nn.Sigmoid):
@@ -75,12 +84,14 @@ class QuantizedSigmoid(_QuantizedModuleMixin, ObservableMixin, nn.Sigmoid):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
         result = SigmoidFunction.apply(
             input, inner_scheme, quantize_backprop, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result
 
@@ -91,14 +102,22 @@ class QuantizedSigmoid(_QuantizedModuleMixin, ObservableMixin, nn.Sigmoid):
 
 class TanhFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, inner_scheme, quantize_backprop=True, name=None, emit_fn=None):
+    def forward(ctx, input, inner_scheme, quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         ctx.name = name
         ctx.emit_fn = emit_fn
 
-        fp_in = input
+        _input_ref = raw_input if raw_input is not None else input
         input = vec_quantize(input, inner_scheme)
-        if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, inner_scheme)
+        if emit_fn: emit_fn("input", 0, "input_pre_quant", _input_ref, input, inner_scheme)
         output = vec_tanh(input, inner_scheme)
+
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                true_output = torch.tanh(_input_ref)
+            finally:
+                _exit_quantize()
+            emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         ctx.save_for_backward(output)
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
@@ -117,7 +136,7 @@ class TanhFunction(torch.autograd.Function):
         grad_tanh = vec_sub(1, output2, scheme)
         grad_input = vec_mul(grad_tanh, grad_output, scheme)
 
-        return (grad_input, None, None, None, None)
+        return (grad_input, None, None, None, None, None)
 
 
 class QuantizedTanh(_QuantizedModuleMixin, ObservableMixin, nn.Tanh):
@@ -128,12 +147,14 @@ class QuantizedTanh(_QuantizedModuleMixin, ObservableMixin, nn.Tanh):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
         emit_fn = self._emit if self._observers else None
         result = TanhFunction.apply(
             input, inner_scheme, quantize_backprop, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result
 
@@ -144,22 +165,34 @@ class QuantizedTanh(_QuantizedModuleMixin, ObservableMixin, nn.Tanh):
 
 class ReLUFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, inplace, inner_scheme, quantize_backprop=True, name=None, emit_fn=None):
+    def forward(ctx, input, inplace, inner_scheme, quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         ctx.name = name
         ctx.emit_fn = emit_fn
+        _input_ref = raw_input if raw_input is not None else input
+
+        if emit_fn:
+            emit_fn("input", 0, "input_pre_quant", _input_ref, input, inner_scheme)
+
+        # Pre-compute fp32 reference for observer
+        _true_out = None
+        if emit_fn:
+            _enter_quantize()
+            try:
+                _true_out = _torch_relu(_input_ref)
+            finally:
+                _exit_quantize()
 
         if inplace:
             ctx.mark_dirty(input)
             input = _torch_relu_(input)
-            fp_out = input
             output = vec_quantize(input, inner_scheme)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, inner_scheme)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_out, output, inner_scheme)
             input.copy_(output)
             output = input
         else:
             fp_out = _torch_relu(input)
             output = vec_quantize(fp_out, inner_scheme)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, inner_scheme)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_out, output, inner_scheme)
 
         mask = output > 0
         ctx.save_for_backward(mask)
@@ -178,7 +211,7 @@ class ReLUFunction(torch.autograd.Function):
         grad_input = vec_quantize(grad_input, scheme)
         if emit_fn: emit_fn("grad_input", 0, "grad_input_post_quant", fp_gi, grad_input, scheme)
 
-        return (grad_input, None, None, None, None, None)
+        return (grad_input, None, None, None, None, None, None)
 
 
 class QuantizedReLU(_QuantizedModuleMixin, ObservableMixin, nn.ReLU):
@@ -189,6 +222,7 @@ class QuantizedReLU(_QuantizedModuleMixin, ObservableMixin, nn.ReLU):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
@@ -196,6 +230,7 @@ class QuantizedReLU(_QuantizedModuleMixin, ObservableMixin, nn.ReLU):
         result = ReLUFunction.apply(
             input, self.inplace, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result
 
@@ -206,22 +241,34 @@ class QuantizedReLU(_QuantizedModuleMixin, ObservableMixin, nn.ReLU):
 
 class ReLU6Function(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, inplace, inner_scheme, quantize_backprop=True, name=None, emit_fn=None):
+    def forward(ctx, input, inplace, inner_scheme, quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         ctx.name = name
         ctx.emit_fn = emit_fn
+        _input_ref = raw_input if raw_input is not None else input
+
+        if emit_fn:
+            emit_fn("input", 0, "input_pre_quant", _input_ref, input, inner_scheme)
+
+        # Pre-compute fp32 reference for observer
+        _true_out = None
+        if emit_fn:
+            _enter_quantize()
+            try:
+                _true_out = _f_relu6(_input_ref)
+            finally:
+                _exit_quantize()
 
         if inplace:
             ctx.mark_dirty(input)
             input = _f_relu6(input, inplace=True)
-            fp_out = input
             output = vec_quantize(input, inner_scheme)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, inner_scheme)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_out, output, inner_scheme)
             input.copy_(output)
             output = input
         else:
             fp_out = _f_relu6(input)
             output = vec_quantize(fp_out, inner_scheme)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, inner_scheme)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_out, output, inner_scheme)
 
         mask = torch.logical_and(output > 0, output < 6)
         ctx.save_for_backward(mask)
@@ -240,7 +287,7 @@ class ReLU6Function(torch.autograd.Function):
         grad_input = vec_quantize(grad_input, scheme)
         if emit_fn: emit_fn("grad_input", 0, "grad_input_post_quant", fp_gi, grad_input, scheme)
 
-        return (grad_input, None, None, None, None, None)
+        return (grad_input, None, None, None, None, None, None)
 
 
 class QuantizedReLU6(_QuantizedModuleMixin, ObservableMixin, nn.ReLU6):
@@ -251,6 +298,7 @@ class QuantizedReLU6(_QuantizedModuleMixin, ObservableMixin, nn.ReLU6):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
@@ -258,6 +306,7 @@ class QuantizedReLU6(_QuantizedModuleMixin, ObservableMixin, nn.ReLU6):
         result = ReLU6Function.apply(
             input, self.inplace, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result
 
@@ -269,16 +318,24 @@ class QuantizedReLU6(_QuantizedModuleMixin, ObservableMixin, nn.ReLU6):
 class LeakyReLUFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, negative_slope, inplace, inner_scheme,
-                quantize_backprop=True, name=None, emit_fn=None):
+                quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         ctx.negative_slope = negative_slope
         ctx.name = name
         ctx.emit_fn = emit_fn
 
-        fp_in = input
+        _input_ref = raw_input if raw_input is not None else input
         q_in = vec_quantize(input, inner_scheme)
-        if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, q_in, inner_scheme)
+        if emit_fn: emit_fn("input", 0, "input_pre_quant", _input_ref, q_in, inner_scheme)
         output = _f_leaky_relu(q_in, negative_slope=negative_slope)
         output = vec_quantize(output, inner_scheme)
+
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                true_output = _f_leaky_relu(_input_ref, negative_slope=negative_slope)
+            finally:
+                _exit_quantize()
+            emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         if inplace:
             ctx.mark_dirty(input)
@@ -302,7 +359,7 @@ class LeakyReLUFunction(torch.autograd.Function):
         grad_neg = vec_mul(grad_output, ctx.negative_slope, scheme)
         grad_input = torch.where(mask, grad_output, grad_neg)
 
-        return (grad_input, None, None, None, None, None, None)
+        return (grad_input, None, None, None, None, None, None, None)
 
 
 class QuantizedLeakyReLU(_QuantizedModuleMixin, ObservableMixin, nn.LeakyReLU):
@@ -314,6 +371,7 @@ class QuantizedLeakyReLU(_QuantizedModuleMixin, ObservableMixin, nn.LeakyReLU):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
@@ -321,6 +379,7 @@ class QuantizedLeakyReLU(_QuantizedModuleMixin, ObservableMixin, nn.LeakyReLU):
         result = LeakyReLUFunction.apply(
             input, self.negative_slope, self.inplace,
             inner_scheme, quantize_backprop, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result
 
@@ -331,17 +390,25 @@ class QuantizedLeakyReLU(_QuantizedModuleMixin, ObservableMixin, nn.LeakyReLU):
 
 class SiLUFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, inplace, inner_scheme, quantize_backprop=True, name=None, emit_fn=None):
+    def forward(ctx, input, inplace, inner_scheme, quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         ctx.name = name
         ctx.emit_fn = emit_fn
 
-        fp_in = input
+        _input_ref = raw_input if raw_input is not None else input
         q_in = vec_quantize(input, inner_scheme)
-        if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, q_in, inner_scheme)
+        if emit_fn: emit_fn("input", 0, "input_pre_quant", _input_ref, q_in, inner_scheme)
         exp_nx = vec_exp(-q_in, inner_scheme)
         exp_nx_plus_1 = vec_add(exp_nx, 1., inner_scheme)
         sig_x = vec_recip(exp_nx_plus_1, inner_scheme)
         output = vec_mul(q_in, sig_x, inner_scheme)
+
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                true_output = _f_silu(_input_ref)
+            finally:
+                _exit_quantize()
+            emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
 
         if inplace:
             ctx.mark_dirty(input)
@@ -366,7 +433,7 @@ class SiLUFunction(torch.autograd.Function):
         grad_silu = vec_add(sig_x, temp, scheme)
         grad_input = vec_mul(grad_silu, grad_output, scheme)
 
-        return (grad_input, None, None, None, None, None)
+        return (grad_input, None, None, None, None, None, None)
 
 
 class QuantizedSiLU(_QuantizedModuleMixin, ObservableMixin, nn.SiLU):
@@ -377,6 +444,7 @@ class QuantizedSiLU(_QuantizedModuleMixin, ObservableMixin, nn.SiLU):
         self._init_quant_cfg(cfg, inner_scheme, quantize_backprop, name)
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
@@ -384,6 +452,7 @@ class QuantizedSiLU(_QuantizedModuleMixin, ObservableMixin, nn.SiLU):
         result = SiLUFunction.apply(
             input, self.inplace, inner_scheme,
             quantize_backprop, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result
 
@@ -395,14 +464,14 @@ class QuantizedSiLU(_QuantizedModuleMixin, ObservableMixin, nn.SiLU):
 class GELUFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, inner_scheme, first_order_gelu=False,
-                quantize_backprop=True, name=None, emit_fn=None):
+                quantize_backprop=True, name=None, emit_fn=None, raw_input=None):
         ctx.first_order_gelu = first_order_gelu
         ctx.name = name
         ctx.emit_fn = emit_fn
 
-        fp_in = input
+        _input_ref = raw_input if raw_input is not None else input
         q_in = vec_quantize(input, inner_scheme)
-        if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, q_in, inner_scheme)
+        if emit_fn: emit_fn("input", 0, "input_pre_quant", _input_ref, q_in, inner_scheme)
 
         if first_order_gelu:
             sigmoid_input = vec_mul(1.703125, q_in, inner_scheme)
@@ -417,13 +486,26 @@ class GELUFunction(torch.autograd.Function):
         phi = vec_add(phi, 1., inner_scheme)
         phi = vec_recip(phi, inner_scheme)
 
+        output = vec_mul(q_in, phi, inner_scheme)
+
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                if first_order_gelu:
+                    true_output = _input_ref * torch.sigmoid(1.703125 * _input_ref)
+                else:
+                    true_output = _input_ref * torch.sigmoid(1.59375 * (_input_ref + 0.044677734 * _input_ref**3))
+            finally:
+                _exit_quantize()
+            emit_fn("output", 0, "layer_total", true_output, output, inner_scheme)
+
         if quantize_backprop:
             ctx.save_for_backward(q_in, phi)
         else:
             ctx.save_for_backward(input, phi)
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
-        return vec_mul(q_in, phi, inner_scheme)
+        return output
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -450,7 +532,7 @@ class GELUFunction(torch.autograd.Function):
         grad_gelu = vec_add(phi, x_dphi, scheme)
         grad_input = vec_mul(grad_gelu, grad_output, scheme)
 
-        return (grad_input, None, None, None, None, None)
+        return (grad_input, None, None, None, None, None, None)
 
 
 class QuantizedGELU(_QuantizedModuleMixin, ObservableMixin, nn.GELU):
@@ -465,6 +547,7 @@ class QuantizedGELU(_QuantizedModuleMixin, ObservableMixin, nn.GELU):
         self.first_order_gelu = first_order_gelu
 
     def forward(self, input):
+        raw_input = input
         input = self._entry_quantize(input)
         inner_scheme = self.cfg.input
         quantize_backprop = self.cfg.grad_input is not None
@@ -472,5 +555,6 @@ class QuantizedGELU(_QuantizedModuleMixin, ObservableMixin, nn.GELU):
         result = GELUFunction.apply(
             input, inner_scheme, self.first_order_gelu,
             quantize_backprop, self._analysis_name, emit_fn,
+            raw_input,
         )
         return result

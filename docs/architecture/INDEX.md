@@ -11,3 +11,7 @@
 | 007 | [007-p6-cost-model.md](007-p6-cost-model.md) | Coarse Model 架构设计（包结构、Session 集成） |
 | 008 | [008-session-refactor.md](008-session-refactor.md) | Session 统一入口 + Output-Driven 架构（QuantConfig / Session / Study） ✅ 已实施 |
 | 009 | [009-quantize-nonlinear.md](009-quantize-nonlinear.md) | `quantize_nonlinear`：非线性算子统一量化策略（entry operand 对齐 matmul, 内部不变） |
+| 010 | [010-systematic-error-analysis.md](010-systematic-error-analysis.md) | 系统化误差分析闭环：Diagnose → Characterize → Intervene → Verify（四个 accessor + per-layer override） |
+| 011 | [011-sparse-generalization.md](011-sparse-generalization.md) | Sparse (outlier_ratio) 泛化到 per_tensor 和 per_channel：解除 PER_BLOCK 限制，保留在 GranularitySpec 不开第四轴 |
+| 012 | [012-bank-sparse-static-outlier-format.md](012-bank-sparse-static-outlier-format.md) | BANK 粒度 + Sparse 静态量化 + 可配置 Outlier Format（四阶段，已实施） |
+| 013 | [013-group-sparse-format-assignment.md](013-group-sparse-format-assignment.md) | Group Sparse — 按粒度组分配格式：per-group mask + group_format + group_ratio（六阶段，已实施） |

@@ -16,3 +16,7 @@ from .compare import compare_formats, ComparisonReport, higher_is_better
 from .eval_performance import evaluate_performance, PerformanceReport
 from .e2e import Comparator, compare_models, compare_sessions
 from .correlation import DistributionProfile, DistributionTaxonomy, DistributionFitTaxonomy, TaxonomyAccessor
+from ._smoothquant_distrib import (
+    SmoothQuantDistribComparison,
+    compare_smoothquant_distributions,
+)

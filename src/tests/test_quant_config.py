@@ -452,3 +452,123 @@ class TestResolveConfigErrors:
         desc = {"format": "int8", "granularity": "per_block"}
         with pytest.raises(ValueError, match="per_block granularity requires block_size"):
             resolve_config(desc)
+
+
+# ===========================================================================
+# QuantConfig: outlier_format / a_outlier_format fields
+# ===========================================================================
+
+class TestQuantConfigOutlierFormat:
+    def test_outlier_format_default_none(self):
+        cfg = QuantConfig()
+        assert cfg.outlier_format is None
+        assert cfg.a_outlier_format is None
+
+    def test_outlier_format_stored(self):
+        cfg = QuantConfig(outlier_format="int8")
+        assert cfg.outlier_format == "int8"
+
+    def test_invalid_outlier_format_raises(self):
+        with pytest.raises(ValueError, match="Unknown outlier_format"):
+            QuantConfig(outlier_format="no_such_format")
+
+    def test_outlier_format_type_error(self):
+        with pytest.raises(TypeError, match="outlier_format must be a string"):
+            QuantConfig(outlier_format=42)  # type: ignore[arg-type]
+
+    def test_a_outlier_format_stored(self):
+        cfg = QuantConfig(a_outlier_format="fp8_e4m3")
+        assert cfg.a_outlier_format == "fp8_e4m3"
+
+    def test_a_outlier_format_weight_only_raises(self):
+        with pytest.raises(ValueError, match="a_outlier_format.*weight_only"):
+            QuantConfig(w_format="nf4", weight_only=True, a_outlier_format="int8")
+
+    def test_outlier_format_without_sparse_ok(self):
+        """outlier_format set but outlier_ratio=0 — valid, just unused at runtime."""
+        cfg = QuantConfig(outlier_format="int8", outlier_ratio=0.0)
+        assert cfg.outlier_format == "int8"
+        assert cfg.outlier_ratio == 0.0
+
+    def test_to_op_config_outlier_format_on_weight(self):
+        """outlier_format → QuantScheme.outlier_format is set on weight and activation."""
+        cfg = QuantConfig(w_format="int4", outlier_format="int8", outlier_ratio=0.1)
+        result = cfg.to_op_config()
+        assert result.weight.outlier_format is not None
+        assert result.weight.outlier_format.name == "int8"
+        assert result.input.outlier_format is not None
+        assert result.input.outlier_format.name == "int8"
+
+    def test_to_op_config_a_outlier_format_overrides(self):
+        """a_outlier_format overrides outlier_format on activation scheme only."""
+        cfg = QuantConfig(
+            w_format="int4", a_format="int8",
+            outlier_format="fp8_e4m3",
+            a_outlier_format="nf4",
+            outlier_ratio=0.1,
+        )
+        result = cfg.to_op_config()
+        assert result.weight.outlier_format.name == "fp8_e4m3"
+        assert result.input.outlier_format.name == "nf4"
+
+    def test_to_op_config_outlier_format_none(self):
+        """No outlier_format → QuantScheme.outlier_format is None."""
+        cfg = QuantConfig(w_format="int4", outlier_ratio=0.1)
+        result = cfg.to_op_config()
+        assert result.weight.outlier_format is None
+        assert result.input.outlier_format is None
+
+    def test_a_outlier_format_falls_back_to_outlier_format(self):
+        """a_outlier_format=None → activation follows outlier_format."""
+        cfg = QuantConfig(w_format="int4", outlier_format="int8", outlier_ratio=0.1)
+        result = cfg.to_op_config()
+        assert result.input.outlier_format is not None
+        assert result.input.outlier_format.name == "int8"
+
+
+# ===========================================================================
+# resolve_config() — outlier_format backward-compat
+# ===========================================================================
+
+class TestResolveConfigOutlierFormat:
+    def test_outlier_format_in_descriptor(self):
+        desc = {
+            "format": "int4",
+            "granularity": "per_tensor",
+            "outlier_format": "int8",
+            "outlier_ratio": 0.1,
+        }
+        result = resolve_config(desc)
+        assert result.weight.outlier_format is not None
+        assert result.weight.outlier_format.name == "int8"
+
+    def test_a_outlier_format_in_descriptor(self):
+        desc = {
+            "format": "int4",
+            "granularity": "per_tensor",
+            "outlier_format": "fp8_e4m3",
+            "a_outlier_format": "int8",
+            "outlier_ratio": 0.1,
+        }
+        result = resolve_config(desc)
+        assert result.weight.outlier_format.name == "fp8_e4m3"
+        assert result.input.outlier_format.name == "int8"
+
+    def test_outlier_format_non_string_raises(self):
+        desc = {
+            "format": "int4",
+            "granularity": "per_tensor",
+            "outlier_format": 42,
+        }
+        with pytest.raises(TypeError, match="'outlier_format' must be a string"):
+            resolve_config(desc)
+
+    def test_a_outlier_format_weight_only_raises(self):
+        desc = {
+            "format": "int4",
+            "granularity": "per_tensor",
+            "a_outlier_format": "int8",
+            "weight_only": True,
+        }
+        with pytest.raises(ValueError, match="'a_outlier_format'.*weight_only"):
+            resolve_config(desc)

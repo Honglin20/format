@@ -1,28 +1,12 @@
 # SessionResult & 结果查看
 
+> 第 4 章 · [Session 文档索引](INDEX.md)
+
 `SessionResult` 是 Session 的输出，包含精度对比、逐层误差、原始 observer 数据。
 
-## eval_fn 合约
+**前提**：已阅读 [第 1 章 · Session 概览](overview.md)。
 
-多个方法依赖 `eval_fn`。它的签名和返回值必须满足：
-
-```python
-def eval_fn(model, data) -> dict[str, float]:
-    """在 data 上运行 model，返回 {指标名: 浮点值}。
-
-    model 是当前推理模式下的模型（fp32 或 quant），
-    data 是 eval_data（或 calib_data 当 eval_data 未单独传入时）。
-    """
-    ...
-    return {"loss": 0.1234}          # 单指标
-    # 或
-    return {"loss": 0.12, "acc": 0.95}  # 多指标
-```
-
-**约束**：
-- 返回值必须是 `Dict[str, float]` —— 字符串 key，浮点 value。
-- `accuracy_table()` / `summary()` 的准确率列 / `pareto_frontier(metric="accuracy")` 都依赖这个返回值。
-- 不传 `eval_fn` 时 `evaluate()` 阶段被跳过，`fp32_metrics` / `quant_metrics` / `delta` 全部为 `None`。
+> `eval_fn` 合约见 [Session 概览 § eval_fn 合约](overview.md#eval_fn-合约)。不传 `eval_fn` 时 `evaluate()` 阶段被跳过，`fp32_metrics` / `quant_metrics` / `delta` 全部为 `None`。
 
 ## 快速查看
 
@@ -81,18 +65,49 @@ print(df.sort_values("qsnr_db").head(5))
 | `top_k_qsnr()` | QSNRObserver（默认开启） | 返回空列表 |
 | `layer_report()` | QSNRObserver / MSEObserver（默认含 qsnr） | 返回含 NaN 的 DataFrame |
 
+### SessionResult.plot 方法
+
+| 方法 | 必要的 outputs key | 额外条件 |
+|------|-------------------|---------|
+| `qsnr_comparison()` | `"qsnr"`（默认） | — |
+| `crest_vs_qsnr(roles)` | `"distribution"` + `"qsnr"` | — |
+| `outlier_analysis(roles)` | `"distribution"`（推荐 `"qsnr"`） | — |
+| `per_block_qsnr(roles)` | `"qsnr"` | per_block 粒度 |
+| `correlation_heatmap()` | `"distribution"` + `"qsnr"` | — |
+| `cost_decomposition()` | cost 已执行 | — |
+| `role_distribution_comparison()` | `"distribution"` | — |
+| `kurtosis_analysis(roles)` | `"distribution"` + `"qsnr"` | — |
+| `histogram_overlay(top_k, role, layer, op_types, qsnr_type)` | `"histogram"` + `"qsnr"` | QSNR 可选，缺失时按幅度排序 |
+| `layer_histogram(layer, role)` | `"histogram"` | — |
+| `channel_heterogeneity(layer, role)` | `"qsnr"` | per-channel 模式 |
+| `per_layer_role_histogram(k)` | `"histogram"` 或 `"distribution"` | — |
+| `error_propagation(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `accumulated_vs_local(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `propagation_dag()` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `error_waterfall()` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `local_vs_accum_scatter()` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `per_role_qsnr_bars()` | `"qsnr"` | — |
+| `depth_decay(role)` | `"qsnr"` | — |
+| `per_layer_role_qsnr_line()` | `"qsnr"` | — |
+
 ### StudyReport.plot 方法
 
 | 方法 | 必要的 outputs key | 额外条件 |
 |------|-------------------|---------|
 | `qsnr_comparison()` | `"qsnr"`（默认） | — |
-| `crest_vs_qsnr(role)` | `"distribution"` + `"qsnr"` | — |
-| `outlier_analysis(role)` | `"distribution"`（推荐 `"qsnr"`） | — |
-| `per_block_qsnr(role)` | `"qsnr"` | per_block 粒度（`qsnr_db_std/min/max` 只在 per_block 时采集） |
+| `crest_vs_qsnr(roles)` | `"distribution"` + `"qsnr"` | — |
+| `outlier_analysis(roles)` | `"distribution"`（推荐 `"qsnr"`） | — |
+| `per_block_qsnr(roles)` | `"qsnr"` | per_block 粒度 |
 | `pareto_frontier(metric)` | cost 已执行 | `metric="accuracy"` 还需 `eval_fn` |
 | `correlation_heatmap()` | `"distribution"` + `"qsnr"` | — |
 | `cost_decomposition()` | cost 已执行 | — |
 | `role_distribution_comparison()` | `"distribution"` | — |
+| `kurtosis_analysis(roles)` | `"distribution"` + `"qsnr"` | — |
+| `histogram_overlay(top_k, role, layer, op_types, qsnr_type)` | `"histogram"` + `"qsnr"` | QSNR 可选，缺失时按幅度排序 |
+| `per_layer_role_histogram(k)` | `"histogram"` 或 `"distribution"` | — |
+| `per_layer_role_qsnr_line(role, qsnr_type)` | `"qsnr"` | — |
+| `error_propagation(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
+| `accumulated_vs_local(role)` | `"qsnr"`（默认） | `keep_fp32=True`（默认） |
 
 ### 表格输出
 
@@ -136,14 +151,18 @@ outputs=["qsnr", "distribution", "fit", "accuracy"]           # + distribution_f
 |------|------|------|
 | `result.name` | `str` | 配置名 |
 | `result.config` | `QuantConfig` | 原始配置对象 |
-| `result.qsnr_per_layer` | `Dict[str, float]` | `{层名: QSNR dB}` |
-| `result.mse_per_layer` | `Dict[str, float]` | `{层名: MSE}` |
+| `result.qsnr_per_layer` | `Dict[str, float]` | 本地 QSNR（observer 测量的逐层量化噪声，output role） |
+| `result.mse_per_layer` | `Dict[str, float]` | 本地 MSE（observer 测量，output role） |
+| `result.accum_qsnr_per_layer` | `Dict[str, float]` | 累积 QSNR（hook 测量，quant vs fp32 参考输出的逐层对比） |
+| `result.accum_mse_per_layer` | `Dict[str, float]` | 累积 MSE（hook 测量） |
 | `result.fp32_metrics` | `Dict[str, float]` | eval_fn 在 fp32 模型上的输出 |
 | `result.quant_metrics` | `Dict[str, float]` | eval_fn 在量化模型上的输出 |
 | `result.delta` | `Dict[str, float]` | 精度差（fp32 - quant） |
 | `result.observers_data` | `dict` | 原始 observer 数据（供高级分析） |
 | `result.cost` | `CostResult` | 量化模型延迟 & 内存估算 |
 | `result.cost_fp32` | `CostResult` | fp32 模型延迟 & 内存估算 |
+| `result.plot` | `SessionPlotAccessor` | 后置可视化（QSNR 对比、误差传播等） |
+| `result.report` | `AnalysisReport` | 分布分析（taxonomy / profile / sensitivity） |
 
 ## 方法速查
 
@@ -153,6 +172,10 @@ outputs=["qsnr", "distribution", "fit", "accuracy"]           # + distribution_f
 | `.accuracy_table()` | `str` | FP32 vs Quant 对比表（需 eval_fn） |
 | `.top_k_qsnr(k, reverse=False)` | `List[Tuple]` | QSNR 最差/最好的 k 层 |
 | `.layer_report()` | `DataFrame` | 逐层 QSNR + MSE（需 pandas） |
+| `.qsnr_per_role(role)` | `Tuple[Dict, Dict]` | 从 observers_data 提取指定 role 的 (qsnr, mse) |
+| `.save(dir)` | `None` | 保存结果到目录（CSV + 图表 + JSON） |
+| `.to_serializable()` | `dict` | 返回可 JSON 序列化的 dict |
+| `.tables` | `SessionTablesAccessor` | 终端表格输出（per_layer_qsnr, error_source_analysis） |
 
 ## 获取 observer 原始数据
 
@@ -164,3 +187,6 @@ for layer, roles in result.observers_data.items():
             for slice_key, metrics in slices.items():
                 print(f"{layer}/{role}/{stage}/{slice_key}: {metrics}")
 ```
+
+---
+← [上一章：精度优化方法](optimization.md) | [Session 文档索引](INDEX.md) | [下一章：可视化](plotting.md) →

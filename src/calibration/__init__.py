@@ -39,6 +39,7 @@ from src.calibration.pipeline import (
     save_scales,
     load_scales,
 )
+from src.calibration.gptq_optimizer import GPTQOptimizer
 
 __all__ = [
     "ScaleStrategy",
@@ -48,6 +49,7 @@ __all__ = [
     "KLScaleStrategy",
     "CalibrationPipeline",
     "CalibrationSession",
+    "GPTQOptimizer",
     "save_scales",
     "load_scales",
 ]

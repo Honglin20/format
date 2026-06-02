@@ -120,7 +120,14 @@ class SmoothQuantTransform(TransformBase):
     Applies per-channel scaling to activations before quantization::
 
         forward(x) = x / scale
-        inverse(x_q) = x_q * scale
+        inverse(x_q) = x_q  (identity — weight fusion compensates)
+
+    The activation stays in the smoothed domain after quantization.  The
+    per-channel weight compensation ``W * s`` (applied once at calibration
+    time via :func:`fuse_smoothquant_weights`) restores the correct matmul
+    output::
+
+        Q(x / s) @ Q(W * s)ᵗ  ≈  (x / s) @ (W * s)ᵗ  =  x @ Wᵗ
 
     The scale is immutable after construction. Use :meth:`from_calibration`
     to create from activation statistics and a weight tensor; this avoids
@@ -132,7 +139,7 @@ class SmoothQuantTransform(TransformBase):
     with shape ``(N, C, H, W)`` use ``channel_axis=1``.
     """
 
-    invertible = True
+    invertible = False
 
     def __init__(self, scale: Tensor, channel_axis: int = -1):
         """Create SmoothQuantTransform with a pre-computed per-channel scale.
@@ -171,6 +178,10 @@ class SmoothQuantTransform(TransformBase):
         ``scale`` is ``[C]``, so the view is ``[1, ..., C, ..., 1]`` with
         ``C`` placed at the channel axis position.
 
+        Moves the scale tensor to ``x.device`` when they differ, so a
+        CPU-calibrated SmoothQuantTransform works correctly when the model
+        and data are on GPU/NPU.
+
         Raises:
             ValueError: If ``self._channel_axis`` is out of bounds for ``x``.
         """
@@ -179,9 +190,13 @@ class SmoothQuantTransform(TransformBase):
                 f"channel_axis={self._channel_axis} is out of bounds for "
                 f"tensor with {x.ndim} dimensions"
             )
+        s = self._scale
+        if s.device != x.device:
+            s = s.to(device=x.device)
+            object.__setattr__(self, "_scale", s)
         shape = [1] * x.ndim
         shape[self._channel_axis] = -1
-        return self._scale.view(*shape)
+        return s.view(*shape)
 
     def forward(self, x: Tensor) -> Tensor:
         """Apply SmoothQuant: ``x / scale``.
@@ -196,16 +211,14 @@ class SmoothQuantTransform(TransformBase):
         return x / self._broadcast_scale(x)
 
     def inverse(self, x_q: Tensor) -> Tensor:
-        """Reverse SmoothQuant: ``x_q * scale``.
+        """Identity: the weight fusion (W*s) already compensates the input smoothing.
 
-        Args:
-            x_q: Quantized (or post-quantization) tensor with channel dim
-                 at ``self.channel_axis``.
-
-        Returns:
-            Scale-restored tensor (same shape as ``x_q``).
+        The activation stays in the smoothed domain (x/s) after quantization,
+        and the matmul (x/s) @ (W*s)^T produces the correct un-scaled output
+        without any inverse step. Applying x_q * s here would double-scale
+        relative to the weight compensation.
         """
-        return x_q * self._broadcast_scale(x_q)
+        return x_q
 
     @staticmethod
     def from_calibration(

@@ -1,5 +1,7 @@
 # 多配置对比 (Study)
 
+> 第 7 章 · [Session 文档索引](INDEX.md)
+
 `Study` 对多个 `QuantConfig` 并行运行 Session，产出 `StudyReport` 做聚合对比。
 一个 `Study` = N 个独立的 `Session` 运行 + 聚合对比表 + 多配置可视化。
 
@@ -17,7 +19,7 @@ configs = [
 ]
 
 report = Study(configs, model=model).run(calib_data, eval_fn=eval_fn)
-report.print_summary()
+print(report.summary())
 ```
 
 `Study` 对每个 config 创建一个独立 Session，model 自动 deepcopy 互不干扰。
@@ -255,3 +257,6 @@ report = Study(configs, model=model).run(calib_data, eval_fn=eval_fn,
 | `part_hierarchical` | 两级量化 (PoT pre-scale + MX per-block) |
 
 使用方式见 `examples/format_study_random.py`。
+
+---
+← [上一章：误差分析](analysis.md) | [Session 文档索引](INDEX.md) | [下一章：ONNX 导出](export.md) →

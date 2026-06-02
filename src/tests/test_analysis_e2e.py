@@ -156,7 +156,6 @@ class TestCompareModels:
 class TestCompareSessions:
     def test_returns_per_session_results(self):
         """compare_sessions runs one pass and returns per-session metrics."""
-        from src.session._session import _QuantSession
 
         class TinyModel(nn.Module):
             def __init__(self):
@@ -170,24 +169,16 @@ class TestCompareSessions:
         qmodel = TinyModel()
         qmodel.load_state_dict(fp32_model.state_dict())
 
-        # Create sessions with the same fp32_model
-        sess_a = _QuantSession(fp32_model, None)
-        sess_a.qmodel = qmodel
-        sess_b = _QuantSession(fp32_model, None)
-        sess_b.qmodel = qmodel
-
         data = torch.randn(8, 4)
         labels = torch.tensor([0, 1, 0, 1, 0, 1, 0, 1])
         loader = DataLoader(TensorDataset(data, labels), batch_size=4)
 
-        results = compare_sessions({"a": sess_a, "b": sess_b}, loader)
+        results = compare_sessions(fp32_model, {"a": qmodel, "b": qmodel}, loader)
         assert "fp32" in results
         assert "a" in results
         assert "b" in results
 
     def test_fp32_label_customizable(self):
-        from src.session._session import _QuantSession
-
         class TinyModel(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -196,14 +187,14 @@ class TestCompareSessions:
             def forward(self, x):
                 return self.fc(x)
 
-        m = TinyModel()
-        s = _QuantSession(m, None)
-        s.qmodel = m
+        fp32_model = TinyModel()
+        qmodel = TinyModel()
+        qmodel.load_state_dict(fp32_model.state_dict())
 
         data = torch.randn(4, 4)
         labels = torch.tensor([0, 1, 0, 1])
         loader = DataLoader(TensorDataset(data, labels), batch_size=4)
 
-        results = compare_sessions({"x": s}, loader, fp32_label="baseline")
+        results = compare_sessions(fp32_model, {"x": qmodel}, loader, fp32_label="baseline")
         assert "baseline" in results
         assert "fp32" not in results

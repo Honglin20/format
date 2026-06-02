@@ -4,6 +4,8 @@
 Shows all three comparison modes with user-defined eval functions.
 Run:  PYTHONPATH=. python examples/04_e2e_comparison.py
 """
+import copy
+
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -12,7 +14,6 @@ from src.formats.base import FormatBase
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
-from src.session import QuantSession
 from src.analysis.e2e import Comparator, compare_models, compare_sessions
 from src.session import quantize_model
 
@@ -46,7 +47,7 @@ def main():
     fp32 = ToyMLP()
     fp32.eval()
 
-    qmodel = quantize_model(ToyMLP(), cfg=make_cfg())
+    qmodel = quantize_model(copy.deepcopy(ToyMLP()), cfg=make_cfg())
     qmodel.load_state_dict(fp32.state_dict(), strict=False)
     qmodel.eval()
 
@@ -71,36 +72,36 @@ def main():
     print(f"   quant top1:  {result2['quant']['top1']:.4f}")
     print(f"   delta:       {result2['delta']['top1']:+.4f}")
 
-    # ── Mode 3: compare_sessions (multi-session) ──────────────────
+    # ── Mode 3: compare_sessions (multi-qmodel) ───────────────────
     print("\n3. compare_sessions — multiple quantization configs")
 
-    # Shared fp32 model (same weights)
     base_model = ToyMLP()
     base_model.eval()
 
-    # int8 session
-    s_int8 = QuantSession(ToyMLP(), make_cfg())
-    s_int8.eval()
-    s_int8.qmodel.load_state_dict(base_model.state_dict(), strict=False)
+    # int8 qmodel
+    q_int8 = quantize_model(copy.deepcopy(ToyMLP()), make_cfg())
+    q_int8.eval()
+    q_int8.load_state_dict(base_model.state_dict(), strict=False)
 
-    # fp8 session
+    # fp8 qmodel
     fp8_fmt = FormatBase.from_str("fp8_e4m3")
     fp8_scheme = QuantScheme(format=fp8_fmt, granularity=GranularitySpec.per_tensor())
     fp8_cfg = OpQuantConfig(input=fp8_scheme, weight=fp8_scheme, output=fp8_scheme)
-    s_fp8 = QuantSession(ToyMLP(), fp8_cfg)
-    s_fp8.eval()
-    s_fp8.qmodel.load_state_dict(base_model.state_dict(), strict=False)
+    q_fp8 = quantize_model(copy.deepcopy(ToyMLP()), fp8_cfg)
+    q_fp8.eval()
+    q_fp8.load_state_dict(base_model.state_dict(), strict=False)
 
-    # nf4 session
+    # nf4 qmodel
     nf4_fmt = FormatBase.from_str("nf4")
     nf4_scheme = QuantScheme(nf4_fmt, GranularitySpec.per_channel(axis=0))
     nf4_cfg = OpQuantConfig(weight=nf4_scheme)
-    s_nf4 = QuantSession(ToyMLP(), nf4_cfg)
-    s_nf4.eval()
-    s_nf4.qmodel.load_state_dict(base_model.state_dict(), strict=False)
+    q_nf4 = quantize_model(copy.deepcopy(ToyMLP()), nf4_cfg)
+    q_nf4.eval()
+    q_nf4.load_state_dict(base_model.state_dict(), strict=False)
 
     results = compare_sessions(
-        {"int8": s_int8, "fp8": s_fp8, "nf4": s_nf4},
+        base_model,
+        {"int8": q_int8, "fp8": q_fp8, "nf4": q_nf4},
         dl,
         eval_fn=top1_accuracy,
         directions={"top1": "higher"},
@@ -113,12 +114,13 @@ def main():
         r = results[name]
         print(f"   {name:<8} {r['fp32']['top1']:>10.4f} {r['quant']['top1']:>11.4f} {r['delta']['top1']:>+10.4f}")
 
-    # ── Mode 4: Session convenience method ────────────────────────
-    print("\n4. QuantSession.compare() — convenience method")
+    # ── Mode 4: compare_models convenience ────────────────────────
+    print("\n4. compare_models — convenience mode")
 
-    session = QuantSession(ToyMLP(), make_cfg())
-    session.eval()
-    result4 = session.compare(dl, eval_fn=top1_accuracy, directions={"top1": "higher"})
+    qmodel2 = quantize_model(copy.deepcopy(ToyMLP()), make_cfg())
+    qmodel2.eval()
+    result4 = compare_models(base_model, qmodel2, dl, eval_fn=top1_accuracy,
+                             directions={"top1": "higher"})
     print(f"   fp32  top1:  {result4['fp32']['top1']:.4f}")
     print(f"   quant top1:  {result4['quant']['top1']:.4f}")
     print(f"   delta:       {result4['delta']['top1']:+.4f}")

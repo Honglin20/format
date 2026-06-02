@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from src.formats.base import FormatBase
-from src.scheme.granularity import GranularitySpec
+from src.scheme.granularity import GranularityMode, GranularitySpec
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.transform import IdentityTransform, TransformBase
 from src.transform.hadamard import HadamardTransform
 from src.transform.smooth_quant import SmoothQuantTransform
 
-_VALID_GRANULARITIES = frozenset({"per_tensor", "per_channel", "per_block"})
+_VALID_GRANULARITIES = frozenset({"per_tensor", "per_channel", "per_block", "bank"})
 _VALID_TRANSFORMS = frozenset({"none", "hadamard", "smoothquant", "prescale", "adaptive"})
 _VALID_CALIBRATORS = frozenset({"mse", "max", "percentile", "kl"})
 _VALID_SCALE_STORAGES = frozenset({"fp32", "pot"})
@@ -29,16 +29,30 @@ def _resolve_granularity(
     granularity: str,
     block_size: Optional[int] = None,
     axis: int = -1,
+    outlier_ratio: float = 0.0,
 ) -> GranularitySpec:
     """Convert string granularity + optional block_size to GranularitySpec."""
     if granularity == "per_tensor":
-        return GranularitySpec.per_tensor()
+        return GranularitySpec(mode=GranularitySpec.per_tensor().mode,
+                               outlier_ratio=outlier_ratio)
     elif granularity == "per_channel":
-        return GranularitySpec.per_channel(axis=axis)
+        return GranularitySpec(mode=GranularitySpec.per_channel(axis=axis).mode,
+                               channel_axis=axis, outlier_ratio=outlier_ratio)
     elif granularity == "per_block":
         if block_size is None:
             raise ValueError("per_block granularity requires block_size")
-        return GranularitySpec.per_block(size=block_size, axis=axis)
+        return GranularitySpec(mode=GranularitySpec.per_block(size=block_size, axis=axis).mode,
+                               block_size=block_size, block_axis=axis,
+                               outlier_ratio=outlier_ratio)
+    elif granularity == "bank":
+        if block_size is None:
+            raise ValueError("bank granularity requires bank_size (pass as block_size)")
+        return GranularitySpec(
+            mode=GranularityMode.BANK,
+            bank_size=block_size,
+            bank_axis=axis,
+            outlier_ratio=outlier_ratio,
+        )
     else:
         raise ValueError(f"Unknown granularity: {granularity}")
 
@@ -168,14 +182,41 @@ class QuantConfig:
     storage_format: Optional[str] = None    # Explicit format name: "fp8_e4m3", "fp4_e2m1", etc.
                                             # Takes precedence over storage_bits/storage_kind.
 
+    # ---- GPTQ (Hessian-based weight-only quantization) ----
+    gptq: bool = False
+    gptq_block_size: int = 128
+    gptq_damp: float = 0.01
+    gptq_act_order: bool = False
+
+    # ---- Sparse (outlier bank) ----
+    outlier_ratio: float = 0.0              # ∈ [0, 1). >0: split each granularity group into outliers + normals
+    outlier_format: Optional[str] = None    # Format for outlier group (None = use main format)
+    a_outlier_format: Optional[str] = None  # Activation-only override (None = follow outlier_format)
+
+    # ---- Group sparse (ADR-013) ----
+    group_ratio: float = 0.0                    # Fraction of granularity groups assigned to group_format (H)
+    group_format: Optional[str] = None          # H format name (e.g. "int8"), mutually exclusive with outlier_format
+    a_group_ratio: Optional[float] = None       # Activation override for group_ratio (None = follow group_ratio)
+    a_group_format: Optional[str] = None        # Activation override for group_format (None = follow group_format)
+
+    # ---- SQ-format (ADR-014) ----
+    sq_mode: Optional[str] = None           # None | "weight" | "activation_static"
+    sq_sparsity: float = 0.5                # SQ-format fixed sparsity per bank. ∈ [0, 1]
+
     # ---- Mode ----
     weight_only: bool = False
     quantize_nonlinear: bool = True         # False = skip quantizing nonlinear ops (norm/activation/pool)
+    static_input_scale: bool = False        # True → use calibrated _input_scale for input activation quant
 
     def __post_init__(self):
         # prescale_granularity only matters when transform='prescale'
         if self.transform == "prescale" and self.prescale_granularity is None:
-            self.prescale_granularity = self.a_granularity
+            # Pre-scale cannot operate at per_block: it is a per-channel or
+            # per-tensor scaling factor.  Map per_block → per_channel.
+            if self.a_granularity == "per_block":
+                self.prescale_granularity = "per_channel"
+            else:
+                self.prescale_granularity = self.a_granularity
 
         if self.w_granularity not in _VALID_GRANULARITIES:
             raise ValueError(
@@ -202,6 +243,21 @@ class QuantConfig:
                 f"Invalid scale_storage {self.scale_storage!r}. "
                 f"Must be one of {sorted(_VALID_SCALE_STORAGES)}"
             )
+        if self.transform == "prescale" and self.prescale_granularity not in ("per_tensor", "per_channel"):
+            raise ValueError(
+                f"prescale_granularity must be 'per_tensor' or 'per_channel', "
+                f"got {self.prescale_granularity!r}. per_block is not supported "
+                f"for pre-scale (use 'per_channel' instead)."
+            )
+        if self.gptq:
+            if self.gptq_block_size < 1:
+                raise ValueError(
+                    f"gptq_block_size must be >= 1, got {self.gptq_block_size}"
+                )
+            if self.gptq_damp <= 0 or self.gptq_damp > 1:
+                raise ValueError(
+                    f"gptq_damp must be in (0, 1], got {self.gptq_damp}"
+                )
         if self.lsq_steps < 0:
             raise ValueError(
                 f"lsq_steps must be >= 0, got {self.lsq_steps}"
@@ -222,6 +278,14 @@ class QuantConfig:
         if self.a_granularity == "per_block" and self.a_block_size is None:
             raise ValueError(
                 "a_block_size is required when a_granularity='per_block'"
+            )
+        if self.w_granularity == "bank" and self.w_block_size is None:
+            raise ValueError(
+                "w_block_size is required when w_granularity='bank' (used as bank_size)"
+            )
+        if self.a_granularity == "bank" and self.a_block_size is None:
+            raise ValueError(
+                "a_block_size is required when a_granularity='bank' (used as bank_size)"
             )
         if self.storage_bits < 0:
             raise ValueError(
@@ -248,6 +312,106 @@ class QuantConfig:
                     "storage_bits cannot be set together with storage_format. "
                     "Use storage_format alone for explicit format names."
                 )
+        if self.outlier_ratio < 0.0 or self.outlier_ratio > 1.0:
+            raise ValueError(
+                f"outlier_ratio must be in [0, 1], got {self.outlier_ratio}"
+            )
+        if self.outlier_format is not None:
+            if not isinstance(self.outlier_format, str):
+                raise TypeError(
+                    f"outlier_format must be a string, got {type(self.outlier_format).__name__}"
+                )
+            try:
+                FormatBase.from_str(self.outlier_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown outlier_format {self.outlier_format!r}: {e}"
+                ) from None
+        if self.a_outlier_format is not None:
+            if not isinstance(self.a_outlier_format, str):
+                raise TypeError(
+                    f"a_outlier_format must be a string, got {type(self.a_outlier_format).__name__}"
+                )
+            try:
+                FormatBase.from_str(self.a_outlier_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown a_outlier_format {self.a_outlier_format!r}: {e}"
+                ) from None
+            if self.weight_only:
+                raise ValueError(
+                    "a_outlier_format cannot be set when weight_only=True"
+                )
+
+        # ---- Group sparse validation ----
+        if self.group_ratio < 0.0 or self.group_ratio > 1.0:
+            raise ValueError(
+                f"group_ratio must be in [0, 1], got {self.group_ratio}"
+            )
+        if self.group_format is not None:
+            if not isinstance(self.group_format, str):
+                raise TypeError(
+                    f"group_format must be a string, got {type(self.group_format).__name__}"
+                )
+            try:
+                FormatBase.from_str(self.group_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown group_format {self.group_format!r}: {e}"
+                ) from None
+        if self.a_group_format is not None:
+            if not isinstance(self.a_group_format, str):
+                raise TypeError(
+                    f"a_group_format must be a string, got {type(self.a_group_format).__name__}"
+                )
+            try:
+                FormatBase.from_str(self.a_group_format)
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown a_group_format {self.a_group_format!r}: {e}"
+                ) from None
+            if self.weight_only:
+                raise ValueError(
+                    "a_group_format cannot be set when weight_only=True"
+                )
+        if self.a_group_ratio is not None:
+            if self.a_group_ratio < 0.0 or self.a_group_ratio > 1.0:
+                raise ValueError(
+                    f"a_group_ratio must be in [0, 1], got {self.a_group_ratio}"
+                )
+        # ---- SQ-format validation ----
+        if self.sq_mode is not None and self.sq_mode not in ("weight", "activation_static"):
+            raise ValueError(
+                f"sq_mode must be None, 'weight', or 'activation_static', "
+                f"got {self.sq_mode!r}"
+            )
+        if self.sq_sparsity < 0.0 or self.sq_sparsity > 1.0:
+            raise ValueError(
+                f"sq_sparsity must be in [0, 1], got {self.sq_sparsity}"
+            )
+        if self.sq_mode is not None and self.sq_mode != "activation_static" and self.w_granularity != "bank":
+            raise ValueError(
+                f"sq_mode={self.sq_mode!r} requires w_granularity='bank', "
+                f"got {self.w_granularity!r}"
+            )
+        if self.sq_mode == "activation_static" and self.a_granularity not in ("bank", "per_channel"):
+            raise ValueError(
+                f"sq_mode='activation_static' requires a_granularity='bank' or 'per_channel', "
+                f"got {self.a_granularity!r}"
+            )
+
+        # Mutually exclusive: group_format and outlier_format
+        if self.group_format is not None and self.outlier_format is not None:
+            raise ValueError(
+                "group_format and outlier_format are mutually exclusive. "
+                "Use either element-level sparse (outlier_format) or "
+                "group-level sparse (group_format), not both."
+            )
+        if self.group_ratio > 0.0 and self.outlier_ratio > 0.0:
+            raise ValueError(
+                "group_ratio > 0 and outlier_ratio > 0 are mutually exclusive. "
+                "Use either element-level sparse or group-level sparse, not both."
+            )
 
     def to_op_config(self) -> OpQuantConfig:
         """Convert this user-facing config to internal :class:`OpQuantConfig`.
@@ -265,25 +429,48 @@ class QuantConfig:
         a_fmt = FormatBase.from_str(self.a_format) if self.a_format is not None else w_fmt
 
         # ---- Granularity ----
-        w_gran = _resolve_granularity(self.w_granularity, self.w_block_size, axis=self.w_axis)
-        a_gran = _resolve_granularity(self.a_granularity, self.a_block_size, axis=self.a_axis)
+        w_gran = _resolve_granularity(self.w_granularity, self.w_block_size, axis=self.w_axis,
+                                       outlier_ratio=self.outlier_ratio)
+        a_gran = _resolve_granularity(self.a_granularity, self.a_block_size, axis=self.a_axis,
+                                       outlier_ratio=self.outlier_ratio)
 
         # ---- Transform (per-role, see rule table in `_make_*` helpers) ----
         w_tx = _make_weight_transform(self.transform)
         a_tx = _make_activation_transform(self.transform, self.sq_alpha)
 
         # ---- QuantScheme ----
+        w_outlier_fmt = FormatBase.from_str(self.outlier_format) if self.outlier_format is not None else None
+        a_outlier_fmt_raw = self.a_outlier_format if self.a_outlier_format is not None else self.outlier_format
+        a_outlier_fmt = FormatBase.from_str(a_outlier_fmt_raw) if a_outlier_fmt_raw is not None else None
+
+        w_group_fmt = FormatBase.from_str(self.group_format) if self.group_format is not None else None
+        a_group_fmt_raw = self.a_group_format if self.a_group_format is not None else self.group_format
+        a_group_fmt = FormatBase.from_str(a_group_fmt_raw) if a_group_fmt_raw is not None else None
+
+        w_group_ratio = self.group_ratio
+        a_group_ratio = self.a_group_ratio if self.a_group_ratio is not None else self.group_ratio
+
         w_scheme = QuantScheme(
             format=w_fmt,
             granularity=w_gran,
             transform=w_tx,
             scale_storage=self.scale_storage,
+            outlier_format=w_outlier_fmt,
+            group_format=w_group_fmt,
+            group_ratio=w_group_ratio,
+            sq_importance=(self.sq_mode == "weight"),
+            sq_sparsity=self.sq_sparsity if self.sq_mode == "weight" else None,
         )
         a_scheme = QuantScheme(
             format=a_fmt,
             granularity=a_gran,
             transform=a_tx,
             scale_storage=self.scale_storage,
+            outlier_format=a_outlier_fmt,
+            group_format=a_group_fmt,
+            group_ratio=a_group_ratio,
+            sq_importance=(self.sq_mode == "activation_static"),
+            sq_sparsity=self.sq_sparsity if self.sq_mode == "activation_static" else None,
         )
 
         # ---- Storage scheme (element-wise) ----
@@ -376,10 +563,55 @@ class QuantConfig:
                 "'act_format' cannot be used with 'weight_only=True'"
             )
 
+        gptq = desc.get("gptq", False)
+        gptq_block_size = desc.get("gptq_block_size", 128)
+        gptq_damp = desc.get("gptq_damp", 0.01)
+        gptq_act_order = desc.get("gptq_act_order", False)
+
         lsq_steps = desc.get("lsq_steps", 0)
         lsq_lr = desc.get("lsq_lr", 1e-3)
         prescale_init = desc.get("pre_scale_init", "ones")
         prescale_pot = desc.get("pre_scale_pot", False)
+
+        outlier_ratio = desc.get("outlier_ratio", 0.0)
+        outlier_format = desc.get("outlier_format")
+        if outlier_format is not None and not isinstance(outlier_format, str):
+            raise TypeError(
+                f"'outlier_format' must be a string, got {type(outlier_format).__name__}"
+            )
+        a_outlier_format = desc.get("a_outlier_format")
+        if a_outlier_format is not None and not isinstance(a_outlier_format, str):
+            raise TypeError(
+                f"'a_outlier_format' must be a string, got {type(a_outlier_format).__name__}"
+            )
+        if weight_only and a_outlier_format is not None:
+            raise ValueError(
+                "'a_outlier_format' cannot be used with 'weight_only=True'"
+            )
+
+        group_ratio = desc.get("group_ratio", 0.0)
+        group_format = desc.get("group_format")
+        if group_format is not None and not isinstance(group_format, str):
+            raise TypeError(
+                f"'group_format' must be a string, got {type(group_format).__name__}"
+            )
+        a_group_ratio = desc.get("a_group_ratio")
+        a_group_format = desc.get("a_group_format")
+        if a_group_format is not None and not isinstance(a_group_format, str):
+            raise TypeError(
+                f"'a_group_format' must be a string, got {type(a_group_format).__name__}"
+            )
+        if weight_only and a_group_format is not None:
+            raise ValueError(
+                "'a_group_format' cannot be used with 'weight_only=True'"
+            )
+
+        sq_mode = desc.get("sq_mode")
+        if sq_mode is not None and not isinstance(sq_mode, str):
+            raise TypeError(
+                f"'sq_mode' must be a string, got {type(sq_mode).__name__}"
+            )
+        sq_sparsity = desc.get("sq_sparsity", 0.5)
 
         # Storage: support legacy keys "bfloat"/"fp" for backward compat
         _sbits = desc.get("storage_bits", 0)
@@ -401,11 +633,13 @@ class QuantConfig:
             gran or "per_tensor",
             block_size=block_size if isinstance(block_size, int) else None,
             axis=axis,
+            outlier_ratio=outlier_ratio,
         )
         a_gran = _resolve_granularity(
             gran or "per_tensor",
             block_size=block_size if isinstance(block_size, int) else None,
             axis=axis,
+            outlier_ratio=outlier_ratio,
         )
 
         return cls(
@@ -414,9 +648,13 @@ class QuantConfig:
             a_format=act_format,
             w_granularity=gran or "per_tensor",
             a_granularity=gran or "per_tensor",
-            w_block_size=(w_gran.block_size
+            w_block_size=(w_gran.bank_size
+                          if w_gran.mode.name == "BANK" else
+                          w_gran.block_size
                           if w_gran.mode.name == "PER_BLOCK" else None),
-            a_block_size=(a_gran.block_size
+            a_block_size=(a_gran.bank_size
+                          if a_gran.mode.name == "BANK" else
+                          a_gran.block_size
                           if a_gran.mode.name == "PER_BLOCK" else None),
             w_axis=desc.get("w_axis", axis),
             a_axis=desc.get("a_axis", axis),
@@ -426,10 +664,23 @@ class QuantConfig:
             storage_kind=_skind,
             storage_format=_sfmt,
             weight_only=weight_only,
+            gptq=gptq,
+            gptq_block_size=gptq_block_size,
+            gptq_damp=gptq_damp,
+            gptq_act_order=gptq_act_order,
             lsq_steps=lsq_steps,
             lsq_lr=lsq_lr,
             prescale_init=prescale_init,
             prescale_pot=prescale_pot,
+            outlier_ratio=outlier_ratio,
+            outlier_format=outlier_format,
+            a_outlier_format=a_outlier_format,
+            group_ratio=group_ratio,
+            group_format=group_format,
+            a_group_ratio=a_group_ratio,
+            a_group_format=a_group_format,
+            sq_mode=sq_mode,
+            sq_sparsity=sq_sparsity,
         )
 
 

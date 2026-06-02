@@ -12,7 +12,7 @@ from ._block_utils import (
 
 
 def _quantize_outlier_bank(format_self, x, granularity, round_mode,
-                          scale_storage="pot"):
+                          scale_storage="pot", outlier_format=None):
     """PER_BLOCK quantization with per-bank outlier/normal split.
 
     Within each bank, the top-k elements by magnitude (outliers) and the
@@ -77,8 +77,9 @@ def _quantize_outlier_bank(format_self, x, granularity, round_mode,
     exp_n[exp_n < -scale_emax] = -scale_emax
 
     # Normalize → elemwise quantize → rescale for each group
+    q_fmt = outlier_format if outlier_format is not None else format_self
     A_o = A / (2 ** exp_o)
-    A_o = format_self.quantize_elemwise(
+    A_o = q_fmt.quantize_elemwise(
         A_o, round_mode=round_mode, allow_denorm=True, saturate_normals=True)
     A_o = A_o * (2 ** exp_o)
 

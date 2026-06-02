@@ -131,7 +131,7 @@ class AllOpsNetwork(nn.Module):
 
 # Simple Linear-only model for ONNX format tests.
 # Using only Linear avoids tracer issues with SIMD ops during ONNX export
-# while still exercising the full symbolic() path (QDQ vs MxQuantize).
+# while still exercising the full symbolic() path (Scale + Quantize).
 class LinearModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -479,10 +479,9 @@ class TestOnnxAllFormats:
     Uses LinearModel (nn.Linear only) for reliable tracing through
     LinearFunction.symbolic(), avoiding SIMD tracer quirks.
 
-    Format dispatch rules (src/onnx/helpers._is_standard_format):
-    - int8/int4/int2/fp8_e4m3/fp8_e5m2 + per_tensor/per_channel -> QDQ
-    - PER_BLOCK (any format) -> com.microxscaling::MxQuantize
-    - fp6/fp4/bf16/fp16 (any granularity) -> MxQuantize
+    Unified three-axis dispatch (src/onnx/helpers):
+    - All non-truncation formats -> Scale (granularity) + Quantize (format)
+    - Truncation formats (bf16/fp16) -> Truncate (dtype)
     """
 
     @pytest.fixture(autouse=True)
@@ -505,11 +504,11 @@ class TestOnnxAllFormats:
             for n in m.graph.node
         )
 
-    # ---------- Standard formats -> QDQ ----------
+    # ---------- Non-truncation formats -> Scale + Quantize ----------
 
     @pytest.mark.parametrize("fmt_name", ["int8", "int4"])
-    def test_int_per_tensor_exports_qdq(self, fmt_name, tmp_path):
-        """int{8,4} per_tensor -> QDQ. int2 excluded: known JIT tracer issue."""
+    def test_int_per_tensor_exports_scale_quantize(self, fmt_name, tmp_path):
+        """int{8,4} per_tensor -> Scale + Quantize."""
         s = _scheme(fmt_name, GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
@@ -518,12 +517,11 @@ class TestOnnxAllFormats:
         with QuantizeContext(net, cfg) as ctx:
             m = self._export_and_check(ctx, x, tmp_path, f"q_{fmt_name}_pt")
 
-        assert self._has_op(m, "QuantizeLinear"), f"{fmt_name} per_tensor: missing QDQ"
-        assert self._has_op(m, "DequantizeLinear")
-        assert not self._has_op(m, "MxQuantize", "com.microxscaling")
+        assert self._has_op(m, "Scale", "com.microxscaling"), f"{fmt_name} per_tensor: missing Scale"
+        assert self._has_op(m, "Quantize", "com.microxscaling"), f"{fmt_name} per_tensor: missing Quantize"
 
     @pytest.mark.parametrize("fmt_name", ["fp8_e4m3", "fp8_e5m2"])
-    def test_fp8_per_tensor_exports_qdq(self, fmt_name, tmp_path):
+    def test_fp8_per_tensor_exports_scale_quantize(self, fmt_name, tmp_path):
         s = _scheme(fmt_name, GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
@@ -532,10 +530,10 @@ class TestOnnxAllFormats:
         with QuantizeContext(net, cfg) as ctx:
             m = self._export_and_check(ctx, x, tmp_path, f"q_{fmt_name}_pt")
 
-        assert self._has_op(m, "QuantizeLinear"), f"{fmt_name} per_tensor: missing QDQ"
-        assert self._has_op(m, "DequantizeLinear")
+        assert self._has_op(m, "Scale", "com.microxscaling"), f"{fmt_name} per_tensor: missing Scale"
+        assert self._has_op(m, "Quantize", "com.microxscaling"), f"{fmt_name} per_tensor: missing Quantize"
 
-    def test_int8_per_channel_exports_qdq(self, tmp_path):
+    def test_int8_per_channel_exports_scale_quantize(self, tmp_path):
         s = _scheme("int8", GranularitySpec.per_channel(axis=0))
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
@@ -544,15 +542,14 @@ class TestOnnxAllFormats:
         with QuantizeContext(net, cfg) as ctx:
             m = self._export_and_check(ctx, x, tmp_path, "q_int8_pc")
 
-        assert self._has_op(m, "QuantizeLinear"), "int8 per_channel: missing QDQ"
-        assert self._has_op(m, "DequantizeLinear")
+        assert self._has_op(m, "Scale", "com.microxscaling"), "int8 per_channel: missing Scale"
+        assert self._has_op(m, "Quantize", "com.microxscaling"), "int8 per_channel: missing Quantize"
 
-    # ---------- Per-block -> MxQuantize ----------
+    # ---------- Per-block -> Scale + Quantize ----------
 
     @pytest.mark.parametrize("fmt_name", ["fp4_e2m1", "fp8_e4m3"])
-    def test_per_block_exports_custom_op(self, fmt_name, tmp_path):
-        """PER_BLOCK -> com.microxscaling::MxQuantize. FP formats only
-        (int8/int4 per_block have tracer issues with mx_quantize)."""
+    def test_per_block_exports_scale_quantize(self, fmt_name, tmp_path):
+        """PER_BLOCK -> Scale + Quantize (unified three-axis)."""
         s = _scheme(fmt_name, GranularitySpec.per_block(32))
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
@@ -561,16 +558,18 @@ class TestOnnxAllFormats:
         with QuantizeContext(net, cfg) as ctx:
             m = self._export_and_check(ctx, x, tmp_path, f"mx_{fmt_name}_block")
 
-        assert self._has_op(m, "MxQuantize", "com.microxscaling"), \
-            f"{fmt_name} per_block: missing MxQuantize"
+        assert self._has_op(m, "Scale", "com.microxscaling"), \
+            f"{fmt_name} per_block: missing Scale"
+        assert self._has_op(m, "Quantize", "com.microxscaling"), \
+            f"{fmt_name} per_block: missing Quantize"
 
-    # ---------- Non-standard formats (non-PER_BLOCK) -> MxQuantize ----------
+    # ---------- MX formats (non-standard) -> Scale + Quantize ----------
 
     @pytest.mark.parametrize("fmt_name", [
-        "fp6_e3m2", "fp6_e2m3", "fp4_e2m1", "bfloat16", "float16",
+        "fp6_e3m2", "fp6_e2m3", "fp4_e2m1",
     ])
-    def test_nonstandard_per_tensor_exports_custom_op(self, fmt_name, tmp_path):
-        """fp6/fp4/bf16/fp16 -> MxQuantize (not in _STANDARD_NAMES)."""
+    def test_nonstandard_per_tensor_exports_scale_quantize(self, fmt_name, tmp_path):
+        """fp6/fp4 -> Scale + Quantize."""
         s = _scheme(fmt_name, GranularitySpec.per_tensor())
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
@@ -579,13 +578,15 @@ class TestOnnxAllFormats:
         with QuantizeContext(net, cfg) as ctx:
             m = self._export_and_check(ctx, x, tmp_path, f"mx_{fmt_name}_pt")
 
-        assert self._has_op(m, "MxQuantize", "com.microxscaling"), \
-            f"{fmt_name} per_tensor: missing MxQuantize"
+        assert self._has_op(m, "Scale", "com.microxscaling"), \
+            f"{fmt_name} per_tensor: missing Scale"
+        assert self._has_op(m, "Quantize", "com.microxscaling"), \
+            f"{fmt_name} per_tensor: missing Quantize"
 
     @pytest.mark.parametrize("fmt_name", [
-        "fp6_e3m2", "fp6_e2m3", "fp4_e2m1", "bfloat16", "float16",
+        "fp6_e3m2", "fp6_e2m3", "fp4_e2m1",
     ])
-    def test_nonstandard_per_channel_exports_custom_op(self, fmt_name, tmp_path):
+    def test_nonstandard_per_channel_exports_scale_quantize(self, fmt_name, tmp_path):
         s = _scheme(fmt_name, GranularitySpec.per_channel(axis=0))
         cfg = OpQuantConfig(input=s, weight=s, output=s)
         net = LinearModel()
@@ -594,15 +595,49 @@ class TestOnnxAllFormats:
         with QuantizeContext(net, cfg) as ctx:
             m = self._export_and_check(ctx, x, tmp_path, f"mx_{fmt_name}_pc")
 
-        assert self._has_op(m, "MxQuantize", "com.microxscaling"), \
-            f"{fmt_name} per_channel: missing MxQuantize"
+        assert self._has_op(m, "Scale", "com.microxscaling"), \
+            f"{fmt_name} per_channel: missing Scale"
+        assert self._has_op(m, "Quantize", "com.microxscaling"), \
+            f"{fmt_name} per_channel: missing Quantize"
+
+    # ---------- Truncation formats -> Truncate ----------
+
+    @pytest.mark.parametrize("fmt_name", ["bfloat16", "float16"])
+    def test_truncation_per_tensor_exports_truncate(self, fmt_name, tmp_path):
+        """bfloat16/float16 -> Truncate nodes (not Scale/Quantize)."""
+        s = _scheme(fmt_name, GranularitySpec.per_tensor())
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
+        net = LinearModel()
+        x = torch.randn(2, 16)
+
+        with QuantizeContext(net, cfg) as ctx:
+            m = self._export_and_check(ctx, x, tmp_path, f"trunc_{fmt_name}_pt")
+
+        assert self._has_op(m, "Truncate", "com.microxscaling"), \
+            f"{fmt_name} per_tensor: missing Truncate"
+        assert not self._has_op(m, "Scale", "com.microxscaling"), \
+            f"{fmt_name} per_tensor: should NOT use Scale"
+
+    @pytest.mark.parametrize("fmt_name", ["bfloat16", "float16"])
+    def test_truncation_per_channel_exports_truncate(self, fmt_name, tmp_path):
+        s = _scheme(fmt_name, GranularitySpec.per_channel(axis=0))
+        cfg = OpQuantConfig(input=s, weight=s, output=s)
+        net = LinearModel()
+        x = torch.randn(2, 16)
+
+        with QuantizeContext(net, cfg) as ctx:
+            m = self._export_and_check(ctx, x, tmp_path, f"trunc_{fmt_name}_pc")
+
+        assert self._has_op(m, "Truncate", "com.microxscaling"), \
+            f"{fmt_name} per_channel: missing Truncate"
+        assert not self._has_op(m, "Scale", "com.microxscaling"), \
+            f"{fmt_name} per_channel: should NOT use Scale"
 
     # ---------- Mixed formats ----------
 
     def test_mixed_formats_per_op_override(self, tmp_path):
-        """Per-op overrides produce both QDQ and MxQuantize nodes."""
+        """Per-op overrides produce Scale + Quantize nodes."""
         s_int8 = _scheme("int8", GranularitySpec.per_tensor())
-        s_fp4 = _scheme("fp4_e2m1", GranularitySpec.per_block(32))
 
         default_cfg = OpQuantConfig(input=s_int8, weight=s_int8, output=s_int8)
 
@@ -612,7 +647,8 @@ class TestOnnxAllFormats:
         with QuantizeContext(net, default_cfg) as ctx:
             m = self._export_and_check(ctx, x, tmp_path, "mixed")
 
-        assert self._has_op(m, "QuantizeLinear"), "mixed: missing QDQ"
+        assert self._has_op(m, "Scale", "com.microxscaling"), "mixed: missing Scale"
+        assert self._has_op(m, "Quantize", "com.microxscaling"), "mixed: missing Quantize"
 
     # ---------- Edge cases ----------
 
@@ -625,8 +661,8 @@ class TestOnnxAllFormats:
         with QuantizeContext(net, cfg) as ctx:
             m = self._export_and_check(ctx, x, tmp_path, "empty")
 
-        assert not self._has_op(m, "QuantizeLinear"), "empty: should NOT have QDQ"
-        assert not self._has_op(m, "MxQuantize", "com.microxscaling")
+        assert not self._has_op(m, "Scale", "com.microxscaling"), "empty: should NOT have Scale"
+        assert not self._has_op(m, "Quantize", "com.microxscaling"), "empty: should NOT have Quantize"
 
     def test_all_formats_export_without_error(self, tmp_path):
         """Smoke test: all registered formats export without raising."""
@@ -687,7 +723,7 @@ class TestAllOpsNetworkEndToEnd:
         onnx.checker.check_model(m)
 
     def test_onnx_export_mxint8_block(self, tmp_path):
-        """AllOpsNetwork exports ONNX with per_block int8 -> MxQuantize nodes."""
+        """AllOpsNetwork exports ONNX with per_block int8 -> Scale + Quantize nodes."""
         import onnx
         net = AllOpsNetwork()
         s = _scheme("int8", GranularitySpec.per_block(32))
@@ -857,8 +893,8 @@ class TestQuantizeModelUnified:
 
         m = onnx.load(path)
         onnx.checker.check_model(m)
-        node_types = {n.op_type for n in m.graph.node}
-        assert "QuantizeLinear" in node_types or "MxQuantize" in node_types
+        node_types = {(n.domain or "onnx", n.op_type) for n in m.graph.node}
+        assert ("com.microxscaling", "Scale") in node_types or ("com.microxscaling", "Quantize") in node_types
 
     def test_identical_to_separate_paths(self):
         """quantize_model result == explicit module replacement + QuantizeContext."""

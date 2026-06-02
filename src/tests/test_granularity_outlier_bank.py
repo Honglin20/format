@@ -60,10 +60,18 @@ def test_outlier_ratio_rejects_above_one():
                         outlier_ratio=1.01)
 
 
-def test_outlier_ratio_requires_per_block():
-    """outlier_ratio > 0 only valid with PER_BLOCK mode."""
-    with pytest.raises(ValueError):
-        GranularitySpec(mode=GranularityMode.PER_TENSOR, outlier_ratio=0.1)
+def test_outlier_ratio_valid_all_modes():
+    """outlier_ratio > 0 is valid with all granularity modes (not just PER_BLOCK)."""
+    # PER_TENSOR + outlier_ratio → constructs without error
+    s1 = GranularitySpec(mode=GranularityMode.PER_TENSOR, outlier_ratio=0.1)
+    assert s1.outlier_ratio == 0.1
+    assert s1.mode == GranularityMode.PER_TENSOR
+
+    # PER_CHANNEL + outlier_ratio → constructs without error
+    s2 = GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=0,
+                          outlier_ratio=0.05)
+    assert s2.outlier_ratio == 0.05
+    assert s2.mode == GranularityMode.PER_CHANNEL
 
 
 def test_outlier_ratio_requires_positive_block_size():
@@ -93,6 +101,15 @@ def test_outlier_ratio_valid_values():
     # ratio 0 with non-PER_BLOCK mode (happens to use default)
     s4 = GranularitySpec.per_channel(axis=0)
     assert s4.outlier_ratio == 0.0
+
+    # ratio 0.1 with PER_TENSOR (now valid per ADR-011)
+    s5 = GranularitySpec(mode=GranularityMode.PER_TENSOR, outlier_ratio=0.1)
+    assert s5.outlier_ratio == 0.1
+
+    # ratio 0.05 with PER_CHANNEL (now valid per ADR-011)
+    s6 = GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=0,
+                          outlier_ratio=0.05)
+    assert s6.outlier_ratio == 0.05
 
 
 # ---------------------------------------------------------------------------

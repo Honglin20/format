@@ -1,14 +1,14 @@
 """
 00 — Comprehensive: every format, granularity, transform, and session feature.
 
-Covers ALL QuantSession API surface and ALL quantization axes:
+Covers ALL Session API surface and ALL quantization axes:
   1. All 11 registered formats (int8/4/2, fp8/6/4, nf4, bf16/fp16)
   2. All 3 granularity modes (per_tensor, per_channel, per_block)
   3. Both transforms (Hadamard, SmoothQuant)
   4. All 4 calibration strategies (Max, Percentile, MSE, KL)
   5. All 4 observers (QSNR, MSE, Histogram, Distribution)
   6. E2E comparison: Comparator, compare_models, compare_sessions, session.compare()
-  7. QuantSession: calibrate, analyze, compare, export_onnx, clear_scales
+  7. Session: calibrate, analyze, compare, export_onnx, clear_scales
   8. Per-layer dict config + per-op inline configs (op_cfgs)
   9. QAT: training-aware quantization with grad_* fields
  10. Custom format registration
@@ -28,7 +28,7 @@ from src.formats.lookup_formats import LookupFormat
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.scheme.op_config import OpQuantConfig
-from src.session import QuantSession
+from src.session import Session
 from src.session import quantize_model
 from src.analysis.e2e import Comparator, compare_models, compare_sessions
 from src.analysis.compare import compare_formats, ComparisonReport
@@ -247,7 +247,7 @@ def section_3():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Section 4 — QuantSession: Full Pipeline
+# Section 4 — Session: Full Pipeline
 # ══════════════════════════════════════════════════════════════════════
 
 def section_4():
@@ -255,7 +255,7 @@ def section_4():
     print("4. QUANTSESSION — FULL PIPELINE")
     print("=" * 60)
 
-    session = QuantSession(
+    session = Session(
         ToyMLP(),
         cfg_iwo(scheme("int8", PER_T)),
         calibrator=PercentileScaleStrategy(q=99.0),
@@ -343,7 +343,7 @@ def section_4():
 
 def section_5():
     print("=" * 60)
-    print("5. PER-LAYER + PER-OP CONFIGS (via QuantSession)")
+    print("5. PER-LAYER + PER-OP CONFIGS (via Session)")
     print("=" * 60)
 
     i8_s = scheme("int8", PER_T)
@@ -361,7 +361,7 @@ def section_5():
         "add": OpQuantConfig(input=i8_s, output=i8_s),
     }
 
-    session = QuantSession(ToyMLP(), cfg=layer_cfg, op_cfgs=op_cfgs)
+    session = Session(ToyMLP(), cfg=layer_cfg, op_cfgs=op_cfgs)
     session.eval()
 
     x = make_data(4)
@@ -391,7 +391,7 @@ def section_6():
     qat_cfg = cfg_qat(i8_s)
     print(f"  qat_cfg.is_training = {qat_cfg.is_training}")
 
-    session = QuantSession(ToyMLP(), cfg=qat_cfg)
+    session = Session(ToyMLP(), cfg=qat_cfg)
     session.train()
     assert session.qmodel.training
 
@@ -427,7 +427,7 @@ def section_7():
 
     def make_session(fmt_name, gran=PER_T):
         s = scheme(fmt_name, gran)
-        ses = QuantSession(ToyMLP(), cfg=cfg_iwo(s))
+        ses = Session(ToyMLP(), cfg=cfg_iwo(s))
         ses.eval()
         ses.qmodel.load_state_dict(sd, strict=False)
         return ses
@@ -437,7 +437,7 @@ def section_7():
         "int4":    make_session("int4"),
         "fp8_e4m3": make_session("fp8_e4m3"),
         "fp4_mx":  make_session("fp4_e2m1", PER_B),
-        "nf4":     QuantSession(ToyMLP(), cfg=cfg_w(scheme("nf4", PER_C))),
+        "nf4":     Session(ToyMLP(), cfg=cfg_w(scheme("nf4", PER_C))),
     }
     sessions["nf4"].eval()
     sessions["nf4"].qmodel.load_state_dict(sd, strict=False)
@@ -571,7 +571,7 @@ def section_11():
     print("=" * 60)
 
     # No fp32 copy (saves memory)
-    session = QuantSession(ToyMLP(), cfg=cfg_iwo(scheme("int8", PER_T)),
+    session = Session(ToyMLP(), cfg=cfg_iwo(scheme("int8", PER_T)),
                            keep_fp32=False)
     session.eval()
 
@@ -620,8 +620,8 @@ def section_12():
     print("12. PRE-SCALE + LSQ OPTIMIZATION (PoT)")
     print("=" * 60)
 
-    # Initialize QuantSession with int8 config
-    sess = QuantSession(ToyMLP(), cfg=cfg_iwo(scheme("int8", PER_T)))
+    # Initialize Session with int8 config
+    sess = Session(ToyMLP(), cfg=cfg_iwo(scheme("int8", PER_T)))
     sess.eval()
 
     calib_data = [torch.randn(8, D) for _ in range(4)]

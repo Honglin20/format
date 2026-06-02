@@ -72,19 +72,25 @@ cfg = QuantConfig(
 | `a_granularity` | `str` | `"per_tensor"` | 激活量化粒度 |
 | `a_block_size` | `int\|None` | `None` | 激活 per_block 时的 block 大小 |
 | `a_axis` | `int` | `-1` | 激活量化轴 |
-| `transform` | `str` | `"none"` | none / hadamard / smoothquant / prescale |
+| `transform` | `str` | `"none"` | none / hadamard / smoothquant / prescale / adaptive |
 | `sq_alpha` | `float` | `0.5` | SmoothQuant 平滑强度 |
 | `prescale_init` | `str` | `"ones"` | PreScale 初始化：ones / amax / pot_amax |
 | `prescale_pot` | `bool` | `False` | PreScale 是否投影到 2 的幂 |
 | `prescale_granularity` | `str\|None` | `None` | None = 跟随 a_granularity |
 | `lsq_steps` | `int` | `0` | LSQ 优化步数（>0 需要 transform="prescale"） |
 | `lsq_lr` | `float` | `1e-3` | LSQ 学习率 |
-| `scale_storage` | `str` | `"fp32"` | Scale 存储格式：fp32 / pot |
+| `scale_storage` | `str` | `"pot"` | Scale 存储格式：pot（2 的幂）/ fp32 |
 | `calibrator` | `str` | `"mse"` | 校准策略：mse / max / percentile / kl |
 | `storage_bits` | `int` | `0` | Element-wise 存储位宽（0 = 禁用） |
 | `storage_kind` | `str` | `"bfloat"` | 存储类型：bfloat / fp |
+| `storage_format` | `str\|None` | `None` | 逐元素存储格式名："fp8_e4m3"、"bfloat16" 等 |
 | `weight_only` | `bool` | `False` | 仅量化权重，激活保持 FP32 |
 | `quantize_nonlinear` | `bool` | `True` | False = norm / activation / pool 保持 fp32 |
+| `static_input_scale` | `bool` | `False` | True = 用校准期 scale 做激活量化（推理时不动态计算） |
+| `gptq` | `bool` | `False` | 启用 GPTQ Hessian 引导权重量化 |
+| `gptq_block_size` | `int` | `128` | GPTQ 列块大小 |
+| `gptq_damp` | `float` | `0.01` | Hessian 对角阻尼分数 (0, 1] |
+| `gptq_act_order` | `bool` | `False` | 按 Hessian 影响降序量化列 |
 
 ### 0.2 Session — 执行单元
 
@@ -396,7 +402,7 @@ report.taxonomy.exemplars("norm", 3)  # 代表层列表
 
 ```python
 result = Session(model, cfg).run(calib_data, outputs=["distribution", "fit"])
-result.report().taxonomy.print()
+result.report.taxonomy.print()
 ```
 
 ---

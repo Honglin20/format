@@ -150,6 +150,53 @@ STUDY_CONFIG: dict = {
     },
 
     # =====================================================================
+    # SQ-format mixed-precision sparse-quantized bank (ADR-014)
+    # =====================================================================
+    "part_sq_format": {
+        "description": "SQ-format: INT4+INT8 sparse bank via Hessian importance",
+        "configs": [
+            # Weight SQ: INT4 main + INT8 high-precision, 50% sparse
+            QuantConfig(
+                name="W(SQ6)A4-b32",
+                w_format="int4", w_granularity="bank", w_block_size=32,
+                a_format="int4", a_granularity="per_tensor",
+                outlier_format="int8",
+                sq_mode="weight", sq_sparsity=0.5,
+                storage_bits=16, storage_kind="bfloat",
+            ),
+            # Activation SQ: INT4 main + INT8 high-precision channels
+            QuantConfig(
+                name="W8A(SQ6)-b32",
+                w_format="int8", w_granularity="per_tensor",
+                a_format="int4", a_granularity="bank", a_block_size=32,
+                outlier_format="int8",
+                sq_mode="activation_static", sq_sparsity=0.5,
+                storage_bits=16, storage_kind="bfloat",
+            ),
+            # Weight SQ + Hadamard transform
+            QuantConfig(
+                name="W(SQ6)A4-Had-b32",
+                w_format="int4", w_granularity="bank", w_block_size=32,
+                a_format="int4", a_granularity="per_tensor",
+                outlier_format="int8",
+                sq_mode="weight", sq_sparsity=0.5,
+                transform="hadamard",
+                storage_bits=16, storage_kind="bfloat",
+            ),
+            # Weight SQ with 25% sparsity (higher precision, lower compression)
+            QuantConfig(
+                name="W(SQ7)A4-b32",
+                w_format="int4", w_granularity="bank", w_block_size=32,
+                a_format="int4", a_granularity="per_tensor",
+                outlier_format="int8",
+                sq_mode="weight", sq_sparsity=0.25,
+                storage_bits=16, storage_kind="bfloat",
+            ),
+        ],
+        "output": {"tables": ["accuracy"], "figures": ["qsnr_line", "mse_box"]},
+    },
+
+    # =====================================================================
     # Hierarchical Pre-Scale Study (pot pre-scale + MX per-block)
     # =====================================================================
     "part_hierarchical": {

@@ -21,10 +21,12 @@ from src.analysis.observers import MSEObserver, QSNRObserver
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.transform import IdentityTransform
+from src.calibration.pipeline import CalibrationSession
 from src.session._config import QuantConfig
-from src.session._quant import _QuantSession
+from src.analysis.context import AnalysisContext
+from src.session._model import quantize_model
 from src.session._result import SessionResult
-from src.session._session import _extract_qsnr_mse, _make_calibrator, _run_model
+from src.session._helpers import _extract_qsnr_mse, _make_calibrator, _run_model
 from src.transform.hadamard import HadamardTransform
 from src.transform.smooth_quant import (
     SmoothQuantTransform,
@@ -177,8 +179,6 @@ def per_layer_optimal(
                     layer_name,
                 )
                 continue
-            if layer_name not in sq_transforms:
-                continue
             sq_t = sq_transforms[layer_name]
             op_cfg = per_layer_cfgs[layer_name]
             if base_cfg.weight_only:
@@ -212,10 +212,12 @@ def per_layer_optimal(
     # ------------------------------------------------------------------
     # 6. Fuse SQ weights
     # ------------------------------------------------------------------
+    sq_fp32_ref: Optional[nn.Module] = None
     if sq_winning_layers and sq_transforms:
         model = fuse_smoothquant_weights(
             fp32_model, sq_transforms, layer_names=sq_winning_layers,
         )
+        sq_fp32_ref = fp32_model  # original unmodified model as FP32 baseline
     else:
         model = copy.deepcopy(fp32_model)
 
@@ -238,30 +240,28 @@ def per_layer_optimal(
     )
 
     # ------------------------------------------------------------------
-    # 8. Create _QuantSession with per-layer configs
+    # 8. Create quantized model + fp32 reference
     # ------------------------------------------------------------------
-    # Uses _QuantSession directly (not Session) because Session works with
-    # a single QuantConfig→OpQuantConfig, while per-layer optimal requires
-    # per-layer OpQuantConfig dicts.
     calibrator = _make_calibrator(base_cfg.calibrator)
-    qs = _QuantSession(
-        model,
-        per_layer_cfgs,
-        calibrator=calibrator,
-        keep_fp32=True,
+    qmodel = quantize_model(
+        copy.deepcopy(model), cfg=per_layer_cfgs,
+        op_cfgs=None, quantize_nonlinear=True,
+    )
+    fp32_model = (
+        copy.deepcopy(sq_fp32_ref if sq_fp32_ref is not None else model)
     )
 
     # ------------------------------------------------------------------
     # 9. Calibrate (reuses _run_model from _session.py)
     # ------------------------------------------------------------------
-    with qs.calibrate():
-        _run_model(qs, calib_data, eval_fn=eval_fn)
+    with CalibrationSession(qmodel, calibrator):
+        _run_model(qmodel, calib_data, eval_fn=eval_fn)
 
     # ------------------------------------------------------------------
     # 10. Analyze
     # ------------------------------------------------------------------
-    with qs.analyze(observers=[QSNRObserver(), MSEObserver()]) as ctx:
-        _run_model(qs, calib_data, eval_fn=eval_fn)
+    with AnalysisContext(qmodel, observers=[QSNRObserver(), MSEObserver()]) as ctx:
+        _run_model(qmodel, calib_data, eval_fn=eval_fn)
     report = ctx.report()
     observers_data = report._raw
     qsnr_per_layer, mse_per_layer = _extract_qsnr_mse(observers_data)
@@ -274,9 +274,9 @@ def per_layer_optimal(
     delta: Optional[Dict[str, float]] = None
 
     if eval_data is not None:
-        if qs.fp32_model is not None:
-            fp32_metrics = eval_fn(qs.fp32_model, eval_data)
-        quant_metrics = eval_fn(qs, eval_data)
+        if fp32_model is not None:
+            fp32_metrics = eval_fn(fp32_model, eval_data)
+        quant_metrics = eval_fn(qmodel, eval_data)
         if fp32_metrics is not None:
             delta = {
                 k: quant_metrics[k] - fp32_metrics[k]
@@ -286,8 +286,10 @@ def per_layer_optimal(
     # ------------------------------------------------------------------
     # 12. Cost
     # ------------------------------------------------------------------
-    cost = qs.estimate_cost(fp32=False)
-    cost_fp32 = qs.estimate_cost(fp32=True) if qs.fp32_model else None
+    from src.cost.model_cost import analyze_model_cost
+
+    cost = analyze_model_cost(qmodel)
+    cost_fp32 = analyze_model_cost(fp32_model) if fp32_model is not None else None
 
     # ------------------------------------------------------------------
     # 13. Return result

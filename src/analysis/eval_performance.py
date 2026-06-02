@@ -4,6 +4,8 @@ evaluate_performance: compare quantized models against an FP32 baseline
 using a user-provided eval_fn. Measures the real-world impact of quantization
 (accuracy drop, loss increase, etc.) rather than per-layer signal fidelity.
 """
+from __future__ import annotations
+
 from typing import Callable
 
 import torch.nn as nn

@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Union
 
 import torch.nn as nn
 
-from src.scheme.op_config import OpQuantConfig
+from src.scheme.op_config import OpQuantConfig, cfg_causes_quantization
 from src.session._context import QuantizeContext, _EMPTY_CFG
 from src.ops.conv import (
     QuantizedConv1d,
@@ -58,6 +58,32 @@ def _is_mx_compute(scheme) -> bool:
     return scheme.granularity.mode.name == "PER_BLOCK"
 
 
+def _scheme_normalizes_by_amax(scheme) -> bool:
+    """True if the scheme normalizes by amax before elemwise quantization.
+
+    Normalization divides the tensor by a per-channel or per-tensor amax,
+    which can crush small values to zero when the dynamic range is extreme
+    (e.g. exp(48) ≈ 7e20 alongside 1.0 in activation intermediates).
+
+    Affected schemes:
+    - PER_CHANNEL: always normalizes by per-channel amax
+    - BANK: normalizes by per-bank amax (same risk as PER_CHANNEL)
+    - Integer PER_TENSOR (ebits==0): normalizes by scalar amax
+    - Float PER_TENSOR (ebits>0): direct elemwise, no normalization — safe
+    """
+    if scheme is None:
+        return False
+    from src.scheme.granularity import GranularityMode
+    if scheme.granularity.mode == GranularityMode.PER_CHANNEL:
+        return True
+    if scheme.granularity.mode == GranularityMode.BANK:
+        return True
+    if (scheme.granularity.mode == GranularityMode.PER_TENSOR
+            and scheme.format.ebits == 0):
+        return True
+    return False
+
+
 def _non_matmul_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
     """Derive an OpQuantConfig for norm ops — strip MX compute, keep elemwise.
 
@@ -83,9 +109,20 @@ def _non_matmul_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
 
 
 def _activation_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
-    """Derive an OpQuantConfig for activation/softmax/pool ops — strip MX compute.
+    """Derive an OpQuantConfig for activation/softmax/pool ops — strip MX compute
+    and schemes that normalize by amax.
 
-    Three cases (same discrimination as ``_non_matmul_cfg``).
+    Activation intermediate steps (vec_mul, vec_add, vec_exp, vec_recip) can
+    have extreme dynamic range (e.g. exp(48) ≈ 7e20 alongside near-zero values).
+    Per-channel quantization and integer per-tensor quantization normalize by
+    amax, which is dominated by the largest absolute value — small values are
+    normalised to zero, triggering NaN via 1/0 in vec_recip.
+
+    Float per-tensor schemes (bf16/bf10, ebits > 0) use direct elemwise
+    quantization without amax normalization and are safe for intermediates.
+
+    Only per-block MX compute and true elemwise (storage / float per-tensor)
+    schemes are safe for intermediate activation steps.
     """
     if cfg.storage is not None:
         return OpQuantConfig(
@@ -95,7 +132,11 @@ def _activation_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
         )
     if _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
         return OpQuantConfig()  # MX bfloat=0 — no quantization for activation/softmax
-    return cfg  # compat-style: input carries per_tensor elemwise scheme
+    # Compat-style: skip inner quantization when scheme normalizes by amax.
+    # Float per_tensor schemes (bf16/bf10) are safe — keep them.
+    if _scheme_normalizes_by_amax(cfg.input):
+        return OpQuantConfig()
+    return cfg
 
 
 def _nonlinear_true_cfg(cfg: OpQuantConfig) -> OpQuantConfig:
@@ -352,10 +393,15 @@ def _make_adaptive_avg_pool2d(orig: nn.AdaptiveAvgPool2d, cfg: OpQuantConfig, na
 
 
 def _get_quantized_modules(model: nn.Module) -> List[tuple]:
-    """Return [(name, module), ...] for all Quantized* modules with cfg."""
+    """Return [(name, module), ...] for all Quantized* modules whose cfg
+    actually triggers quantization.
+
+    Modules with an empty / all-None config are skipped — they act as
+    pure passthrough and would distort statistics (e.g. inflate QSNR).
+    """
     result = []
     for name, module in model.named_modules():
-        if hasattr(module, "cfg") and not getattr(module, "_is_passthrough", False):
+        if hasattr(module, "cfg") and cfg_causes_quantization(module.cfg):
             result.append((name, module))
     return result
 
@@ -384,22 +430,21 @@ def _resolve_context_cfg(
         if cfg.storage is not None or _is_mx_compute(cfg.input) or _is_mx_compute(cfg.weight):
             return _non_matmul_cfg(cfg)
         return cfg
-    # cfg is a dict — extract storage (or per_tensor input) for inline-op defaults
-    storage = None
+    # cfg is a dict — apply the same resolution logic as the singleton path
+    # to the first representative config.  Without this, inline ops
+    # (torch.add in residuals, etc.) would be left unquantized whenever
+    # per-layer overrides are used, even when the overrides are no-ops.
     if cfg:
         for c in cfg.values():
             if not isinstance(c, OpQuantConfig):
                 continue
-            if c.storage is not None:
-                storage = c.storage
-                break
-            # Fallback: compat-style configs store the elemwise scheme in `input`
-            if (c.input is not None
-                    and c.input.granularity is not None
-                    and c.input.granularity.mode.name == "PER_TENSOR"):
-                storage = c.input
-                break
-    return OpQuantConfig(storage=storage)
+            if c.storage is not None or _is_mx_compute(c.input) or _is_mx_compute(c.weight):
+                return _non_matmul_cfg(c)
+            # Compat-style (per_tensor / per_channel without storage):
+            # pass through unchanged — same as the singleton branch above.
+            if c.input is not None or c.weight is not None:
+                return c
+    return OpQuantConfig()
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +515,7 @@ def _patch_forward(
             model,
             ctx_cfg,
             op_cfgs=op_cfgs,
-            observers=observers,
+            observers=model._quantize_observers,
         ):
             return original_forward(*args, **kwargs)
 
@@ -481,6 +526,11 @@ def _patch_forward(
     # the same args restores the original behaviour.
     model.forward = _wrapped_forward
 
+    # Store the original forward so ONNX export can swap it back
+    # temporarily — Dynamo cannot trace through QuantizeContext
+    # (ContextVar, dataclass _CtxState, patch table mutations).
+    model._original_forward = original_forward
+
     # Store for export_onnx to use without re-entering quantize_model
     model._quantize_cfg = ctx_cfg
     model._quantize_op_cfgs = op_cfgs or {}
@@ -489,6 +539,23 @@ def _patch_forward(
     def _export_onnx(self, dummy_input, output_path: str, opset_version: int = 17):
         from src.onnx.export import export_quantized_model
         from src.session._context import _export_scales_var, _collect_export_scales
+        import inspect
+
+        # Convert dict kwargs to positional args for the tracer.
+        # _wrapped_forward(*args, **kwargs) has no named parameters,
+        # so the ONNX tracer loses dict inputs.  Use the original
+        # forward's signature to map dict keys back to positional args.
+        if isinstance(dummy_input, dict):
+            sig = inspect.signature(original_forward)
+            param_names = [
+                n for n in sig.parameters
+                if n != "self" and sig.parameters[n].kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            # Only include keys present in the forward signature (ignore extras)
+            dummy_input = tuple(dummy_input[n] for n in param_names if n in dummy_input)
 
         # Collect real scales from calibrated modules before export.
         # The patched forward wraps in QuantizeContext during tracing,
@@ -564,7 +631,21 @@ def quantize_model(
                            quantize_nonlinear=quantize_nonlinear,
                            _patch_root=False)
 
-    # Step 2: Patch forward on the root model only
+    # Step 2: Replace the root module itself if it is a known type
+    # (e.g. bare nn.Linear passed directly).  Must run BEFORE _patch_forward
+    # so _original_forward captures QuantizedLinear.forward, not nn.Linear.forward.
+    root_class = type(model)
+    if root_class in _MODULE_MAPPING and not hasattr(model, "cfg"):
+        root_cfg = _resolve_cfg(cfg, prefix or "")
+        if root_cfg != _EMPTY_CFG or root_cfg is cfg:
+            make_fn = _MODULE_MAPPING[root_class]
+            replacement = make_fn(model, root_cfg, prefix or "",
+                                  quantize_nonlinear=quantize_nonlinear)
+            if hasattr(replacement, "load_state_dict"):
+                replacement.load_state_dict(model.state_dict(), strict=False)
+            model = replacement
+
+    # Step 3: Patch forward on the root model only
     if _patch_root:
         ctx_cfg = _resolve_context_cfg(cfg, op_cfgs)
 

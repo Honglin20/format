@@ -36,6 +36,19 @@ _ctx_state: contextvars.ContextVar[Optional[_CtxState]] = contextvars.ContextVar
 )
 
 
+# Observer-only mode: lightweight state for inline-op observer tracking during
+# analysis.  When set, patched torch/F ops emit observer events WITHOUT
+# re-quantizing — they use the original function and record the result.
+@dataclass
+class _ObserverState:
+    observers: List = field(default_factory=list)
+
+
+_observer_state: contextvars.ContextVar[Optional[_ObserverState]] = (
+    contextvars.ContextVar("observer_state", default=None)
+)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Module stack (was: _stack.py)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -72,6 +85,15 @@ def _collect_export_scales(model) -> Dict[str, "torch.Tensor"]:
 # instead of placeholder 1.0.
 _onnx_current_scale_var: contextvars.ContextVar[Optional[torch.Tensor]] = (
     contextvars.ContextVar("quant_onnx_current_scale", default=None)
+)
+
+# ContextVar that signals we are inside an ONNX export (either TorchScript-based
+# or Dynamo-based).  During export tracing, per-block quantization is skipped in
+# the forward pass — the Function.symbolic() methods emit the equivalent ONNX
+# nodes instead.  This extends the torch.jit.is_tracing() guard (which only
+# covers the old TorchScript path) to the Dynamo-based torch.export path.
+_onnx_export_active: contextvars.ContextVar[bool] = (
+    contextvars.ContextVar("quant_onnx_export_active", default=False)
 )
 
 

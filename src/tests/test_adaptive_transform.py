@@ -2,21 +2,21 @@
 
 Constructs a chain model where three Linear layers each favour a different
 transform candidate (none / hadamard / smoothquant).  The test runs
-``Session(…, transform="adaptive")``, calibrates, and asserts the
+``run_quantization(…, transform="adaptive")`` and asserts the
 expected winner per layer.
 """
 import torch
 import torch.nn as nn
 
 from src.session._config import QuantConfig
-from src.session._session import Session
+from src.session._session import run_quantization
 from src.scheme.transform import IdentityTransform
 from src.transform.hadamard import HadamardTransform
 from src.transform.smooth_quant import SmoothQuantTransform
 
 
 # ---------------------------------------------------------------------------
-# Crafted model — each layer favours a different transform
+# Crafted model -- each layer favours a different transform
 # ---------------------------------------------------------------------------
 
 def _make_adaptive_test_model():
@@ -61,13 +61,13 @@ def _make_adaptive_test_model():
 
 
 # ---------------------------------------------------------------------------
-# Heuristic prediction — verify the crafted model has the right pattern
+# Heuristic prediction -- verify the crafted model has the right pattern
 # ---------------------------------------------------------------------------
 
 def _predict_winners(model, x):
     """Return dict of expected winner per layer name.
 
-    This checks statistics only — it does NOT run the adaptive algorithm.
+    This checks statistics only -- it does NOT run the adaptive algorithm.
     The thresholds are tuned to the seed=42 crafted tensors.
     """
     with torch.no_grad():
@@ -122,11 +122,7 @@ class TestAdaptiveTransform:
             sq_alpha=0.5,
         )
 
-        session = Session(model, cfg, keep_fp32=True)
-        session.quantize()
-        session.calibrate([x])
-
-        qmodel = session.qmodel
+        qmodel, fp32_model, _ = run_quantization(model, cfg, [x], keep_fp32=True)
 
         # --- fc_hadamard: must be HadamardTransform ---
         fc_had_cfg = qmodel.fc_hadamard.cfg
@@ -162,12 +158,9 @@ class TestAdaptiveTransform:
             transform="adaptive",
         )
 
-        session = Session(model, cfg)
-        session.quantize()
-        session.calibrate([x])
+        qmodel, fp32_model, _ = run_quantization(model, cfg, [x])
 
         # Verify that each matmul module received a non-None cfg transform
-        qmodel = session.qmodel
         for name in ["fc_hadamard", "fc_smoothquant", "fc_uniform"]:
             mod = getattr(qmodel, name)
             assert mod.cfg.input is not None, f"{name}: input cfg is None"
@@ -189,12 +182,10 @@ class TestAdaptiveTransform:
             transform="adaptive",
         )
 
-        session = Session(model, cfg)
-        session.quantize()
-        session.calibrate([x])
+        qmodel, fp32_model, _ = run_quantization(model, cfg, [x])
 
         with torch.no_grad():
-            out = session.qmodel(x)
+            out = qmodel(x)
         assert out.shape == (8, 32)
         assert not torch.isnan(out).any()
         assert not torch.isinf(out).any()
@@ -215,17 +206,12 @@ class TestAdaptiveTransform:
             transform="adaptive",
         )
 
-        sess1 = Session(model1, cfg)
-        sess1.quantize()
-        sess1.calibrate([x1])
-
-        sess2 = Session(model2, cfg)
-        sess2.quantize()
-        sess2.calibrate([x1])
+        qmodel1, _, _ = run_quantization(model1, cfg, [x1])
+        qmodel2, _, _ = run_quantization(model2, cfg, [x1])
 
         for name in ["fc_hadamard", "fc_smoothquant", "fc_uniform"]:
-            m1 = getattr(sess1.qmodel, name)
-            m2 = getattr(sess2.qmodel, name)
+            m1 = getattr(qmodel1, name)
+            m2 = getattr(qmodel2, name)
             t1_in = type(m1.cfg.input.transform)
             t2_in = type(m2.cfg.input.transform)
             t1_w = type(m1.cfg.weight.transform)
@@ -252,12 +238,10 @@ class TestAdaptiveTransform:
             transform="adaptive",
         )
 
-        session = Session(model, cfg)
-        session.quantize()
-        session.calibrate([x])
+        qmodel, fp32_model, _ = run_quantization(model, cfg, [x])
 
         for name in ["fc_hadamard", "fc_smoothquant", "fc_uniform"]:
-            mod = getattr(session.qmodel, name)
+            mod = getattr(qmodel, name)
             tx_type = type(mod.cfg.weight.transform)
             assert tx_type in (IdentityTransform, HadamardTransform), (
                 f"{name}: unexpected transform {tx_type.__name__} in "
@@ -277,7 +261,7 @@ class TestAdaptiveTransform:
         nn.init.zeros_(conv_outlier.bias)
         model.add_module("conv_had", conv_outlier)
 
-        # Conv2d with uniform weight — activation outlier comes from prev layer
+        # Conv2d with uniform weight -- activation outlier comes from prev layer
         conv_sq = nn.Conv2d(32, 16, kernel_size=3, padding=1)
         conv_sq.weight.data = torch.randn(16, 32, 3, 3) * 0.05
         nn.init.zeros_(conv_sq.bias)
@@ -295,11 +279,7 @@ class TestAdaptiveTransform:
             transform="adaptive",
         )
 
-        session = Session(model, cfg)
-        session.quantize()
-        session.calibrate([x])
-
-        qmodel = session.qmodel
+        qmodel, fp32_model, _ = run_quantization(model, cfg, [x])
 
         # conv_had: weight input-channel outlier → hadamard expected
         had_cfg = qmodel.conv_had.cfg
@@ -345,9 +325,9 @@ class TestAdaptiveTransform:
                 for batch in data:
                     model(batch)
 
-        session = Session(model, cfg)
-        session.quantize()
-        session.calibrate([x], eval_fn=custom_eval)
+        qmodel, fp32_model, _ = run_quantization(
+            model, cfg, [x], eval_fn=custom_eval,
+        )
 
         assert len(trace) >= 1, "eval_fn should have been called"
 
@@ -361,9 +341,7 @@ class TestAdaptiveTransform:
             transform="adaptive",
         )
 
-        session = Session(model, cfg)
-        session.quantize()
-        session.calibrate([torch.randn(4, 32)])  # should not crash
+        qmodel, fp32_model, _ = run_quantization(model, cfg, [torch.randn(4, 32)])
 
     def test_adaptive_calibrate_twice(self):
         """Calling calibrate twice doesn't re-run adaptive selection."""
@@ -379,23 +357,26 @@ class TestAdaptiveTransform:
             transform="adaptive",
         )
 
-        session = Session(model, cfg)
-        session.quantize()
-        session.calibrate([x])
+        qmodel, fp32_model, _ = run_quantization(model, cfg, [x])
 
         # Capture cfg after first calibration
         cfgs_after_first = {}
         for name in ["fc_hadamard", "fc_smoothquant", "fc_uniform"]:
-            mod = getattr(session.qmodel, name)
+            mod = getattr(qmodel, name)
             cfgs_after_first[name] = (
                 type(mod.cfg.input.transform),
                 type(mod.cfg.weight.transform),
             )
 
         # Second calibration should NOT change transforms
-        session.calibrate([x])
+        from src.calibration.pipeline import CalibrationSession
+        from src.calibration.strategies import MaxScaleStrategy
+        with CalibrationSession(qmodel, MaxScaleStrategy()):
+            with torch.no_grad():
+                qmodel(x)
+
         for name in ["fc_hadamard", "fc_smoothquant", "fc_uniform"]:
-            mod = getattr(session.qmodel, name)
+            mod = getattr(qmodel, name)
             after = (type(mod.cfg.input.transform), type(mod.cfg.weight.transform))
             assert after == cfgs_after_first[name], (
                 f"{name}: transforms changed after second calibrate()"

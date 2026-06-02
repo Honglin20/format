@@ -75,6 +75,7 @@ def _ensure_registries():
         mse_box_plot,
         outlier_analysis,
         per_block_qsnr,
+        per_layer_role_histogram,
         pot_delta_bar,
         qsnr_line_chart,
         role_distribution_comparison,
@@ -86,13 +87,13 @@ def _ensure_registries():
 
     _FIGURE_REGISTRY["qsnr"] = (
         lambda d, od, **kw: qsnr_line_chart(
-            d, title=kw.get("title", "QSNR per Layer"),
+            d, title=kw.get("title", "QSNR per Layer (output)"),
             colors=kw.get("colors", FORMAT_COLORS), output_dir=od,
         )
     )
     _FIGURE_REGISTRY["mse"] = (
         lambda d, od, **kw: mse_box_plot(
-            d, title=kw.get("title", "MSE Distribution"),
+            d, title=kw.get("title", "MSE per Layer (output)"),
             colors=kw.get("colors", FORMAT_COLORS), output_dir=od,
         )
     )
@@ -133,12 +134,12 @@ def _ensure_registries():
     )
     _FIGURE_REGISTRY["outlier"] = (
         lambda d, od, **kw: outlier_analysis(
-            d, output_dir=od, role=kw.get("role", "input"),
+            d, output_dir=od, roles=kw.get("roles", ("input", "weight", "output")),
         )
     )
     _FIGURE_REGISTRY["per_block_qsnr"] = (
         lambda d, od, **kw: per_block_qsnr(
-            d, output_dir=od, role=kw.get("role", "input"),
+            d, output_dir=od, roles=kw.get("roles", ("input", "weight", "output")),
         )
     )
     _FIGURE_REGISTRY["correlation_heatmap"] = (
@@ -146,6 +147,11 @@ def _ensure_registries():
     )
     _FIGURE_REGISTRY["role_distribution"] = (
         lambda d, od, **kw: role_distribution_comparison(d, output_dir=od)
+    )
+    _FIGURE_REGISTRY["per_layer_role_histogram"] = (
+        lambda d, od, **kw: per_layer_role_histogram(
+            d, output_dir=od, k=kw.get("k", 5),
+        )
     )
 
 

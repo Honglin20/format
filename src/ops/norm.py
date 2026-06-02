@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 from src.observer.mixin import ObservableMixin
 from src.ops.vec_ops import (
     vec_quantize, vec_add, vec_sub, vec_mul, vec_div,
@@ -187,55 +188,70 @@ def _norm_backward_LN(grad_output, axes, weight, x_norm, x_var,
 # Shared entry/exit quantization helpers
 # ---------------------------------------------------------------------------
 
-def _quantize_norm_input(x, cfg, emit_fn):
+def _quantize_norm_input(x, cfg, emit_fn, *, x_raw=None):
     """Apply storage->compute quantization to norm input tensor.
+
+    When *x_raw* is provided, it is used as the fp32 reference for ALL
+    input observer emits, so the observer measures total input quantization
+    quality (raw fp32 vs fully quantized).
 
     Returns quantized x.
     """
+    _ref = x_raw if x_raw is not None else x
     if cfg.storage is not None:
         fp_x = x; x = quantize(x, cfg.storage)
-        if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_x, x, cfg.storage)
+        if emit_fn: emit_fn("input", 0, "input_pre_quant", _ref, x, cfg.storage)
     if cfg.input is not None:
         fp_x = x; x = quantize(x, cfg.input)
-        if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_x, x, cfg.input)
+        if emit_fn: emit_fn("input", 1, "input_pre_quant", _ref, x, cfg.input)
     return x
 
 
-def _quantize_norm_weight_bias(weight, bias, cfg, emit_fn):
+def _quantize_norm_weight_bias(weight, bias, cfg, emit_fn, *, weight_raw=None, bias_raw=None):
     """Apply storage->compute quantization to norm weight and bias.
+
+    When *weight_raw* / *bias_raw* are provided, they are used as the fp32
+    reference for ALL observer emits.
 
     Returns (q_weight, q_bias).
     """
+    _w_ref = weight_raw if weight_raw is not None else weight
+    _b_ref = bias_raw if bias_raw is not None else bias
     q_weight = weight
     if cfg.storage is not None:
         fp_w = q_weight; q_weight = quantize(q_weight, cfg.storage)
-        if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_w, q_weight, cfg.storage)
+        if emit_fn: emit_fn("weight", 0, "weight_pre_quant", _w_ref, q_weight, cfg.storage)
     if cfg.weight is not None:
         fp_w = q_weight; q_weight = quantize(q_weight, cfg.weight)
-        if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, q_weight, cfg.weight)
+        if emit_fn: emit_fn("weight", 1, "weight_pre_quant", _w_ref, q_weight, cfg.weight)
 
     q_bias = bias
     if cfg.storage is not None:
         fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
-        if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+        if emit_fn: emit_fn("bias", 0, "weight_pre_quant", _b_ref, q_bias, cfg.storage)
     if cfg.bias is not None:
         fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
-        if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
+        if emit_fn: emit_fn("bias", 1, "weight_pre_quant", _b_ref, q_bias, cfg.bias)
 
     return q_weight, q_bias
 
 
-def _quantize_norm_output(output, cfg, emit_fn):
+def _quantize_norm_output(output, cfg, emit_fn, *, output_raw=None):
     """Apply storage->compute quantization to norm output.
+
+    When *output_raw* is provided, it is used as the fp32 reference for ALL
+    output observer emits, so the observer measures total output quantization
+    quality (raw fp32 vs quantized).
 
     Returns quantized output.
     """
+    _ref = output_raw if output_raw is not None else output
     if cfg.storage is not None:
-        fp_o = output; output = quantize(output, cfg.storage)
-        if emit_fn: emit_fn("output", 0, "output_post_quant", fp_o, output, cfg.storage)
+        output = quantize(output, cfg.storage)
+        if emit_fn: emit_fn("output", 0, "output_post_quant", _ref, output, cfg.storage)
     if cfg.output is not None:
-        fp_o = output; output = quantize(output, cfg.output)
-        if emit_fn: emit_fn("output", 1, "output_post_quant", fp_o, output, cfg.output)
+        output = quantize(output, cfg.output)
+        if emit_fn: emit_fn("output", 1, "output_post_quant", _ref, output, cfg.output)
     return output
 
 
@@ -259,29 +275,32 @@ class BatchNormFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         ctx.name = name
 
+        x_raw, weight_raw, bias_raw = x, weight, bias
+
         # Entry quantization: storage → compute
+        # Use raw tensors for ALL observer fp32 references.
         if cfg.storage is not None:
-            fp_x = x; x = quantize(x, cfg.storage)
-            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_x, x, cfg.storage)
+            x = quantize(x, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", x_raw, x, cfg.storage)
         if cfg.input is not None:
-            fp_x = x; x = quantize(x, cfg.input)
-            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_x, x, cfg.input)
+            x = quantize(x, cfg.input)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", x_raw, x, cfg.input)
 
         q_weight = weight
         if cfg.storage is not None:
-            fp_w = q_weight; q_weight = quantize(q_weight, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_w, q_weight, cfg.storage)
+            q_weight = quantize(q_weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, q_weight, cfg.storage)
         if cfg.weight is not None:
-            fp_w = q_weight; q_weight = quantize(q_weight, cfg.weight)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_w, q_weight, cfg.weight)
+            q_weight = quantize(q_weight, cfg.weight)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, q_weight, cfg.weight)
 
         q_bias = bias
         if cfg.storage is not None:
-            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
-            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+            q_bias = quantize(q_bias, cfg.storage)
+            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", bias_raw, q_bias, cfg.storage)
         if cfg.bias is not None:
-            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
-            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
+            q_bias = quantize(q_bias, cfg.bias)
+            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", bias_raw, q_bias, cfg.bias)
 
         H = x.shape[1]
         sum_axes = [0] + list(range(2, x.ndim))
@@ -315,13 +334,36 @@ class BatchNormFunction(torch.autograd.Function):
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
         ctx.sum_axes = sum_axes
 
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                _true_ref = F.batch_norm(
+                    x_raw,
+                    running_mean if not is_training or running_mean is not None else None,
+                    running_var if not is_training or running_var is not None else None,
+                    weight_raw, bias_raw,
+                    training=is_training,
+                    momentum=momentum,
+                    eps=eps,
+                )
+            finally:
+                _exit_quantize()
+
         # Output quantization
         if cfg.storage is not None:
-            fp_o = output; output = quantize(output, cfg.storage)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_o, output, cfg.storage)
+            output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_ref, output, cfg.storage)
         if cfg.output is not None:
-            fp_o = output; output = quantize(output, cfg.output)
-            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_o, output, cfg.output)
+            output = quantize(output, cfg.output)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", _true_ref, output, cfg.output)
+
+        # Emit total layer error: true fp32 batchnorm vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, output, _out_scheme)
 
         return output
 
@@ -529,9 +571,14 @@ class LayerNormFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         ctx.name = name
 
+        x_raw, weight_raw, bias_raw = x, weight, bias
+
         # Entry quantization: storage → compute
-        x = _quantize_norm_input(x, cfg, emit_fn)
-        q_weight, q_bias = _quantize_norm_weight_bias(weight, bias, cfg, emit_fn)
+        x = _quantize_norm_input(x, cfg, emit_fn, x_raw=x_raw)
+        q_weight, q_bias = _quantize_norm_weight_bias(
+            weight, bias, cfg, emit_fn,
+            weight_raw=weight_raw, bias_raw=bias_raw,
+        )
 
         output, _, x_norm, _, _, x_vare = _norm_forward(
             x, -1, q_weight, q_bias, eps, inner_scheme,
@@ -546,7 +593,24 @@ class LayerNormFunction(torch.autograd.Function):
         ctx.cfg = cfg
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
-        output = _quantize_norm_output(output, cfg, emit_fn)
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                _true_ref = F.layer_norm(
+                    x_raw, x_raw.shape[-1:], weight_raw, bias_raw, eps=eps,
+                )
+            finally:
+                _exit_quantize()
+
+        output = _quantize_norm_output(output, cfg, emit_fn, output_raw=_true_ref)
+
+        # Emit total layer error: true fp32 layernorm vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, output, _out_scheme)
 
         return output
 
@@ -639,9 +703,14 @@ class GroupNormFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         ctx.name = name
 
+        x_raw, weight_raw, bias_raw = x, weight, bias
+
         # Entry quantization: storage → compute
-        x = _quantize_norm_input(x, cfg, emit_fn)
-        q_weight, q_bias = _quantize_norm_weight_bias(weight, bias, cfg, emit_fn)
+        x = _quantize_norm_input(x, cfg, emit_fn, x_raw=x_raw)
+        q_weight, q_bias = _quantize_norm_weight_bias(
+            weight, bias, cfg, emit_fn,
+            weight_raw=weight_raw, bias_raw=bias_raw,
+        )
 
         sum_axes = list(range(1, x.ndim))
 
@@ -659,7 +728,24 @@ class GroupNormFunction(torch.autograd.Function):
         ctx.cfg = cfg
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
-        output = _quantize_norm_output(output, cfg, emit_fn)
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                _true_ref = F.group_norm(
+                    x_raw, num_groups, weight_raw, bias_raw, eps=eps,
+                )
+            finally:
+                _exit_quantize()
+
+        output = _quantize_norm_output(output, cfg, emit_fn, output_raw=_true_ref)
+
+        # Emit total layer error: true fp32 groupnorm vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, output, _out_scheme)
 
         return output
 
@@ -754,7 +840,10 @@ class RMSNormFunction(torch.autograd.Function):
         ctx.emit_fn = emit_fn
         ctx.name = name
 
-        x = _quantize_norm_input(x, cfg, emit_fn)
+        x_raw, weight_raw, bias_raw = x, weight, bias
+
+        # Entry quantization: storage → compute
+        x = _quantize_norm_input(x, cfg, emit_fn, x_raw=x_raw)
 
         # RMSNorm: x_rms = sqrt(mean(x^2) + eps), output = x * (1/x_rms) * weight + bias
         x2 = vec_mul(x, x, inner_scheme)
@@ -764,7 +853,10 @@ class RMSNormFunction(torch.autograd.Function):
         x_rms_inv = vec_recip(x_rms, inner_scheme)
         x_norm = vec_mul(x, x_rms_inv, inner_scheme)
 
-        q_weight, q_bias = _quantize_norm_weight_bias(weight, bias, cfg, emit_fn)
+        q_weight, q_bias = _quantize_norm_weight_bias(
+            weight, bias, cfg, emit_fn,
+            weight_raw=weight_raw, bias_raw=bias_raw,
+        )
 
         x_scale = vec_mul(q_weight, x_norm, inner_scheme)
         output = vec_add(x_scale, q_bias, inner_scheme)
@@ -778,7 +870,27 @@ class RMSNormFunction(torch.autograd.Function):
         ctx.cfg = cfg
         ctx.inner_scheme_bw = inner_scheme if quantize_backprop else None
 
-        output = _quantize_norm_output(output, cfg, emit_fn)
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                rms = torch.sqrt(x_raw.pow(2).mean(-1, keepdim=True) + eps)
+                _true_ref = x_raw / rms
+                if weight_raw is not None:
+                    _true_ref = _true_ref * weight_raw
+                if bias_raw is not None:
+                    _true_ref = _true_ref + bias_raw
+            finally:
+                _exit_quantize()
+
+        output = _quantize_norm_output(output, cfg, emit_fn, output_raw=_true_ref)
+
+        # Emit total layer error
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, output, _out_scheme)
 
         return output
 

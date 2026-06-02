@@ -67,19 +67,19 @@ class LookupFormat(FormatBase):
 
         return result
 
-    def _quantize_per_tensor(self, x, round_mode, allow_denorm=True, scale=None,
-                              scale_storage="pot"):
-        """Direct elemwise — LUT formats have their own scaling semantics."""
-        return self.quantize_elemwise(x, round_mode=round_mode,
-                                      allow_denorm=allow_denorm)
+    # _quantize_per_tensor is inherited from FormatBase.
+    # The base implementation treats ebits=0 as "integer-like" and does
+    # amax → normalise-to-[-1,1] → elemwise → rescale, which is correct
+    # for LUT formats whose levels are defined on [-1, 1].
 
-    def export_onnx(self, g, x, scheme):
-        """Emit com.microxscaling::NF4Quantize custom node with LUT levels."""
-        levels_list = self.levels.detach().cpu().tolist()
-        return g.op(
-            "com.microxscaling::NF4Quantize", x,
-            levels_f=levels_list,
-        )
+    def _per_block_norm_shift(self) -> int:
+        """LUT formats use max_norm=1.0 — their levels only cover [-1, 1].
+
+        Per-block POT normalisation yields values in [0.5, 2), so an extra
+        shift of 1 maps them to [0.25, 1) which fits within [-1, 1].
+        """
+        import math
+        return max(0, int(math.ceil(math.log2(2.0 / max(1.0, self.max_norm)))))
 
     def __eq__(self, other):
         if type(self) is not type(other):

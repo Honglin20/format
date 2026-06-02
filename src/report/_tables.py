@@ -23,7 +23,7 @@ class StudyTablesAccessor:
 
     # ── Per-Layer QSNR ─────────────────────────────────────────────────
 
-    def per_layer_qsnr(self, max_layers: int = 60) -> str:
+    def per_layer_qsnr(self, max_layers: int = 60, qsnr_type: str = "local") -> str:
         """Per-layer QSNR comparison table across all configs.
 
         One row per layer, one column per config. Rows sorted by worst QSNR
@@ -32,11 +32,14 @@ class StudyTablesAccessor:
         Args:
             max_layers: Maximum layers to display (default 60). Extra layers
                 are summarised at the bottom. Use 0 for unlimited.
+            qsnr_type: ``"local"`` (default) reads per-op observer QSNR.
+                ``"accum"`` reads end-to-end accumulated hook QSNR.
 
         Returns:
             Formatted text table.
         """
-        # Collect {layer: {config_name: qsnr}} from all parts
+        from src.viz.tables import _format_per_layer_qsnr_table
+
         all_layers: dict[str, dict[str, float]] = {}
         configs: list[str] = []
 
@@ -45,7 +48,8 @@ class StudyTablesAccessor:
                 cfg_name = r.name or "(unnamed)"
                 if cfg_name not in configs:
                     configs.append(cfg_name)
-                for layer, qsnr in r.qsnr_per_layer.items():
+                qsnr_dict = r.accum_qsnr_per_layer if qsnr_type == "accum" else r.qsnr_per_layer
+                for layer, qsnr in qsnr_dict.items():
                     all_layers.setdefault(layer, {})[cfg_name] = qsnr
 
         if not all_layers:
@@ -56,59 +60,44 @@ class StudyTablesAccessor:
             )
 
         configs.sort()
-
-        # Rank layers by worst QSNR (minimum across configs)
-        ranked: list[tuple[str, float]] = []
-        for layer in all_layers:
-            vals = [v for v in all_layers[layer].values() if v == v]
-            min_qsnr = min(vals) if vals else float("inf")
-            ranked.append((layer, min_qsnr))
-        ranked.sort(key=lambda x: x[1])
-
-        layer_order = [l for l, _ in ranked]
-
-        name_w = max(
-            len(l.replace("module.", "").replace("Quantized", ""))
-            for l in layer_order
-        )
-        name_w = min(max(name_w + 2, 10), 32)
-        val_w = 12
-
-        header = f"{'Layer':<{name_w}}" + "".join(
-            f" {cfg:<{val_w}}" for cfg in configs
-        )
-        sep = "-" * len(header)
-        lines = [
-            f"\n{'=' * len(header)}",
-            "Per-Layer QSNR (dB) — Lower = more quantization-sensitive",
-            "=" * len(header),
-            header,
-            sep,
-        ]
-
-        shown = layer_order if max_layers <= 0 else layer_order[:max_layers]
-        hidden_count = (
-            0 if max_layers <= 0 else len(layer_order) - max_layers
+        label = "accum" if qsnr_type == "accum" else "output"
+        return _format_per_layer_qsnr_table(
+            all_layers, configs, max_layers=max_layers,
+            title=f"Per-Layer QSNR (dB, {label}) — Lower = more quantization-sensitive",
         )
 
-        for layer in shown:
-            short = layer.replace("module.", "").replace("Quantized", "")[:name_w]
-            row = f"{short:<{name_w}}"
-            for cfg in configs:
-                val = all_layers[layer].get(cfg)
-                if val is not None and val == val:
-                    row += f" {val:<{val_w}.2f}"
-                else:
-                    row += f" {'-':<{val_w}}"
-            lines.append(row)
+    # ── Error source analysis ─────────────────────────────────────────
 
-        if hidden_count > 0:
-            lines.append(
-                f"\n  ... {hidden_count} more layers (omit for brevity; "
-                f"use max_layers=0 for full list)"
+    def error_source_analysis(self, role: str = "output") -> str:
+        """Per-layer error source diagnosis: accumulated vs local QSNR.
+
+        Delegates to :meth:`SessionTablesAccessor.error_source_analysis`
+        for each config, concatenating the per-config tables.
+
+        Args:
+            role: Tensor role to analyse (default ``"output"``).
+
+        Returns:
+            Formatted text table.
+        """
+        from src.report._session_tables import SessionTablesAccessor
+
+        blocks: list[str] = []
+        for part_results in self._report._results.values():
+            for r in part_results:
+                block = SessionTablesAccessor(r).error_source_analysis(role=role)
+                if block and not block.startswith("No "):
+                    blocks.append(block)
+
+        if not blocks:
+            return (
+                "No error propagation data available.\n"
+                "Requires QSNRObserver active (included in default outputs)\n"
+                "and keep_fp32=True (default).\n"
+                "session.run(calib_data, outputs=['qsnr'])"
             )
 
-        return "\n".join(lines)
+        return "\n".join(blocks)
 
     # ── CSV helpers ─────────────────────────────────────────────────────
 

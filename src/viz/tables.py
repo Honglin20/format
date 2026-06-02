@@ -3,6 +3,8 @@
 All functions are PURE: receive data, return formatted text.
 File I/O is self-contained (each function creates its own CSV).
 """
+from __future__ import annotations
+
 import math
 import os
 from collections import defaultdict
@@ -429,7 +431,7 @@ def sensitivity_table(all_results: dict, output_dir: str) -> str:
         key=lambda x: x[1], reverse=True,
     )[:10]
 
-    lines = [f"\n{'='*80}", "Table 6: Top-10 Most Sensitive Layers", "=" * 80,
+    lines = [f"\n{'='*80}", "Table 6: Top-10 Most Sensitive Layers (output)", "=" * 80,
              f"{'#':<4} {'Layer':<28} {'Max MSE':<18} {'Min QSNR (dB)':<15}", "-" * 80]
     for i, (layer, mse, qsnr) in enumerate(ranking, 1):
         lines.append(f"{i:<4} {layer:<28} {mse:<18.6e} {qsnr:<15.2f}")
@@ -446,6 +448,82 @@ def sensitivity_table(all_results: dict, output_dir: str) -> str:
 # ---------------------------------------------------------------------------
 # Table 9 — Per-Layer QSNR comparison across configs
 # ---------------------------------------------------------------------------
+
+def _format_per_layer_qsnr_table(
+    all_layers: Dict[str, Dict[str, float]],
+    configs: list,
+    *,
+    max_layers: int = 60,
+    title: str = "Per-Layer QSNR (dB, output) — Lower = more quantization-sensitive",
+) -> str:
+    """Shared formatter for per-layer QSNR tables.
+
+    Args:
+        all_layers: ``{layer_name: {config_name: qsnr_db}}``.
+        configs: Sorted list of config names (column order).
+        max_layers: Maximum layers to display (0 for unlimited).
+        title: Table title line.
+
+    Returns:
+        Formatted text table.
+    """
+    if not all_layers:
+        return "No QSNR per-layer data available."
+
+    # Rank layers by worst QSNR (minimum across configs)
+    ranked: list[tuple[str, float]] = []
+    for layer in all_layers:
+        vals = [v for v in all_layers[layer].values() if v == v]
+        min_qsnr = min(vals) if vals else float("inf")
+        ranked.append((layer, min_qsnr))
+    ranked.sort(key=lambda x: x[1])
+
+    layer_order = [l for l, _ in ranked]
+
+    name_w = max(
+        len(l.replace("module.", "").replace("Quantized", ""))
+        for l in layer_order
+    )
+    name_w = min(max(name_w + 2, 10), 32)
+    val_w = 12
+
+    header = f"{'Layer':<{name_w}}" + "".join(
+        f" {cfg:<{val_w}}" for cfg in configs
+    )
+    sep = "-" * len(header)
+    lines = [
+        f"\n{'=' * len(header)}",
+        title,
+        "=" * len(header),
+        header,
+        sep,
+    ]
+
+    shown = layer_order if max_layers <= 0 else layer_order[:max_layers]
+    hidden_count = 0 if max_layers <= 0 else len(layer_order) - max_layers
+
+    for layer in shown:
+        short = layer.replace("module.", "").replace("Quantized", "")[:name_w]
+        row = f"{short:<{name_w}}"
+        has_any = False
+        for cfg in configs:
+            val = all_layers[layer].get(cfg)
+            if val is not None and val == val:
+                row += f" {val:<{val_w}.2f}"
+                has_any = True
+            else:
+                row += f" {'-':<{val_w}}"
+        if has_any:
+            lines.append(row)
+
+    if hidden_count > 0:
+        lines.append(
+            f"\n  ... {hidden_count} more layers (omit for brevity; "
+            f"use max_layers=0 for full list)"
+        )
+
+    return "\n".join(lines)
+
 
 def per_layer_qsnr_table(
     results: dict,
@@ -478,8 +556,6 @@ def per_layer_qsnr_table(
         )
 
     configs = sorted(results.keys())
-
-    # Collect union of all layers
     all_layers: dict = {}
     for cfg_name in configs:
         data = results[cfg_name]
@@ -496,60 +572,22 @@ def per_layer_qsnr_table(
             "or session.run(calib_data, outputs=['qsnr'])."
         )
 
-    # Rank layers by worst QSNR (minimum across configs)
-    ranked = []
-    for layer in all_layers:
-        vals = [v for v in all_layers[layer].values() if v == v]
-        min_qsnr = min(vals) if vals else float("inf")
-        ranked.append((layer, min_qsnr))
-    ranked.sort(key=lambda x: x[1])
-
-    layer_order = [l for l, _ in ranked]
-
-    name_w = max(len(l.replace("module.", "").replace("Quantized", "")) for l in layer_order)
-    name_w = min(max(name_w + 2, 10), 32)
-    val_w = 12
-
-    # Build table lines
-    header = f"{'Layer':<{name_w}}" + "".join(
-        f" {cfg:<{val_w}}" for cfg in configs
+    result = _format_per_layer_qsnr_table(
+        all_layers, configs, max_layers=max_layers,
+        title="Table 9: Per-Layer QSNR (dB, output) — Lower = more quantization-sensitive",
     )
-    sep = "-" * len(header)
-    lines = [
-        f"\n{'=' * len(header)}",
-        "Table 9: Per-Layer QSNR (dB) — Lower = more quantization-sensitive",
-        "=" * len(header),
-        header,
-        sep,
-    ]
-
-    shown = layer_order[:max_layers]
-    hidden_count = len(layer_order) - max_layers
-
-    for layer in shown:
-        short = layer.replace("module.", "").replace("Quantized", "")[:name_w]
-        row = f"{short:<{name_w}}"
-        has_any = False
-        for cfg in configs:
-            val = all_layers[layer].get(cfg)
-            if val is not None and val == val:
-                row += f" {val:<{val_w}.2f}"
-                has_any = True
-            else:
-                row += f" {'-':<{val_w}}"
-        if has_any:
-            lines.append(row)
-
-    if hidden_count > 0:
-        lines.append(f"\n  ... {hidden_count} more layers (omit for brevity; "
-                     f"see CSV for full list)")
-
-    result = "\n".join(lines)
 
     # CSV
     csv_dir = os.path.join(output_dir, "tables")
     os.makedirs(csv_dir, exist_ok=True)
     csv_path = os.path.join(csv_dir, filename)
+
+    layer_order = [l for l, _ in sorted(
+        [(l, min([v for v in all_layers[l].values() if v == v]) if any(v == v for v in all_layers[l].values()) else float("inf"))
+         for l in all_layers],
+        key=lambda x: x[1],
+    )]
+
     with open(csv_path, "w") as f:
         f.write("Layer," + ",".join(f"{cfg}_QSNR_dB" for cfg in configs) + "\n")
         for layer in layer_order:

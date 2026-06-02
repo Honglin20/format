@@ -3,6 +3,8 @@
 compare_formats: run the same calibration data through multiple quantization
 configurations and produce a ComparisonReport for side-by-side analysis.
 """
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 

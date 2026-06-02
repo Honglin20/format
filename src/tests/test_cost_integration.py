@@ -1,15 +1,18 @@
-"""Integration tests for cost model with _QuantSession and Session."""
+"""Integration tests for cost model with quantize_model and run_quantization."""
+import copy
+
 import pytest
 import torch
 import torch.nn as nn
-import torch
 
-from src.session import QuantConfig, Session
-from src.session._quant import _QuantSession
+from src.session import QuantConfig
+from src.session._model import quantize_model
+from src.session._session import run_quantization
 from src.scheme.op_config import OpQuantConfig
 from src.scheme.quant_scheme import QuantScheme
 from src.scheme.granularity import GranularitySpec
 from src.formats.base import FormatBase
+from src.cost.model_cost import analyze_model_cost
 
 
 @pytest.fixture
@@ -19,67 +22,54 @@ def int8_cfg():
     return OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
 
-def test_session_estimate_cost_quantized(int8_cfg):
+def test_quantized_estimate_cost_quantized(int8_cfg):
     model = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 10))
-    session = _QuantSession(model, int8_cfg, keep_fp32=True)
+    qmodel = quantize_model(copy.deepcopy(model), int8_cfg)
 
-    cost_q = session.estimate_cost()
+    cost_q = analyze_model_cost(qmodel)
     assert cost_q.total_latency_us > 0
     assert cost_q.total_memory_bytes > 0
     assert len(cost_q.layers) >= 2
 
 
-def test_session_estimate_cost_fp32(int8_cfg):
+def test_quantized_estimate_cost_fp32(int8_cfg):
     model = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 10))
-    session = _QuantSession(model, int8_cfg, keep_fp32=True)
+    fp32_model = copy.deepcopy(model)
 
-    cost_fp32 = session.estimate_cost(fp32=True)
+    cost_fp32 = analyze_model_cost(fp32_model)
     assert cost_fp32.total_latency_us > 0
     assert cost_fp32.total_memory_bytes > 0
 
 
 def test_quantized_model_has_less_weight_memory(int8_cfg):
-    """INT8 quantized weights should use less memory than FP32.
-
-    quantize_model replaces named child modules, so we must wrap the
-    Linear in a container to ensure replacement happens (root is skipped).
-    """
+    """INT8 quantized weights should use less memory than FP32."""
     class Wrapper(nn.Module):
         def __init__(self):
             super().__init__()
             self.fc = nn.Linear(64, 32)
         def forward(self, x): return self.fc(x)
 
-    session = _QuantSession(Wrapper(), int8_cfg, keep_fp32=True)
+    qmodel = quantize_model(Wrapper(), int8_cfg)
+    fp32_model = Wrapper()
 
-    cost_q = session.estimate_cost()
-    cost_fp32 = session.estimate_cost(fp32=True)
+    cost_q = analyze_model_cost(qmodel)
+    cost_fp32 = analyze_model_cost(fp32_model)
 
-    # INT8 weight memory (2048 B) < FP32 weight memory (8192 B)
     assert cost_q.total_memory_bytes < cost_fp32.total_memory_bytes
 
 
-def test_session_estimate_cost_no_fp32_raises(int8_cfg):
+def test_estimate_cost_no_fp32_model_ok(int8_cfg):
+    """analyze_model_cost works on quantized model alone."""
     model = nn.Linear(64, 10)
-    session = _QuantSession(model, int8_cfg, keep_fp32=False)
+    qmodel = quantize_model(model, int8_cfg)
 
-    with pytest.raises(RuntimeError, match="fp32_model"):
-        session.estimate_cost(fp32=True)
-
-
-def test_session_estimate_cost_quantized_no_fp32_ok(int8_cfg):
-    """estimate_cost() (quantized) works even when keep_fp32=False."""
-    model = nn.Linear(64, 10)
-    session = _QuantSession(model, int8_cfg, keep_fp32=False)
-
-    cost = session.estimate_cost()  # fp32=False (default)
+    cost = analyze_model_cost(qmodel)
     assert cost.total_latency_us > 0
 
 
-# ── Session cost integration tests ────────────────────────────────
+# ── run_quantization cost integration tests ──────────────────────────
 
 def _dummy_eval_fn(model, data):
-    """Eval fn for cost integration tests."""
     model.eval()
     with torch.no_grad():
         if isinstance(data, (list, tuple)):
@@ -90,13 +80,13 @@ def _dummy_eval_fn(model, data):
     return {"accuracy": 0.9}
 
 
-def test_session_attaches_cost_keys():
-    """Session.run() returns a result with cost and cost_fp32."""
+def test_run_quantization_attaches_cost_keys():
+    """run_quantization() returns result with cost and cost_fp32."""
     cfg = QuantConfig(name="cfg1", w_format="int8", w_granularity="per_tensor")
     model = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 10))
-    session = Session(model, cfg)
 
-    result = session.run(
+    qmodel, fp32_model, result = run_quantization(
+        model, cfg,
         calib_data=[torch.randn(2, 64)],
         eval_data=torch.randn(2, 64),
         eval_fn=_dummy_eval_fn,
@@ -108,13 +98,13 @@ def test_session_attaches_cost_keys():
     assert result.cost_fp32.total_latency_us > 0
 
 
-def test_session_cost_keys_present_even_without_analysis():
-    """cost and cost_fp32 are present even when analysis is skipped."""
+def test_run_quantization_cost_present():
+    """cost keys are present in result."""
     cfg = QuantConfig(name="cfg1", w_format="int8", w_granularity="per_tensor")
     model = nn.Sequential(nn.Linear(64, 32))
-    session = Session(model, cfg)
 
-    result = session.run(
+    qmodel, fp32_model, result = run_quantization(
+        model, cfg,
         calib_data=[torch.randn(2, 64)],
         eval_data=torch.randn(2, 64),
         eval_fn=_dummy_eval_fn,

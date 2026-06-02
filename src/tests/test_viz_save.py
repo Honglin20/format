@@ -14,8 +14,8 @@ class TestSaveFigure:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = save_figure(fig, tmpdir, "test_chart")
-            assert os.path.exists(os.path.join(tmpdir, "figures", "test_chart.png"))
-            assert os.path.exists(os.path.join(tmpdir, "figures", "test_chart.pdf"))
+            assert os.path.exists(os.path.join(tmpdir, "test_chart.png"))
+            assert os.path.exists(os.path.join(tmpdir, "test_chart.pdf"))
 
     def test_save_figure_returns_path(self):
         fig, ax = plt.subplots()

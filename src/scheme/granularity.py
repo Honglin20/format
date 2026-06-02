@@ -13,6 +13,7 @@ class GranularityMode(Enum):
     PER_TENSOR = "per_tensor"
     PER_CHANNEL = "per_channel"
     PER_BLOCK = "per_block"
+    BANK = "bank"
     DYNAMIC_GROUP = "dynamic_group"
 
 
@@ -35,6 +36,8 @@ class GranularitySpec:
     block_size: int = 0
     channel_axis: int = 0
     block_axis: int = -1  # Default: last dimension (MX forward convention)
+    bank_size: int = 16
+    bank_axis: int = -1
     outlier_ratio: float = 0.0  # ∈ [0,1]. >0: split block into outliers + normals
 
     def __post_init__(self):
@@ -62,19 +65,31 @@ class GranularitySpec:
             raise ValueError(
                 f"{self.mode.name} requires block_axis=-1, got {self.block_axis}"
             )
+        # BANK validations
+        if self.mode == GranularityMode.BANK and self.bank_size <= 0:
+            raise ValueError(
+                f"BANK requires bank_size > 0, got {self.bank_size}"
+            )
+        if self.mode == GranularityMode.BANK and self.block_size != 0:
+            raise ValueError(
+                f"BANK requires block_size=0, got {self.block_size}"
+            )
+        if self.mode == GranularityMode.BANK and self.channel_axis != 0:
+            raise ValueError(
+                f"BANK requires channel_axis=0, got {self.channel_axis}"
+            )
+        if self.mode not in (GranularityMode.BANK,) and self.bank_axis != -1:
+            raise ValueError(
+                f"{self.mode.name} requires bank_axis=-1, got {self.bank_axis}"
+            )
         if not (0.0 <= self.outlier_ratio <= 1.0):
             raise ValueError(
                 f"outlier_ratio must be in [0, 1], got {self.outlier_ratio}"
             )
-        if self.outlier_ratio > 0.0:
-            if self.mode != GranularityMode.PER_BLOCK:
-                raise ValueError(
-                    f"outlier_ratio > 0 requires PER_BLOCK mode, got {self.mode.name}"
-                )
-            if self.block_size <= 0:
-                raise ValueError(
-                    f"outlier_ratio > 0 requires block_size > 0, got {self.block_size}"
-                )
+        if self.outlier_ratio > 0.0 and self.mode == GranularityMode.PER_BLOCK and self.block_size <= 0:
+            raise ValueError(
+                f"outlier_ratio > 0 with PER_BLOCK requires block_size > 0, got {self.block_size}"
+            )
 
     @staticmethod
     def per_tensor() -> "GranularitySpec":

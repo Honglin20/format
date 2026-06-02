@@ -1,5 +1,7 @@
 # LSQ 可学习量化
 
+> 进阶深入。快速上手请阅读 [Session 精度优化方法](../guides/session/optimization.md#32-lsq)。
+
 当静态校准不够时，用 LSQ（Learned Step Size Quantization）通过梯度下降学习最优 pre-scale。
 
 ## 用法

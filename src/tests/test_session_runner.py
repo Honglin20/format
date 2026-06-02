@@ -1,7 +1,7 @@
-"""Tests for the legacy pipeline runner replaced by Session/Study.
+"""Tests for the run_quantization replacement for Session results.
 
-The old ExperimentRunner is replaced by ``Session`` + ``SessionResult``.
-These tests verify that the new API covers the same use cases.
+The old Session class has been replaced by run_quantization().
+These tests verify the new API covers the same use cases.
 """
 import copy
 
@@ -9,7 +9,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.session import QuantConfig, Session, SessionResult
+from src.session._config import QuantConfig
+from src.session._result import SessionResult
+from src.session._session import run_quantization
 
 
 class TinyModel(nn.Sequential):
@@ -19,15 +21,14 @@ class TinyModel(nn.Sequential):
         super().__init__(nn.Linear(4, 3))
 
 
-class TestSessionResults:
-    def test_session_returns_session_result(self):
-        """Session.run() returns a SessionResult with expected keys."""
+class TestRunQuantizationResults:
+    def test_run_quantization_returns_session_result(self):
+        """run_quantization() returns a SessionResult with expected keys."""
         model = nn.Sequential(nn.Linear(4, 3))
         model[0].weight.data.fill_(0.5)
         model[0].bias.data.fill_(0.0)
 
         cfg = QuantConfig(w_format="int8", w_granularity="per_channel", name="int8_pc")
-        session = Session(model, cfg)
 
         calib_data = [torch.randn(2, 4)]
 
@@ -40,8 +41,8 @@ class TestSessionResults:
                 out = m(data)
             return {"mean_output": out.mean().item()}
 
-        result = session.run(
-            calib_data=calib_data,
+        qmodel, fp32_model, result = run_quantization(
+            model, cfg, calib_data,
             eval_data=torch.randn(2, 4),
             eval_fn=_eval_fn,
         )
@@ -52,12 +53,10 @@ class TestSessionResults:
         assert result.delta is not None
 
     def test_original_model_not_mutated_when_copied(self):
-        """When the caller passes a deep copy, the original remains nn.Linear."""
+        """When run_quantization is called, the original remains nn.Linear."""
         model = nn.Sequential(nn.Linear(4, 3))
 
         cfg = QuantConfig(w_format="int8", w_granularity="per_tensor")
-        model_copy = copy.deepcopy(model)
-        session = Session(model_copy, cfg)
 
         def _eval_fn(m, data):
             m.eval()
@@ -68,8 +67,8 @@ class TestSessionResults:
                 out = m(data)
             return {"mean_output": out.mean().item()}
 
-        session.run(
-            calib_data=[torch.randn(2, 4)],
+        qmodel, fp32_model, result = run_quantization(
+            model, cfg, [torch.randn(2, 4)],
             eval_data=torch.randn(2, 4),
             eval_fn=_eval_fn,
         )

@@ -15,7 +15,9 @@ from torch.nn import grad as nn_grad
 
 from src.scheme.op_config import OpQuantConfig
 from src.quantize import quantize
+from src.quantize.elemwise import _enter_quantize, _exit_quantize
 from src.observer.mixin import ObservableMixin
+from src.ops._calib_buffers import CalibrationBuffers
 
 
 def _conv_weight(input, weight_shape, grad_output, stride=1, padding=0,
@@ -58,7 +60,9 @@ class ConvFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight, bias, stride, padding, dilation, groups,
-                cfg: OpQuantConfig, name=None, emit_fn=None):
+                cfg: OpQuantConfig, name=None, emit_fn=None,
+                buffers: CalibrationBuffers = None):
+        buffers = buffers or CalibrationBuffers()
         ctx.has_bias = bias is not None
         ctx.stride = stride
         ctx.padding = padding
@@ -79,57 +83,179 @@ class ConvFunction(torch.autograd.Function):
         input_raw, weight_raw = input, weight
 
         # input: storage → compute
+        # Use input_raw for ALL input observer fp32 references.
         if cfg.storage is not None:
-            fp_in = input; input = quantize(input, cfg.storage)
-            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, cfg.storage)
+            input = quantize(input, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", input_raw, input, cfg.storage)
         input_post_storage = input
-        if cfg.input is not None:
-            fp_in = input; input = quantize(input, cfg.input)
-            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_in, input, cfg.input)
+        sq_split = False
+        if cfg.input is not None and buffers.input_sq_activation_mask is not None:
+            # SQ-format activation static: split by mask, two precision convs.
+            import dataclasses
+            sq_mask = buffers.input_sq_activation_mask.to(input.device)
+            high_idx = sq_mask.nonzero(as_tuple=True)[0]
+            low_idx = (~sq_mask).nonzero(as_tuple=True)[0]
+            has_high = high_idx.numel() > 0
+            has_low = low_idx.numel() > 0
 
-        # weight: storage → compute
-        if cfg.storage is not None:
-            fp_wt = weight; weight = quantize(weight, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_wt, weight, cfg.storage)
-        weight_post_storage = weight
-        if cfg.weight is not None:
-            fp_wt = weight; weight = quantize(weight, cfg.weight)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_wt, weight, cfg.weight)
+            from src.scheme.granularity import GranularityMode, GranularitySpec
+            part_gran = GranularitySpec(mode=GranularityMode.PER_CHANNEL, channel_axis=1)
 
-        # bias: storage → compute
-        q_bias = bias
-        if bias is not None and cfg.storage is not None:
-            fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
-            if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
-        if bias is not None and cfg.bias is not None:
-            fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
-            if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
+            if has_high and has_low:
+                input_high = input.index_select(1, high_idx)
+                input_low = input.index_select(1, low_idx)
+                high_scheme = dataclasses.replace(
+                    cfg.input, format=cfg.input.outlier_format,
+                    outlier_format=None, sq_importance=False,
+                    granularity=part_gran,
+                )
+                low_scheme = dataclasses.replace(cfg.input, granularity=part_gran)
+                input_high_q = quantize(input_high, high_scheme)
+                input_low_q = quantize(input_low, low_scheme)
+            elif not has_low:
+                high_scheme = dataclasses.replace(
+                    cfg.input, format=cfg.input.outlier_format,
+                    outlier_format=None, sq_importance=False,
+                    granularity=part_gran,
+                )
+                input_high_q = quantize(input, high_scheme)
+                input_low_q = None
+            else:
+                low_scheme = dataclasses.replace(cfg.input, granularity=part_gran)
+                input_high_q = None
+                input_low_q = quantize(input, low_scheme)
 
-        # Save for backward
-        if cfg.is_training:
-            ctx.save_for_backward(input_post_storage, weight_post_storage)
-        else:
-            ctx.save_for_backward(input_raw, weight_raw)
+            # weight: storage
+            if cfg.storage is not None:
+                weight = quantize(weight, cfg.storage)
+                if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
+            weight_post_storage = weight
+            # Split weight
+            if has_high and has_low:
+                weight_high = weight.index_select(1, high_idx)
+                weight_low = weight.index_select(1, low_idx)
+                if cfg.weight is not None:
+                    weight_high_q = quantize(weight_high, cfg.weight)
+                    weight_low_q = quantize(weight_low, cfg.weight)
+                else:
+                    weight_high_q = weight_high
+                    weight_low_q = weight_low
+            elif not has_low:
+                weight_high_q = quantize(weight, cfg.weight) if cfg.weight is not None else weight
+                weight_low_q = None
+            else:
+                weight_high_q = None
+                weight_low_q = quantize(weight, cfg.weight) if cfg.weight is not None else weight
 
-        ctx.cfg = cfg
+            # bias
+            q_bias = bias
+            if bias is not None and cfg.storage is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+                if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+            if bias is not None and cfg.bias is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+                if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
 
-        # Compute conv
-        if num_spatial_dims == 1:
-            output = F.conv1d(input, weight, q_bias, stride, padding, dilation, groups)
-        elif num_spatial_dims == 2:
-            output = F.conv2d(input, weight, q_bias, stride, padding, dilation, groups)
-        else:
-            output = F.conv3d(input, weight, q_bias, stride, padding, dilation, groups)
+            # Save for backward
+            if cfg.is_training:
+                ctx.save_for_backward(input_post_storage, weight_post_storage)
+            else:
+                ctx.save_for_backward(input_raw, weight_raw)
+
+            ctx.cfg = cfg
+
+            # Two parallel convs (bias added at end to avoid double-counting)
+            conv_fn = {1: F.conv1d, 2: F.conv2d, 3: F.conv3d}[num_spatial_dims]
+            if has_high and has_low:
+                output = (conv_fn(input_high_q, weight_high_q, None, stride, padding, dilation, groups)
+                          + conv_fn(input_low_q, weight_low_q, None, stride, padding, dilation, groups))
+            elif not has_low:
+                output = conv_fn(input_high_q, weight_high_q, None, stride, padding, dilation, groups)
+            else:
+                output = conv_fn(input_low_q, weight_low_q, None, stride, padding, dilation, groups)
+
+            if q_bias is not None:
+                _enter_quantize()
+                try:
+                    output = output + q_bias.reshape([1, -1] + [1] * num_spatial_dims)
+                finally:
+                    _exit_quantize()
+
+            sq_split = True
+
+        elif cfg.input is not None:
+            input = quantize(input, cfg.input, scale=buffers.input_scale,
+                             mask=buffers.input_mask, scale_o=buffers.input_scale_o,
+                             sq_activation_mask=buffers.input_sq_activation_mask,
+                             group_mask=buffers.input_group_mask)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", input_raw, input, cfg.input)
+
+        # weight: storage → compute (skipped when SQ split already handled it)
+        if not sq_split:
+            if cfg.storage is not None:
+                weight = quantize(weight, cfg.storage)
+                if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
+            weight_post_storage = weight
+            if cfg.weight is not None:
+                weight = quantize(weight, cfg.weight, scale=buffers.weight_scale, importance=buffers.weight_importance)
+                if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, weight, cfg.weight)
+
+            # bias: storage → compute
+            q_bias = bias
+            if bias is not None and cfg.storage is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.storage)
+                if emit_fn: emit_fn("bias", 0, "weight_pre_quant", fp_b, q_bias, cfg.storage)
+            if bias is not None and cfg.bias is not None:
+                fp_b = q_bias; q_bias = quantize(q_bias, cfg.bias)
+                if emit_fn: emit_fn("bias", 1, "weight_pre_quant", fp_b, q_bias, cfg.bias)
+
+            # Save for backward
+            if cfg.is_training:
+                ctx.save_for_backward(input_post_storage, weight_post_storage)
+            else:
+                ctx.save_for_backward(input_raw, weight_raw)
+
+            ctx.cfg = cfg
+
+            # Compute conv
+            if num_spatial_dims == 1:
+                output = F.conv1d(input, weight, q_bias, stride, padding, dilation, groups)
+            elif num_spatial_dims == 2:
+                output = F.conv2d(input, weight, q_bias, stride, padding, dilation, groups)
+            else:
+                output = F.conv3d(input, weight, q_bias, stride, padding, dilation, groups)
+
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                if num_spatial_dims == 1:
+                    _true_ref = F.conv1d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+                elif num_spatial_dims == 2:
+                    _true_ref = F.conv2d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+                else:
+                    _true_ref = F.conv3d(input_raw, weight_raw, bias, stride, padding, dilation, groups)
+            finally:
+                _exit_quantize()
 
         # Output: storage (bias already included in conv)
         if cfg.storage is not None:
-            fp_out = output; output = quantize(output, cfg.storage)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, cfg.storage)
+            output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_ref, output, cfg.storage)
 
         # Output compute
         if cfg.output is not None:
-            fp_out = output; output = quantize(output, cfg.output)
-            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_out, output, cfg.output)
+            output = quantize(output, cfg.output, scale=buffers.output_scale,
+                              mask=buffers.output_mask, scale_o=buffers.output_scale_o,
+                              group_mask=buffers.output_group_mask)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", _true_ref, output, cfg.output)
+
+        # Emit total layer error: true fp32 conv vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, output, _out_scheme)
 
         return output
 
@@ -210,11 +336,11 @@ class ConvFunction(torch.autograd.Function):
                 grad_bias = quantize(grad_bias, cfg.grad_bias)
 
         return (grad_input, grad_weight, grad_bias,
-                None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None)
 
     @staticmethod
     def symbolic(g, input, weight, bias, stride, padding, dilation, groups,
-                 cfg, name, emit_fn):
+                 cfg, name, emit_fn, buffers=None):
         from src.onnx.helpers import _emit_quantize_node
         from src.session._context import _export_scales_var, _onnx_current_scale_var
 
@@ -288,10 +414,24 @@ class QuantizedConv2d(ObservableMixin, nn.Conv2d):
             return self._conv_forward(x, self.weight, self.bias)
 
         emit_fn = self._emit if self._observers else None
+        buffers = CalibrationBuffers(
+            output_scale=self.get_buffer("_output_scale") if hasattr(self, "_output_scale") else None,
+            input_scale=self.get_buffer("_input_scale") if hasattr(self, "_input_scale") else None,
+            output_mask=self.get_buffer("_output_mask") if hasattr(self, "_output_mask") else None,
+            output_scale_o=self.get_buffer("_output_scale_o") if hasattr(self, "_output_scale_o") else None,
+            input_mask=self.get_buffer("_input_mask") if hasattr(self, "_input_mask") else None,
+            input_scale_o=self.get_buffer("_input_scale_o") if hasattr(self, "_input_scale_o") else None,
+            weight_importance=self.get_buffer("_sq_importance") if hasattr(self, "_sq_importance") else None,
+            input_sq_activation_mask=self.get_buffer("_sq_activation_mask") if hasattr(self, "_sq_activation_mask") else None,
+            output_group_mask=self.get_buffer("_output_group_mask") if hasattr(self, "_output_group_mask") else None,
+            input_group_mask=self.get_buffer("_input_group_mask") if hasattr(self, "_input_group_mask") else None,
+            weight_scale=self.get_buffer("_weight_scale") if hasattr(self, "_weight_scale") else None,
+        )
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
             self.cfg, self._analysis_name, emit_fn,
+            buffers,
         )
 
 
@@ -312,10 +452,24 @@ class QuantizedConv1d(ObservableMixin, nn.Conv1d):
             return self._conv_forward(x, self.weight, self.bias)
 
         emit_fn = self._emit if self._observers else None
+        buffers = CalibrationBuffers(
+            output_scale=self.get_buffer("_output_scale") if hasattr(self, "_output_scale") else None,
+            input_scale=self.get_buffer("_input_scale") if hasattr(self, "_input_scale") else None,
+            output_mask=self.get_buffer("_output_mask") if hasattr(self, "_output_mask") else None,
+            output_scale_o=self.get_buffer("_output_scale_o") if hasattr(self, "_output_scale_o") else None,
+            input_mask=self.get_buffer("_input_mask") if hasattr(self, "_input_mask") else None,
+            input_scale_o=self.get_buffer("_input_scale_o") if hasattr(self, "_input_scale_o") else None,
+            weight_importance=self.get_buffer("_sq_importance") if hasattr(self, "_sq_importance") else None,
+            input_sq_activation_mask=self.get_buffer("_sq_activation_mask") if hasattr(self, "_sq_activation_mask") else None,
+            output_group_mask=self.get_buffer("_output_group_mask") if hasattr(self, "_output_group_mask") else None,
+            input_group_mask=self.get_buffer("_input_group_mask") if hasattr(self, "_input_group_mask") else None,
+            weight_scale=self.get_buffer("_weight_scale") if hasattr(self, "_weight_scale") else None,
+        )
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
             self.cfg, self._analysis_name, emit_fn,
+            buffers,
         )
 
 
@@ -336,10 +490,24 @@ class QuantizedConv3d(ObservableMixin, nn.Conv3d):
             return self._conv_forward(x, self.weight, self.bias)
 
         emit_fn = self._emit if self._observers else None
+        buffers = CalibrationBuffers(
+            output_scale=self.get_buffer("_output_scale") if hasattr(self, "_output_scale") else None,
+            input_scale=self.get_buffer("_input_scale") if hasattr(self, "_input_scale") else None,
+            output_mask=self.get_buffer("_output_mask") if hasattr(self, "_output_mask") else None,
+            output_scale_o=self.get_buffer("_output_scale_o") if hasattr(self, "_output_scale_o") else None,
+            input_mask=self.get_buffer("_input_mask") if hasattr(self, "_input_mask") else None,
+            input_scale_o=self.get_buffer("_input_scale_o") if hasattr(self, "_input_scale_o") else None,
+            weight_importance=self.get_buffer("_sq_importance") if hasattr(self, "_sq_importance") else None,
+            input_sq_activation_mask=self.get_buffer("_sq_activation_mask") if hasattr(self, "_sq_activation_mask") else None,
+            output_group_mask=self.get_buffer("_output_group_mask") if hasattr(self, "_output_group_mask") else None,
+            input_group_mask=self.get_buffer("_input_group_mask") if hasattr(self, "_input_group_mask") else None,
+            weight_scale=self.get_buffer("_weight_scale") if hasattr(self, "_weight_scale") else None,
+        )
         return ConvFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, self.dilation, self.groups,
             self.cfg, self._analysis_name, emit_fn,
+            buffers,
         )
 
 
@@ -362,7 +530,9 @@ class ConvTransposeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight, bias, stride, padding, output_padding,
-                dilation, groups, cfg: OpQuantConfig, name=None, emit_fn=None):
+                dilation, groups, cfg: OpQuantConfig, name=None, emit_fn=None,
+                buffers: CalibrationBuffers = None):
+        buffers = buffers or CalibrationBuffers()
         ctx.has_bias = bias is not None
         ctx.stride = stride
         ctx.padding = padding
@@ -377,23 +547,26 @@ class ConvTransposeFunction(torch.autograd.Function):
 
         input_raw, weight_raw = input, weight
 
-        # input: storage → compute
+        # input: storage → compute (use input_raw for all fp32 references)
         if cfg.storage is not None:
-            fp_in = input; input = quantize(input, cfg.storage)
-            if emit_fn: emit_fn("input", 0, "input_pre_quant", fp_in, input, cfg.storage)
+            input = quantize(input, cfg.storage)
+            if emit_fn: emit_fn("input", 0, "input_pre_quant", input_raw, input, cfg.storage)
         input_post_storage = input
         if cfg.input is not None:
-            fp_in = input; input = quantize(input, cfg.input)
-            if emit_fn: emit_fn("input", 1, "input_pre_quant", fp_in, input, cfg.input)
+            input = quantize(input, cfg.input, scale=buffers.input_scale,
+                             mask=buffers.input_mask, scale_o=buffers.input_scale_o,
+                             sq_activation_mask=buffers.input_sq_activation_mask,
+                             group_mask=buffers.input_group_mask)
+            if emit_fn: emit_fn("input", 1, "input_pre_quant", input_raw, input, cfg.input)
 
-        # weight: storage → compute
+        # weight: storage → compute (use weight_raw for all fp32 references)
         if cfg.storage is not None:
-            fp_wt = weight; weight = quantize(weight, cfg.storage)
-            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", fp_wt, weight, cfg.storage)
+            weight = quantize(weight, cfg.storage)
+            if emit_fn: emit_fn("weight", 0, "weight_pre_quant", weight_raw, weight, cfg.storage)
         weight_post_storage = weight
         if cfg.weight is not None:
-            fp_wt = weight; weight = quantize(weight, cfg.weight)
-            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", fp_wt, weight, cfg.weight)
+            weight = quantize(weight, cfg.weight, scale=buffers.weight_scale, importance=buffers.weight_importance)
+            if emit_fn: emit_fn("weight", 1, "weight_pre_quant", weight_raw, weight, cfg.weight)
 
         # bias: storage → compute
         q_bias = bias
@@ -423,15 +596,40 @@ class ConvTransposeFunction(torch.autograd.Function):
             output = F.conv_transpose3d(input, weight, q_bias, stride, padding,
                                         output_padding, groups, dilation)
 
+        # Pre-compute true fp32 output for ALL observer output stages.
+        _true_ref = None
+        if emit_fn is not None:
+            _enter_quantize()
+            try:
+                if num_spatial_dims == 1:
+                    _true_ref = F.conv_transpose1d(input_raw, weight_raw, bias, stride, padding,
+                                                   output_padding, groups, dilation)
+                elif num_spatial_dims == 2:
+                    _true_ref = F.conv_transpose2d(input_raw, weight_raw, bias, stride, padding,
+                                                   output_padding, groups, dilation)
+                else:
+                    _true_ref = F.conv_transpose3d(input_raw, weight_raw, bias, stride, padding,
+                                                   output_padding, groups, dilation)
+            finally:
+                _exit_quantize()
+
         # Output: storage
         if cfg.storage is not None:
-            fp_out = output; output = quantize(output, cfg.storage)
-            if emit_fn: emit_fn("output", 0, "output_post_quant", fp_out, output, cfg.storage)
+            output = quantize(output, cfg.storage)
+            if emit_fn: emit_fn("output", 0, "output_post_quant", _true_ref, output, cfg.storage)
 
         # Output compute
         if cfg.output is not None:
-            fp_out = output; output = quantize(output, cfg.output)
-            if emit_fn: emit_fn("output", 1, "output_post_quant", fp_out, output, cfg.output)
+            output = quantize(output, cfg.output, scale=buffers.output_scale,
+                              mask=buffers.output_mask, scale_o=buffers.output_scale_o,
+                              group_mask=buffers.output_group_mask)
+            if emit_fn: emit_fn("output", 1, "output_post_quant", _true_ref, output, cfg.output)
+
+        # Emit total layer error: true fp32 conv_transpose vs final quantized output
+        if emit_fn is not None:
+            _out_scheme = cfg.output or cfg.weight or cfg.input or cfg.storage
+            if _out_scheme is not None:
+                emit_fn("output", 2, "layer_total", _true_ref, output, _out_scheme)
 
         return output
 
@@ -520,11 +718,11 @@ class ConvTransposeFunction(torch.autograd.Function):
                 grad_bias = quantize(grad_bias, cfg.grad_bias)
 
         return (grad_input, grad_weight, grad_bias,
-                None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None)
 
     @staticmethod
     def symbolic(g, input, weight, bias, stride, padding, output_padding,
-                 dilation, groups, cfg, name, emit_fn):
+                 dilation, groups, cfg, name, emit_fn, buffers=None):
         from src.onnx.helpers import _emit_quantize_node
         from src.session._context import _export_scales_var, _onnx_current_scale_var
 
@@ -604,11 +802,25 @@ class QuantizedConvTranspose2d(ObservableMixin, nn.ConvTranspose2d):
         )
 
         emit_fn = self._emit if self._observers else None
+        buffers = CalibrationBuffers(
+            output_scale=self.get_buffer("_output_scale") if hasattr(self, "_output_scale") else None,
+            input_scale=self.get_buffer("_input_scale") if hasattr(self, "_input_scale") else None,
+            output_mask=self.get_buffer("_output_mask") if hasattr(self, "_output_mask") else None,
+            output_scale_o=self.get_buffer("_output_scale_o") if hasattr(self, "_output_scale_o") else None,
+            input_mask=self.get_buffer("_input_mask") if hasattr(self, "_input_mask") else None,
+            input_scale_o=self.get_buffer("_input_scale_o") if hasattr(self, "_input_scale_o") else None,
+            weight_importance=self.get_buffer("_sq_importance") if hasattr(self, "_sq_importance") else None,
+            input_sq_activation_mask=self.get_buffer("_sq_activation_mask") if hasattr(self, "_sq_activation_mask") else None,
+            output_group_mask=self.get_buffer("_output_group_mask") if hasattr(self, "_output_group_mask") else None,
+            input_group_mask=self.get_buffer("_input_group_mask") if hasattr(self, "_input_group_mask") else None,
+            weight_scale=self.get_buffer("_weight_scale") if hasattr(self, "_weight_scale") else None,
+        )
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
             self.dilation, self.groups,
             self.cfg, self._analysis_name, emit_fn,
+            buffers,
         )
 
 
@@ -634,11 +846,25 @@ class QuantizedConvTranspose1d(ObservableMixin, nn.ConvTranspose1d):
         )
 
         emit_fn = self._emit if self._observers else None
+        buffers = CalibrationBuffers(
+            output_scale=self.get_buffer("_output_scale") if hasattr(self, "_output_scale") else None,
+            input_scale=self.get_buffer("_input_scale") if hasattr(self, "_input_scale") else None,
+            output_mask=self.get_buffer("_output_mask") if hasattr(self, "_output_mask") else None,
+            output_scale_o=self.get_buffer("_output_scale_o") if hasattr(self, "_output_scale_o") else None,
+            input_mask=self.get_buffer("_input_mask") if hasattr(self, "_input_mask") else None,
+            input_scale_o=self.get_buffer("_input_scale_o") if hasattr(self, "_input_scale_o") else None,
+            weight_importance=self.get_buffer("_sq_importance") if hasattr(self, "_sq_importance") else None,
+            input_sq_activation_mask=self.get_buffer("_sq_activation_mask") if hasattr(self, "_sq_activation_mask") else None,
+            output_group_mask=self.get_buffer("_output_group_mask") if hasattr(self, "_output_group_mask") else None,
+            input_group_mask=self.get_buffer("_input_group_mask") if hasattr(self, "_input_group_mask") else None,
+            weight_scale=self.get_buffer("_weight_scale") if hasattr(self, "_weight_scale") else None,
+        )
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
             self.dilation, self.groups,
             self.cfg, self._analysis_name, emit_fn,
+            buffers,
         )
 
 
@@ -664,9 +890,23 @@ class QuantizedConvTranspose3d(ObservableMixin, nn.ConvTranspose3d):
         )
 
         emit_fn = self._emit if self._observers else None
+        buffers = CalibrationBuffers(
+            output_scale=self.get_buffer("_output_scale") if hasattr(self, "_output_scale") else None,
+            input_scale=self.get_buffer("_input_scale") if hasattr(self, "_input_scale") else None,
+            output_mask=self.get_buffer("_output_mask") if hasattr(self, "_output_mask") else None,
+            output_scale_o=self.get_buffer("_output_scale_o") if hasattr(self, "_output_scale_o") else None,
+            input_mask=self.get_buffer("_input_mask") if hasattr(self, "_input_mask") else None,
+            input_scale_o=self.get_buffer("_input_scale_o") if hasattr(self, "_input_scale_o") else None,
+            weight_importance=self.get_buffer("_sq_importance") if hasattr(self, "_sq_importance") else None,
+            input_sq_activation_mask=self.get_buffer("_sq_activation_mask") if hasattr(self, "_sq_activation_mask") else None,
+            output_group_mask=self.get_buffer("_output_group_mask") if hasattr(self, "_output_group_mask") else None,
+            input_group_mask=self.get_buffer("_input_group_mask") if hasattr(self, "_input_group_mask") else None,
+            weight_scale=self.get_buffer("_weight_scale") if hasattr(self, "_weight_scale") else None,
+        )
         return ConvTransposeFunction.apply(
             x, self.weight, self.bias,
             self.stride, self.padding, output_padding,
             self.dilation, self.groups,
             self.cfg, self._analysis_name, emit_fn,
+            buffers,
         )

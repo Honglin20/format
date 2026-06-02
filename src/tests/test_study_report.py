@@ -48,6 +48,24 @@ def mock_result_b() -> SessionResult:
 
 
 @pytest.fixture
+def mock_result_accum() -> SessionResult:
+    """Mock result with both local and accumulated QSNR data."""
+    return SessionResult(
+        name="int8",
+        config=QuantConfig(name="int8", w_format="int8", a_format="int8",
+                           w_granularity="per_tensor", a_granularity="per_tensor"),
+        quant_metrics={"accuracy": 0.92, "f1": 0.90},
+        fp32_metrics={"accuracy": 0.95, "f1": 0.93},
+        delta={"accuracy": -0.03, "f1": -0.03},
+        qsnr_per_layer={"layer_1": 28.5, "layer_2": 32.1, "layer_3": 25.8},
+        mse_per_layer={"layer_1": 0.0012, "layer_2": 0.0008, "layer_3": 0.0021},
+        accum_qsnr_per_layer={"layer_1": 18.0, "layer_2": 22.0, "layer_3": 15.0},
+        accum_mse_per_layer={"layer_1": 0.01, "layer_2": 0.005, "layer_3": 0.02},
+        observers_data={},
+    )
+
+
+@pytest.fixture
 def mock_result_no_metrics() -> SessionResult:
     return SessionResult(
         name="empty",
@@ -255,24 +273,29 @@ class TestStudyReport:
         report = StudyReport({})
         report.print_summary()
         captured = capsys.readouterr()
-        assert "(no results)" not in captured.out
+        # Empty report should produce no output
+        assert captured.out == ""
 
     def test_print_summary(self, mock_result_a, capsys):
         report = StudyReport({"part_1": [mock_result_a]})
         report.print_summary()
         captured = capsys.readouterr()
-        assert "Part: part_1" in captured.out
+        # Unified table — should contain part, config, fp32, quant, delta, qsnr, mse
+        assert "part_1" in captured.out
         assert "int8" in captured.out
-        # qsnr: (28.5 + 32.1 + 25.8) / 3 = 28.80
-        # mse:   (0.0012 + 0.0008 + 0.0021) / 3 = 0.001367
-        assert "28.80" in captured.out
+        # FP32 baseline should now be visible
+        assert "fp32" in captured.out or "0.95" in captured.out
+        # qsnr: (28.5 + 32.1 + 25.8) / 3 = 28.8
+        # mse:   (0.0012 + 0.0008 + 0.0021) / 3 ≈ 0.001367
+        assert "28.8" in captured.out
         assert "0.001367" in captured.out
 
     def test_print_summary_with_delta(self, mock_result_a, capsys):
         report = StudyReport({"part_1": [mock_result_a]})
         report.print_summary()
         captured = capsys.readouterr()
-        assert "accuracy=-0.0300" in captured.out
+        # Delta should appear in the unified table
+        assert "-0.03" in captured.out
 
     def test_to_serializable(self, mock_result_a):
         report = StudyReport({"part_1": [mock_result_a]})
@@ -331,9 +354,7 @@ class TestStudyReport:
             figures_dir = os.path.join(tmpdir, "figures")
             assert os.path.isdir(figures_dir)
             assert os.path.isfile(os.path.join(figures_dir, "qsnr_comparison.png"))
-            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr_input.png"))
-            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr_weight.png"))
-            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr_output.png"))
+            assert os.path.isfile(os.path.join(figures_dir, "crest_vs_qsnr.png"))
 
     def test_save_empty_results(self):
         report = StudyReport({})
@@ -362,6 +383,81 @@ class TestStudyReport:
         report = StudyReport(parts)
         assert sorted(report.parts) == ["a", "b"]
         assert report.total_experiments == 3
+
+    # ── summary_dataframe ──────────────────────────────────────────────
+
+    def test_summary_dataframe_empty(self):
+        report = StudyReport({})
+        df = report.summary_dataframe()
+        assert df is not None
+        assert df.empty
+
+    def test_summary_dataframe_single_part(self, mock_result_a):
+        report = StudyReport({"part_1": [mock_result_a]})
+        df = report.summary_dataframe()
+        assert df is not None
+        assert len(df) == 1
+        assert df.iloc[0]["part"] == "part_1"
+        assert df.iloc[0]["config"] == "int8"
+        assert df.iloc[0]["format"] == "int8"
+        # FP32 baseline columns
+        assert "fp32_accuracy" in df.columns
+        assert df.iloc[0]["fp32_accuracy"] == 0.95
+        assert "fp32_f1" in df.columns
+        # Quant columns
+        assert "quant_accuracy" in df.columns
+        assert df.iloc[0]["quant_accuracy"] == 0.92
+        # Delta columns
+        assert "delta_accuracy" in df.columns
+        assert df.iloc[0]["delta_accuracy"] == -0.03
+        # Avg QSNR / MSE
+        assert "avg_qsnr_db" in df.columns
+        assert abs(df.iloc[0]["avg_qsnr_db"] - 28.80) < 0.01
+        assert "avg_mse" in df.columns
+
+    def test_summary_dataframe_multiple_parts(self, mock_result_a, mock_result_b):
+        report = StudyReport({"part_a": [mock_result_a], "part_b": [mock_result_b]})
+        df = report.summary_dataframe()
+        assert len(df) == 2
+        assert set(df["part"]) == {"part_a", "part_b"}
+        assert set(df["config"]) == {"int8", "int4"}
+
+    def test_summary_dataframe_column_order(self, mock_result_a):
+        report = StudyReport({"part_1": [mock_result_a]})
+        df = report.summary_dataframe()
+        cols = list(df.columns)
+        # Leading columns first
+        assert cols[:3] == ["part", "config", "format"]
+        # fp32_* before quant_* before delta_* before avg_*
+        fp32_idx = cols.index("fp32_accuracy")
+        quant_idx = cols.index("quant_accuracy")
+        delta_idx = cols.index("delta_accuracy")
+        avg_idx = cols.index("avg_qsnr_db")
+        assert fp32_idx < quant_idx < delta_idx < avg_idx
+
+    def test_summary_dataframe_no_metrics(self, mock_result_no_metrics):
+        report = StudyReport({"part_1": [mock_result_no_metrics]})
+        df = report.summary_dataframe()
+        assert len(df) == 1
+        assert df.iloc[0]["part"] == "part_1"
+        assert df.iloc[0]["config"] == "empty"
+
+    def test_summary_dataframe_accum(self, mock_result_accum):
+        report = StudyReport({"part_1": [mock_result_accum]})
+        df = report.summary_dataframe(qsnr_type="accum")
+        assert df is not None
+        assert len(df) == 1
+        # accum QSNR: (18.0 + 22.0 + 15.0) / 3 = 18.33
+        assert abs(df.iloc[0]["avg_qsnr_db"] - 18.33) < 0.1
+        # accum MSE: (0.01 + 0.005 + 0.02) / 3 = 0.011667
+        assert abs(df.iloc[0]["avg_mse"] - 0.011667) < 0.0001
+
+    def test_print_summary_accum(self, mock_result_accum, capsys):
+        report = StudyReport({"part_1": [mock_result_accum]})
+        report.print_summary(qsnr_type="accum")
+        captured = capsys.readouterr()
+        # Should show accum QSNR values
+        assert "18.33" in captured.out or "18.3" in captured.out
 
     # ── to_dataframe ──────────────────────────────────────────────────
 
@@ -416,62 +512,62 @@ class TestStudyReport:
 
     def test_crest_vs_qsnr_smoke(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
-        fig = report.plot.crest_vs_qsnr(role="input")
+        fig = report.plot.crest_vs_qsnr(roles=("input",))
         assert fig is not None
 
     def test_crest_vs_qsnr_no_crest_data(self, mock_result_a):
         report = StudyReport({"p1": [mock_result_a]})
         with pytest.raises(ValueError, match="Crest factor data not available"):
-            report.plot.crest_vs_qsnr(role="input")
+            report.plot.crest_vs_qsnr(roles=("input",))
 
     def test_crest_vs_qsnr_invalid_role(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
         with pytest.raises(ValueError, match="Invalid role"):
-            report.plot.crest_vs_qsnr(role="grad_output")
+            report.plot.crest_vs_qsnr(roles=("grad_output",))
 
     def test_crest_vs_qsnr_valid_role_no_data(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
         with pytest.raises(ValueError, match="No data for role"):
-            report.plot.crest_vs_qsnr(role="bias")
+            report.plot.crest_vs_qsnr(roles=("bias",))
 
     # ── P0.1: outlier_analysis ────────────────────────────────────────
 
     def test_outlier_analysis_smoke(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
-        fig = report.plot.outlier_analysis(role="input")
+        fig = report.plot.outlier_analysis(roles=("input",))
         assert fig is not None
 
     def test_outlier_analysis_no_outlier_data(self, mock_result_a):
         report = StudyReport({"p1": [mock_result_a]})
         with pytest.raises(ValueError, match="Outlier ratio data not available"):
-            report.plot.outlier_analysis(role="input")
+            report.plot.outlier_analysis(roles=("input",))
 
     def test_outlier_analysis_invalid_role(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
         with pytest.raises(ValueError, match="Invalid role"):
-            report.plot.outlier_analysis(role="grad_input")
+            report.plot.outlier_analysis(roles=("grad_input",))
 
     def test_outlier_analysis_role_no_data(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
         with pytest.raises(ValueError, match="No data for role"):
-            report.plot.outlier_analysis(role="bias")
+            report.plot.outlier_analysis(roles=("bias",))
 
     # ── P0.2: per_block_qsnr ─────────────────────────────────────────
 
     def test_per_block_qsnr_smoke(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
-        fig = report.plot.per_block_qsnr(role="input")
+        fig = report.plot.per_block_qsnr(roles=("input",))
         assert fig is not None
 
     def test_per_block_qsnr_no_stats(self, mock_result_with_observers):
         report = StudyReport({"p1": [mock_result_with_observers]})
         with pytest.raises(ValueError, match="Per-block QSNR statistics not available"):
-            report.plot.per_block_qsnr(role="input")
+            report.plot.per_block_qsnr(roles=("input",))
 
     def test_per_block_qsnr_invalid_role(self, mock_result_rich):
         report = StudyReport({"p1": [mock_result_rich]})
         with pytest.raises(ValueError, match="Invalid role"):
-            report.plot.per_block_qsnr(role="grad_output")
+            report.plot.per_block_qsnr(roles=("grad_output",))
 
     # ── P0.4: pareto_frontier ────────────────────────────────────────
 
@@ -552,8 +648,8 @@ class TestStudyReport:
             # Core figures
             assert os.path.isfile(os.path.join(figures_dir, "qsnr_comparison.png"))
             # New figures
-            assert os.path.isfile(os.path.join(figures_dir, "outlier_input.png"))
-            assert os.path.isfile(os.path.join(figures_dir, "per_block_qsnr_input.png"))
+            assert os.path.isfile(os.path.join(figures_dir, "outlier_analysis.png"))
+            assert os.path.isfile(os.path.join(figures_dir, "per_block_qsnr.png"))
             assert os.path.isfile(os.path.join(figures_dir, "correlation_heatmap.png"))
             assert os.path.isfile(os.path.join(figures_dir, "role_distribution.png"))
             # cost figures should not exist (no cost data)

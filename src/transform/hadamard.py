@@ -6,8 +6,10 @@ computed in O(n log n) using the butterfly algorithm. It rotates the tensor alon
 the last dimension, spreading information across elements to reduce quantization
 error when followed by element-wise quantization.
 
-Normalization: 1/sqrt(d) ensures the transform is orthogonal (self-inverse).
-For non-power-of-2 dimensions, the tensor is silently padded to the next power of 2.
+Normalization: 1/sqrt(d) ensures each power-of-2 block is orthogonal (self-inverse).
+For non-power-of-2 dimensions, the tensor is decomposed into power-of-2 chunks and
+each chunk is transformed independently.  This preserves the self-inverse property
+for arbitrary dimensions.
 """
 import math
 
@@ -21,36 +23,62 @@ from ..scheme.transform import TransformBase
 # Utility
 # ---------------------------------------------------------------------------
 
-def _next_power_of_2(n: int) -> int:
-    """Return the smallest power of 2 greater than or equal to ``n``.
+def _largest_power_of_2_le(n: int) -> int:
+    """Return the largest power of 2 less than or equal to ``n``.
 
     Args:
-        n: A non-negative integer.
+        n: A positive integer.
 
     Returns:
-        The smallest power of 2 >= n. 0 if n == 0.
+        The largest power of 2 <= n.
     """
-    if n <= 0:
-        return 0
-    return 2 ** ((n - 1).bit_length())
+    return 1 << (n.bit_length() - 1)
+
+
+def _decompose_pow2(d: int):
+    """Yield power-of-2 chunk sizes that sum to ``d``, in descending order."""
+    remaining = d
+    while remaining > 0:
+        sz = _largest_power_of_2_le(remaining)
+        yield sz
+        remaining -= sz
 
 
 # ---------------------------------------------------------------------------
-# FWHT implementation
+# FWHT implementation (power-of-2 only, no padding needed)
 # ---------------------------------------------------------------------------
+
+def _hadamard_pow2(x_2d: Tensor, n: int) -> Tensor:
+    """In-place FWHT on the last dimension of a 2D tensor.
+
+    ``x_2d`` must have shape ``(M, n)`` where ``n`` is a power of 2.
+    ``x_2d`` is a view/slice of the original tensor; modifications are in-place.
+
+    Normalizes by ``1/sqrt(n)`` so the transform is self-inverse.
+    """
+    h = 1
+    while h < n:
+        for i in range(0, n, 2 * h):
+            a = x_2d[:, i: i + h]
+            b = x_2d[:, i + h: i + 2 * h]
+            sum_ab = a + b
+            diff_ab = a - b
+            x_2d[:, i: i + h] = sum_ab
+            x_2d[:, i + h: i + 2 * h] = diff_ab
+        h *= 2
+    x_2d.div_(math.sqrt(n))
+
 
 def hadamard(x: Tensor) -> Tensor:
     """Fast Walsh-Hadamard Transform along the last dimension.
 
-    Uses the in-place iterative butterfly algorithm (O(n log n) where n is the
-    size of the last dimension). The transform is normalized by 1/sqrt(d) so
-    that ``hadamard(hadamard(x)) == x`` (self-inverse, up to floating-point
-    precision).
+    For power-of-2 dimensions the classical butterfly algorithm is used.
+    For non-power-of-2 dimensions the tensor is decomposed into power-of-2
+    chunks along the last dimension; each chunk is independently transformed.
+    This preserves the self-inverse property for arbitrary dimensions.
 
-    For tensors whose last dimension is not a power of 2, the implementation
-    silently pads to the next power of 2, applies the transform, then truncates
-    back to the original size. In this case the self-inverse property holds
-    only approximately.
+    The transform is normalized so that ``hadamard(hadamard(x)) == x``
+    for all dimension sizes.
 
     Args:
         x: Input tensor of any shape. The transform is applied along the last
@@ -59,47 +87,28 @@ def hadamard(x: Tensor) -> Tensor:
     Returns:
         Transformed tensor with the same shape as ``x``.
     """
-    # Clone to avoid modifying the input
-    x = x.clone()
-
     d = x.shape[-1]
-    n = _next_power_of_2(d)
 
-    # Pad to next power of 2 along last dim if needed
-    if n != d:
-        x = torch.nn.functional.pad(x, (0, n - d))
+    # Fast path: power-of-2 dimension
+    if d & (d - 1) == 0:
+        x = x.clone()
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, d)
+        _hadamard_pow2(x_2d, d)
+        return x_2d.reshape(orig_shape)
 
-    # Store shape for later reshape
+    # Non-power-of-2: decompose into power-of-2 chunks
+    x = x.clone()
     orig_shape = x.shape
+    x_2d = x.reshape(-1, d)
 
-    # Flatten all dims except the last for vectorized butterfly processing
-    x_2d = x.reshape(-1, n)
+    offset = 0
+    for chunk_size in _decompose_pow2(d):
+        chunk = x_2d[:, offset: offset + chunk_size]
+        _hadamard_pow2(chunk, chunk_size)
+        offset += chunk_size
 
-    # FWHT: in-place butterfly
-    h = 1
-    while h < n:
-        for i in range(0, n, 2 * h):
-            a = x_2d[:, i : i + h]          # view into left  half of pair
-            b = x_2d[:, i + h : i + 2 * h]  # view into right half of pair
-            # Compute both results BEFORE any writes — `a` and `b` are views into
-            # x_2d, so modifying x_2d corrupts the view values.
-            sum_ab = a + b
-            diff_ab = a - b
-            x_2d[:, i : i + h] = sum_ab
-            x_2d[:, i + h : i + 2 * h] = diff_ab
-        h *= 2
-
-    # Restore original shape
-    x = x_2d.reshape(orig_shape)
-
-    # Orthogonal normalization
-    x = x / math.sqrt(n)
-
-    # Truncate back to original size if padded
-    if n != d:
-        x = x[..., :d]
-
-    return x
+    return x_2d.reshape(orig_shape)
 
 
 # ---------------------------------------------------------------------------

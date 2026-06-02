@@ -27,6 +27,22 @@
 4. 测试先于实现：写失败测试 → 实现 → 通过 → commit → review agent
 5. CURRENT.md 只记录当前进行中的任务（≤30 行）。子任务完成后立即将已完成条目移到 `docs/status/CHANGELOG.md`，不在 CURRENT.md 中积累历史
 6. README 只放项目简介 + 一个 example + 文档链接。不放架构设计、API 参考表、多步骤教程。详细内容写到 `docs/` 对应模块文档
+7. **E2E 回归门**：任何修改 transform / format / quantize / session / calibration 的 commit **必须先通过 `docs/standards/e2e-testing.md` 规定的全部三层 E2E 门**，禁止跳过任何一层：
+
+**Layer A — 每次 commit 必跑（4 脚本 + 全量单测）：**
+
+| 项目 | 脚本 | 模型 | 判据 |
+|------|------|------|------|
+| MNIST | `scripts/mnist_hadamard_study.py` | 3-layer MLP | FP32≠0, int8 Δ<0.02, int4 Δ<0.05 |
+| Transformer | `scripts/transformer_agnews_study.py` | 2-layer Transformer | FP32≠0, int8 Δ<0.02, int4 Δ<0.05 |
+| Batch Independence | `scripts/verify_batch_independence.py` | 1-2 layer MLP | 全部 6 项 PASS |
+| Sparse Consistency | `scripts/verify_sparse_consistency.py` | — | 全部 7 项 PASS |
+| Mask Shapes | `scripts/verify_mask_shapes.py` | Conv/Linear BANK/PER_CHANNEL/PER_TENSOR | 全部 694 项 PASS |
+| 全量单测 | `pytest src/tests/ --ignore=...` | — | 0 failed |
+
+**Layer B — 新增功能必写：**`src/tests/test_<feature>_e2e.py`（覆盖全部 granularity × ratio × 形状 × format 组合 × Session + Study API）
+
+**Layer C — 修改前必读：**`docs/verification/e2e-regression-patterns.md`（历史回归模式，含治理规则：准入四条件、合并规则、排除标准）
 
 ---
 
@@ -94,10 +110,15 @@ x_q = quantize(x, scheme)
 | 新增量化格式 | `docs/standards/adding-format.md` → `docs/architecture/001-*.md` |
 | 新增 Observer | `docs/standards/adding-observer.md` → `docs/architecture/002-*.md` |
 | 新增 Transform | `docs/standards/adding-transform.md` → `docs/architecture/001-*.md` |
-| 写量化测试用例 | `docs/standards/quantization-testing.md` → `docs/verification/README.md` |
+| 写量化测试用例 | `docs/principles/testing-layer.md` → `docs/standards/quantization-testing.md` → `docs/verification/README.md` |
 | 涉及数学正确性 | `docs/principles/math-verification.md` — 先推导，后验证 |
+| 新增可视化/表格 | `docs/standards/role-aware-visualization.md` — role 区分规范 |
 | 新增公共 API | `docs/standards/api-design.md` |
 | 子任务做完了，准备收尾 | `docs/principles/review-gate.md` → `docs/workflow/subtask-lifecycle.md` |
+| 修改了 transform/format/quantize/calibration | `docs/standards/e2e-testing.md` → 跑 Layer A 全部 4 脚本 + 全量单测
+| 新增 feature（format/granularity/sparse/...） | `docs/standards/e2e-testing.md` §三 → 写 Layer B E2E 测试
+| 排查 E2E 回归 | `docs/verification/e2e-regression-patterns.md` → 对照全部 § 逐个排查
+| 修复量化路径 bug | `docs/standards/e2e-testing.md` §五 → 写重现测试 + 评估是否入 Layer C
 | 提交代码 | `docs/workflow/branching-commits.md` |
 | 排查历史缺陷 | `docs/reviews/INDEX.md` |
 | 查公式定义 | `docs/reference/INDEX.md` |
@@ -113,6 +134,13 @@ x_q = quantize(x, scheme)
 - **测试门（快速）**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q -m "not slow"`（1,857 passed）
 - **全量测试**: `pytest src/tests/ --ignore=src/tests/test_golden_equiv.py -q`（含 slow，2,070 passed）
 - **E2E 全算子**: `pytest src/tests/test_e2e_all_ops.py -q`（21 模块 + 10 inline op，49 parametrized）
+- **E2E 回归 (MNIST)**: `PYTHONPATH=. python scripts/mnist_hadamard_study.py`（MLP + int4/int8 + hadamard/sq）
+- **E2E 回归 (Transformer)**: `PYTHONPATH=. python scripts/transformer_agnews_study.py`（Transformer + AG News + int4/int8 + hadamard/sq）
+- **E2E 回归 (eval only)**: `PYTHONPATH=. python scripts/transformer_agnews_eval.py`（跳过训练，加载预训练权重直接跑 Study）
+- **E2E Batch Independence**: `python scripts/verify_batch_independence.py`（mask 不泄露 batch 维，6 项）
+- **E2E Sparse Consistency**: `python scripts/verify_sparse_consistency.py`（Session API bit-level 一致性，7 项）
+- **E2E Mask Shapes**: `python scripts/verify_mask_shapes.py`（全模式 × 全算子 mask 形状验证，694 项）
+- **E2E 规范全文**: `docs/standards/e2e-testing.md`（三层结构、准入标准、开发流程强制要求）
 
 ---
 

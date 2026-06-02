@@ -146,6 +146,40 @@ class SliceAwareObserver(ObserverBase):
                 dst[("block_agg",)] = self._measure_batch(fp32_2d, quant_2d,
                                                            valid_counts=valid_counts)
 
+            elif mode == GranularityMode.BANK:
+                axis = g.bank_axis
+                if axis < 0:
+                    axis = fp32.ndim + axis
+                bank_size = g.bank_size
+                dim_size = fp32.shape[axis]
+                if dim_size % bank_size != 0:
+                    # Dimension not divisible — fall back to per_tensor measurement
+                    dst[("tensor",)] = self._measure(("tensor",), fp32, quant)
+                    return
+                num_banks = dim_size // bank_size
+
+                # Reshape: split bank_axis into (num_banks, bank_size)
+                new_shape = list(fp32.shape)
+                new_shape[axis] = num_banks
+                new_shape.insert(axis + 1, bank_size)
+                fp32_r = fp32.reshape(new_shape)
+                quant_r = quant.reshape(new_shape)
+
+                # Move bank dim to front for per-bank measurement
+                ndim = fp32_r.ndim
+                perm = list(range(ndim))
+                perm.pop(axis)
+                perm = [axis] + perm
+                fp32_b = fp32_r.permute(perm)
+                quant_b = quant_r.permute(perm)
+
+                group_size = fp32_b[0].numel()
+                fp32_2d = fp32_b.reshape(num_banks, group_size)
+                quant_2d = quant_b.reshape(num_banks, group_size)
+
+                for i, m in enumerate(self._measure_per_unit(fp32_2d, quant_2d)):
+                    dst[("bank", i)] = m
+
             elif mode == GranularityMode.DYNAMIC_GROUP:
                 if event.group_map is None:
                     raise ValueError(

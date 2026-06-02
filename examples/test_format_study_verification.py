@@ -9,7 +9,7 @@ Format Study Verification Script
 三层递进验证：
   Layer 1 (tests 001-006): 核心量化 — Format.quantize() 逐元素正确性
   Layer 2 (tests 007-009): 算子 + Transform — Linear + SmoothQuant/Hadamard
-  Layer 3 (tests 010-012): 完整 Pipeline — QuantSession calibrate→analyze→compare
+  Layer 3 (tests 010-012): 完整 Pipeline — Session calibrate→analyze→compare
 
 所有测试共享同一组固定数据，确保可复现。
 """
@@ -423,7 +423,7 @@ def test_pipeline_analysis_metrics():
 
 
 def test_pipeline_quant_session_e2e():
-    """验证 QuantSession 端到端流程: quantize_model → calibrate → analyze。
+    """验证 Session 端到端流程: quantize_model → calibrate → analyze。
 
     推导: docs/verification/012-pipeline-e2e.md
 
@@ -434,7 +434,7 @@ def test_pipeline_quant_session_e2e():
     3. MSEScaleStrategy 产生正确 scales
     """
     import torch.nn as nn
-    from src.session import QuantSession
+    from src.session import Session
     from src.calibration.strategies import MSEScaleStrategy
     from src.analysis.observers import QSNRObserver, MSEObserver
     from src.analysis.context import AnalysisContext
@@ -449,7 +449,7 @@ def test_pipeline_quant_session_e2e():
     )
     cfg = OpQuantConfig(input=scheme, weight=scheme, output=scheme)
 
-    session = QuantSession(
+    session = Session(
         model, cfg, calibrator=MSEScaleStrategy(n_steps=5), keep_fp32=False,
     )
 
