@@ -135,6 +135,10 @@ class CrossConfigLayerRanking:
         result = [(name, config_map[name]) for name in specific if name in config_map]
         return sorted(result, key=lambda x: x[1])
 
+    def get_layer_qsnr(self, layer: str, config: str) -> Optional[float]:
+        """Get raw QSNR for a specific layer in a specific config."""
+        return self._data.get(config, {}).get(layer)
+
     def layer_qsnr_delta(
         self, layer: str, from_config: str, to_config: str
     ) -> Optional[float]:

@@ -1,6 +1,6 @@
 # Current Task
 
-**当前任务**: Example 19 Phase A+B 完成 — 准备进入 Phase C (Agent Pipeline)
+**当前任务**: Example 19 Phase C 完成 — 准备进入 Phase D (Integration Test)
 **Branch**: `feature/refactor-src`
 
 ---
@@ -22,35 +22,42 @@
 | `channel_error_bar()` | 同上 | per-channel QSNR 柱状图，outlier 标红 |
 | `multi_config_block_comparison()` | 同上 | 跨 config (W8A8 vs W4A4) block 误差分组对比 |
 
-### Session 集成修改
+## 已完成：Phase C — Agent Pipeline
 
-- `src/session/_helpers.py` — `_OBSERVER_MAP` 新增 `"per_block_qsnr"`
-- `src/session/_session.py` — `run_quantization` / `_run_hook_analysis` 合并自定义 observers
+| 交付物 | 文件 |
+|--------|------|
+| Workflow 定义 + 8 个 Pydantic result_type | `AgentHarness/examples/19_mxint_diagnostic.py` |
+| workflow.json (自动生成) | `AgentHarness/workflows/mxint-diagnostic/workflow.json` |
+| 8 个 agent md 指令文件 | `AgentHarness/workflows/mxint-diagnostic/agents/*.md` |
+| 4 个 agent API 接口文档 | `docs/harness/api-*.md` |
 
-### 测试
+### DAG 结构
 
-- `src/tests/test_example19_apis.py` — 23 tests
-- `src/tests/test_block_viz.py` — 6 tests
-- E2E: MLP 模型生成 18 张可视化图，全部正确渲染
-- 回归：2,700 passed, 48 failed (pre-existing)
+```
+adapter → study_runner ─┬→ gap_analyzer ───────────────────┐
+                        └→ layer_attribution ─┬→ dist_prof ─┤
+                                              ├→ block_an ──┤
+                                              └→ intervent ─┘
+                                                              ↓
+                                                       synthesis
+```
 
 ---
 
-## 下一步：Phase C — Agent Pipeline
+## 下一步：Phase D — Integration Test
 
-按 spec §5 实现 8-agent 串行流水线：
-
-1. `examples/19_mxint_diagnostic.py` — Pydantic result types + Workflow 定义
-2. `workflows/mxint-diagnostic/agents/*.md` — 8 个 agent md 文件
-3. `docs/harness/api-*.md` — agent 接口文档
+1. 用 bitx MLP (MNIST) 做 end-to-end test
+2. 验证所有 charts 正确渲染
+3. Review + Commit
 
 ---
 
 ## 断点续传必读文件
 
 1. `docs/harness/example19-spec.md` — 完整设计文档
-2. `src/viz/block_error_heatmap.py` — 可视化函数
-3. `src/session/_session.py` — observer 合并逻辑
+2. `AgentHarness/examples/19_mxint_diagnostic.py` — Workflow 定义
+3. `src/viz/block_error_heatmap.py` — 可视化函数
+4. `src/analysis/cross_config_ranking.py` — 跨 config 层排序
 
 ---
 
