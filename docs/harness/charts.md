@@ -38,6 +38,8 @@ bitx 分析脚本通过 `render_chart()` 向 AgentHarness 前端输出图表。
 
 ## 添加新图表
 
+### 基础图表
+
 ```python
 from harness.tools.chart import render_chart
 
@@ -51,6 +53,54 @@ render_chart(
     hue="type",                                     # 颜色分组列名（可选）
 )
 ```
+
+### dist_overlay — 双轴分布叠加图
+
+`dist_overlay` 是通用元绘图函数，支持多数据系列在双 Y 轴上以 Area 或 Line 样式渲染。
+适用于量化前后分布对比、多信号叠加等场景。
+
+```python
+render_chart(
+    data=[
+        {"bin": -0.52, "fp32": 120, "quant": 118, "error": 2},
+        {"bin": -0.48, "fp32": 350, "quant": 340, "error": 10},
+        {"bin": -0.44, "fp32": 280, "quant": 275, "error": 5},
+        ...
+    ],
+    chart_type="dist_overlay",
+    x="bin",
+    series=[
+        {"key": "fp32",  "type": "area", "axis": "left",  "color": "#5B8DB8",
+         "fillOpacity": 0.25, "step": True, "label": "FP32"},
+        {"key": "quant", "type": "line", "axis": "left",  "color": "#D4605A",
+         "dash": "6 3", "label": "Quant"},
+        {"key": "error", "type": "area", "axis": "right", "color": "#9CA3AF",
+         "fillOpacity": 0.3, "step": True, "label": "Error"},
+    ],
+    title="layer3.linear (weight) Distribution",
+)
+```
+
+**数据格式**：宽格式，每行一个 x 值，每列一个数据系列。
+
+**series 配置**：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|:----:|--------|------|
+| `key` | str | **是** | — | data 中的列名 |
+| `type` | str | 否 | `"area"` | `"area"` 或 `"line"` |
+| `axis` | str | 否 | `"left"` | `"left"`（主轴）或 `"right"`（副轴） |
+| `color` | str | 否 | PALETTE 轮换 | hex 颜色覆盖 |
+| `fillOpacity` | float | 否 | 0.2 | Area 填充透明度 |
+| `dash` | str | 否 | 实线 | stroke-dasharray，如 `"6 3"` |
+| `step` | bool | 否 | False | 是否使用阶梯插值 |
+| `label` | str | 否 | key 值 | 图例显示名 |
+| `strokeWidth` | float | 否 | 1.5 | 线宽 |
+
+**使用场景**：
+- 量化前后分布对比（fp32 vs quant vs error）
+- 多信号叠加（预测值 vs 真实值 vs 残差）
+- 任意需要双轴区分量级的可视化
 
 ## 注意事项
 
