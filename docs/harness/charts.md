@@ -107,3 +107,35 @@ render_chart(
 - `label` + `title` 相同会替换已有图表（支持实时更新）
 - `data` 格式等同于 `DataFrame.to_dict("records")`
 - 不在 harness 环境下运行时，render_chart 静默跳过（import 失败时不报错）
+
+## Harness 修改规则
+
+> **重要**：AgentHarness (`AgentHarness/`) 是独立项目，不属于 bitx。
+> 如需修改 harness 的 chart type、前端组件、render_chart 行为，
+> **必须先与用户同步确认**，不可直接修改。
+
+具体场景：
+- 需要新增 chart type（如 harness 没有 heatmap 的数据格式不符合需求）
+- 需要修改现有 chart type 的渲染行为
+- 需要修改 render_chart 的参数签名
+- 需要修改前端组件
+
+不需要同步的场景：
+- 在 bitx `src/api/harness_charts.py` 中新增使用现有 chart type 的函数
+- 修改 bitx 自己的数据提取逻辑
+- 修改 bitx 的 matplotlib 可视化 (`src/viz/`)
+
+## bitx 双路可视化架构
+
+```
+src/api/harness_charts.py  ← 新增：render_chart 适配层
+         ↓ 调用
+   render_chart()           ← harness 前端 (可选)
+         ↓ 可选
+   src/viz/*.py             ← matplotlib 保存 PNG (可选, output_dir)
+```
+
+- `harness_charts.py` 不修改 `src/viz/` 任何代码
+- 每个函数同时支持两条路径
+- `output_dir=None` 时只走 render_chart
+- harness 不可用时 render_chart 是 no-op
