@@ -34,6 +34,7 @@ from src.analysis.observers import (
     DistributionObserver, HistogramObserver, PerBlockQSNRObserver,
 )
 from src.cost.model_cost import analyze_model_cost
+from src.api._chart_helpers import QSNR_REF
 
 # ── MXInt8 defaults (constants) ──────────────────────────────────────
 W_BITS = 8
@@ -203,10 +204,9 @@ def charts_error_attribution(result, label: str = "MXInt8"):
         input_q = role_qsnrs.get("input")
         weight_q = role_qsnrs.get("weight")
 
-        # Higher QSNR = less error.  Use inverse (max - qsnr) as "error contribution".
-        ref = 60.0
-        act_loss = ref - input_q if input_q is not None else 0.0
-        w_loss = ref - weight_q if weight_q is not None else 0.0
+        # Higher QSNR = less error.  Use inverse (ref - qsnr) as "error contribution".
+        act_loss = QSNR_REF - input_q if input_q is not None else 0.0
+        w_loss = QSNR_REF - weight_q if weight_q is not None else 0.0
 
         data.append({
             "layer": layer,

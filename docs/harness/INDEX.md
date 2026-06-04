@@ -15,6 +15,7 @@ bitx 提供量化分析能力，两者通过 adapter 模式协作。
 | [adapter-guide.md](adapter-guide.md) | adapter 合约定义 + 生成规范 |
 | [workflow-patterns.md](workflow-patterns.md) | 工作流设计模式 + 结构化输出 |
 | [result-types.md](result-types.md) | 自定义 Pydantic result_type 定义 |
+| [analysis-methodology.md](analysis-methodology.md) | bitx 分析原子能力清单 + Harness 集成状态 + 方法论 |
 | [charts.md](charts.md) | render_chart 集成 + 图表清单 |
 | [api-block-error-analysis.md](api-block-error-analysis.md) | Agent 6: block error analysis API |
 | [api-cross-config-ranking.md](api-cross-config-ranking.md) | Agent 4: cross-config layer ranking API |
@@ -33,8 +34,9 @@ bitx 提供量化分析能力，两者通过 adapter 模式协作。
 | 20 | `precision-diagnostic` | 6 | 通用格式精度诊断 + 内联图表 | `AgentHarness/examples/20_precision_diagnostic.py` |
 
 ### Example 18: mxint-analysis
-3-agent 流水线：`analyzer → configurator → runner`
+3-agent + 1-judge 流水线：`analyzer → configurator → _judge_configurator → runner`
 - 适配任意 PyTorch 项目，运行 MXInt 量化，输出精度结果
+- configurator 带 eval 校验：确保 adapter 与原项目逻辑完全等价
 - 工作流定义：`AgentHarness/workflows/mxint-analysis/`
 
 ### Example 19: mxint-diagnostic
@@ -71,7 +73,7 @@ Harness 通过 MCP filesystem server 自动注册文件操作工具。Agent md �
 
 | 工具 | 说明 |
 |------|------|
-| `read_file` | 读取文件内容 |
+| `read_file` | 读取文件内容（**已废弃，用 `read_text_file` 替代**） |
 | `read_multiple_files` | 批量读取文件 |
 | `read_text_file` | 读取文本文件 |
 | `directory_tree` | 目录树 |
@@ -83,7 +85,7 @@ Harness 通过 MCP filesystem server 自动注册文件操作工具。Agent md �
 | `create_directory` | 创建目录 |
 | `move_file` | 移动文件 |
 
-**注意**：需要在 agent md 的 `tools` 白名单中显式声明才会生效。adapter 类 agent 应包含 `read_file`。
+**注意**：需要在 agent md 的 `tools` 白名单中显式声明才会生效。推荐使用 `read_text_file` 替代已废弃的 `read_file`。重构类 agent（如 configurator）应包含完整的文件工具集（`read_text_file`, `write_file`, `edit_file`, `grep`, `glob`）。
 
 ---
 

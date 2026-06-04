@@ -27,99 +27,11 @@ if TYPE_CHECKING:
     from src.session._result import SessionResult
 
 from src.analysis._distribution_diagnosis import classify_distribution
-
-# ── Optional: harness render_chart ───────────────────────────────────
-
-try:
-    from harness.tools.chart import render_chart
-except ImportError:
-    render_chart = None
-
-
-def _chart(data, chart_type, *, x, y, label="", title="", hue=None, series=None):
-    if render_chart is None:
-        return
-    render_chart(data, chart_type, x=x, y=y, label=label, title=title, hue=hue, series=series)
-
-
-# =====================================================================
-# Helpers
-# =====================================================================
-
-_DIST_KEYS = [
-    ("crest_factor", "crest"),
-    ("kurtosis", "kurt"),
-    ("excess_kurtosis", "ex_kurt"),
-    ("outlier_ratio", "ol_pct"),
-    ("sparse_ratio", "sparse"),
-    ("dynamic_range_bits", "dr_bits"),
-    ("norm_entropy", "entropy"),
-    ("skewness", "skew"),
-    ("bimodality_coefficient", "bimod"),
-]
-
-
-def _get_dist_metrics(obs_data: dict, layer: str, role: str) -> Optional[dict]:
-    """Extract distribution metrics dict for a (layer, role) pair."""
-    layer_data = obs_data.get(layer, {})
-    stages = layer_data.get(role, {})
-    if not stages:
-        return None
-    for _stage, slices in stages.items():
-        for _key, metrics in slices.items():
-            if "crest_factor" in metrics:
-                return metrics
-    return None
-
-
-def _get_hist_data(obs_data: dict, layer: str, role: str) -> Optional[dict]:
-    """Extract histogram data for a (layer, role) pair."""
-    layer_data = obs_data.get(layer, {})
-    stages = layer_data.get(role, {})
-    if not stages:
-        return None
-    for _stage, slices in stages.items():
-        for _key, metrics in slices.items():
-            if "fp32_hist" in metrics:
-                return metrics
-    return None
-
-
-def _get_per_block_qsnr(obs_data: dict, layer: str, role: str) -> Dict[int, float]:
-    """Extract per-block QSNR: {block_idx: qsnr_db}."""
-    layer_data = obs_data.get(layer, {})
-    stages = layer_data.get(role, {})
-    if not stages:
-        return {}
-    blocks = {}
-    for _stage, slices in stages.items():
-        for slice_key, metrics in slices.items():
-            if not isinstance(slice_key, tuple) or len(slice_key) < 2:
-                continue
-            tag = slice_key[0]
-            if tag == "block" and "qsnr_db" in metrics:
-                idx = int(slice_key[1])
-                v = metrics["qsnr_db"]
-                if math.isfinite(v):
-                    blocks[idx] = v
-    return blocks
-
-
-def _block_stats(blocks: Dict[int, float]) -> dict:
-    """Compute mean/std/min/max from per-block QSNR dict."""
-    if not blocks:
-        return {}
-    vals = list(blocks.values())
-    n = len(vals)
-    mean = sum(vals) / n
-    std = math.sqrt(sum((v - mean) ** 2 for v in vals) / n) if n > 1 else 0.0
-    return {
-        "mean": round(mean, 1),
-        "std": round(std, 1),
-        "min": round(min(vals), 1),
-        "max": round(max(vals), 1),
-        "n_blocks": n,
-    }
+from src.api._chart_helpers import (
+    _chart, _get_dist_metrics, _get_hist_data, _get_per_block_qsnr,
+    _block_stats, _linear_layer_names, _filter_qsnr,
+    _EXCLUDE_KEYWORDS, _DIST_KEYS, QSNR_REF,
+)
 
 
 def _sorted_layers(result: "SessionResult") -> List[Tuple[str, float]]:
@@ -128,34 +40,6 @@ def _sorted_layers(result: "SessionResult") -> List[Tuple[str, float]]:
              if math.isfinite(v)]
     items.sort(key=lambda x: x[1])
     return items
-
-
-# ---------------------------------------------------------------------------
-# Linear-layer filter
-# ---------------------------------------------------------------------------
-
-_EXCLUDE_KEYWORDS = (
-    "norm", "batch_norm", "layer_norm", "group_norm", "rms_norm",
-    "relu", "gelu", "silu", "sigmoid", "tanh", "softmax", "pool",
-    "BatchNorm", "LayerNorm", "GroupNorm", "RMSNorm",
-)
-
-
-def _linear_layer_names(observers_data: dict) -> set:
-    """Return layer names that are NOT norm/activation/pooling modules."""
-    names = set()
-    for layer in observers_data:
-        if not any(kw in layer for kw in _EXCLUDE_KEYWORDS):
-            names.add(layer)
-    return names
-
-
-def _filter_qsnr(qsnr_dict: dict, linear_only: bool, observers_data: dict) -> dict:
-    """Filter a qsnr dict to linear-only layers if requested."""
-    if not linear_only or not observers_data:
-        return qsnr_dict
-    allowed = _linear_layer_names(observers_data)
-    return {k: v for k, v in qsnr_dict.items() if k in allowed}
 
 
 # =====================================================================
@@ -240,13 +124,12 @@ def error_attribution_waterfall(
     scored.sort(key=lambda x: x[1])
     worst = scored[:k]
 
-    ref = 60.0
     bar_data = []
     for layer, output_qsnr, dominant, role_qsnrs in worst:
         input_q = role_qsnrs.get("input")
         weight_q = role_qsnrs.get("weight")
-        act_loss = ref - input_q if input_q is not None else 0.0
-        w_loss = ref - weight_q if weight_q is not None else 0.0
+        act_loss = QSNR_REF - input_q if input_q is not None else 0.0
+        w_loss = QSNR_REF - weight_q if weight_q is not None else 0.0
         bar_data.append({"layer": layer, "error_contribution": round(act_loss, 2),
                          "source": "activation", "dominant": dominant})
         bar_data.append({"layer": layer, "error_contribution": round(w_loss, 2),

@@ -166,19 +166,27 @@ class DistributionObserver(SliceAwareObserver):
     # ------------------------------------------------------------------
 
     def _measure_batch(self, fp32_2d, quant_2d, valid_counts=None):
-        """Per-block aggregate: mean/std/min/max of key distribution stats."""
+        """Per-block aggregate: MSE stats + distribution fingerprint from flattened view."""
         err_sq = (fp32_2d - quant_2d).pow(2)
         if valid_counts is not None:
             n_valid = valid_counts.clamp_min(1)
             mse = err_sq.sum(dim=1) / n_valid
         else:
             mse = err_sq.mean(dim=1)
-        return {
+        result = {
             "mse": mse.mean().item(),
             "mse_std": mse.std(unbiased=False).item() if mse.numel() > 1 else 0.0,
             "mse_min": mse.min().item(),
             "mse_max": mse.max().item(),
         }
+        # Merge distribution fingerprint from flattened data
+        if valid_counts is not None:
+            mask = torch.arange(fp32_2d.shape[1], device=fp32_2d.device) < valid_counts.unsqueeze(1)
+            flat_metrics = self._measure(None, fp32_2d[mask], quant_2d[mask])
+        else:
+            flat_metrics = self._measure(None, fp32_2d.reshape(-1), quant_2d.reshape(-1))
+        result.update(flat_metrics)
+        return result
 
 
 class QSNRObserver(SliceAwareObserver):

@@ -2,7 +2,58 @@
 
 > **说明**：本文档中 "harness" 指 AgentHarness 项目（`AgentHarness/`），提供前端可视化。
 
-bitx 分析脚本通过 `render_chart()` 向 AgentHarness 前端输出图表。
+bitx 通过 `render_chart` 向 AgentHarness 前端输出图表。有两种使用方式。
+
+## render_chart 双通道用法
+
+### 方式 A：Agent 工具调用（inline in conversation）
+
+Agent 将 `render_chart` 列为 tools，推理过程中直接调用。
+
+```yaml
+# workflow agent 配置
+Agent("report_painter", tools=["render_chart", "read_text_file", "bash"])
+```
+
+Agent 在分析数据时，根据推理需要自主决定渲染什么图表：
+
+```
+Agent: "W4A4 精度比 W8A8 低 17%，让我看看各层的 QSNR 分布..."
+→ 调用 render_chart(data, "bar", x="layer", y="qsnr_db", title="Per-Layer QSNR")
+→ 图表内联出现在对话中
+→ Agent 继续分析: "fc2 的 QSNR 仅 18dB，我再看一下 block 级别..."
+→ 调用 render_chart(block_data, "box", ...)
+```
+
+- **显示位置**：Harness Conversation 内联，实时出现在对话流中
+- **特点**：Agent 自主决定渲染什么、何时渲染，适合分析报告
+
+### 方式 B：Python 脚本调用（result tab）
+
+在 Python 脚本中 import 并调用：
+
+```python
+from harness.tools.chart import render_chart
+
+render_chart(data, "bar", x="layer", y="qsnr_db", title="Per-Layer QSNR")
+```
+
+Agent 通过 `bash` 执行脚本：
+
+```
+Agent: 调用 bash → python scripts/render_charts.py --result-dir ./output
+```
+
+- **显示位置**：Harness Result 标签页，**不在对话中实时可见**
+- **特点**：批量预渲染全部图表，适合一次性生成
+
+### 选择指南
+
+| 场景 | 推荐方式 |
+|------|---------|
+| reporter agent 学术分析报告 | **A: 工具调用** |
+| 批量预渲染全部图表 | B: 脚本调用 |
+| 需要根据数据动态决定渲染什么 | **A: 工具调用** |
 
 ## 传输机制
 
