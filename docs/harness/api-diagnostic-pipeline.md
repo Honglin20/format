@@ -191,6 +191,65 @@ Step 4: 综合输出学术报告
 
 1. ~~`src/api/diagnostic_api.py` — 三阶段分析函数~~ ✅ 已完成
 2. ~~`report_painter` agent MD — 分析指令 + 数据目录 + render_chart 调用~~ ✅ 已完成 (`docs/harness/agents/report_painter.md`)
-3. **上游 agent 改造** — 保存 JSON 到 output_dir，传递数据目录信息
-4. **更新三个示例** — Ex18/19/20 集成 reporter agent
+3. ~~上游 agent 改造 + `run_diagnostic_pipeline`~~ ✅ 已完成 (`docs/harness/agents/diagnostic_saver.md`)
+4. **更新三个示例** — Ex18/19/20 集成 diagnostic_saver + report_painter（需修改 AgentHarness，见下方方案）
 5. **Layer B E2E 测试**
+
+---
+
+## 六、AgentHarness 集成方案
+
+> 以下改动在 AgentHarness 项目内，需要用户确认后执行。
+
+### 通用改动（适用于 Ex18/19/20）
+
+每个示例末尾追加两个 agent：
+
+```python
+Agent("diagnostic_saver",
+      after=["<last_analysis_agent>"],  # 取决于示例
+      tools=["bash"],
+      result_type=DiagnosticSaveResult),
+
+Agent("report_painter",
+      after=["diagnostic_saver"],
+      tools=["render_chart", "read_text_file", "bash"]),
+```
+
+新增 result_type：
+
+```python
+class DiagnosticSaveResult(BaseModel):
+    diagnostic_dir: str = Field(description="Path to diagnostic/ directory")
+    status: str = Field(description="'success' or 'error'")
+    summary: str
+```
+
+### Example 20（precision-diagnostic）
+
+**当前 DAG**: `adapter → quant_study → coarse_analyzer → [deep_dive_analyst + intervention_explorer] → summary_painter`
+
+**改为**: `adapter → quant_study → coarse_analyzer → [deep_dive_analyst + intervention_explorer] → diagnostic_saver → report_painter`
+
+- `diagnostic_saver` after: `["deep_dive_analyst", "intervention_explorer"]`
+- 删除 `summary_painter`
+- Agent MD 文件复制到 `workflows/precision-diagnostic/agents/`
+
+### Example 19（mxint-diagnostic）
+
+**当前 DAG**: `adapter → study_runner → [gap_analyzer + layer_attribution → distribution_profiler + block_analyst + intervention_evaluator] → synthesis`
+
+**改为**: `adapter → study_runner → [...] → synthesis → diagnostic_saver → report_painter`
+
+- `diagnostic_saver` after: `["synthesis"]`
+- 保留 `synthesis` agent 不变（仍产出结构化 MXIntDiagnosticReport）
+- 新增 `report_painter` 产出学术分析报告（独立于 synthesis 的结构化报告）
+
+### Example 18（mxint-analysis）
+
+**当前 DAG**: `adapter → configurator → _judge_configurator → runner`
+
+**改为**: `adapter → configurator → _judge_configurator → runner → diagnostic_saver → report_painter`
+
+- `diagnostic_saver` after: `["runner"]`
+- 最简集成：只有 runner 的 Study 结果，无上游分析

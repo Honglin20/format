@@ -21,7 +21,8 @@ bitx 提供量化分析能力，两者通过 adapter 模式协作。
 | [api-cross-config-ranking.md](api-cross-config-ranking.md) | Agent 4: cross-config layer ranking API |
 | [api-transform-effect.md](api-transform-effect.md) | Agent 3/7: transform effect analysis API |
 | [api-intervention-eval.md](api-intervention-eval.md) | Agent 7: intervention evaluation API |
-| [api-diagnostic-pipeline.md](api-diagnostic-pipeline.md) | 三阶段分析 pipeline + reporter agent 设计 |
+| [api-diagnostic-pipeline.md](api-diagnostic-pipeline.md) | 三阶段分析 pipeline + reporter agent 设计 + AgentHarness 集成方案 |
+| [agents/diagnostic_saver.md](agents/diagnostic_saver.md) | diagnostic_saver agent 指令（调用 run_diagnostic_pipeline） |
 | [agents/report_painter.md](agents/report_painter.md) | report_painter agent 指令（数据目录 + 分析流程 + 图表模板） |
 | [example19-spec.md](example19-spec.md) | Example 19 完整设计文档 |
 

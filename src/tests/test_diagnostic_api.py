@@ -615,3 +615,55 @@ class TestSaveDiagnosticData:
         with open(f"{diag_dir}/deep_dive/layer_{safe}.json") as f:
             layer_data = json.load(f)
         assert isinstance(layer_data, dict)
+
+
+class TestRunDiagnosticPipeline:
+
+    def test_loads_from_results_json(self, tmp_path):
+        """run_diagnostic_pipeline reads results.json and produces diagnostic/."""
+        from src.api.diagnostic_api import run_diagnostic_pipeline
+
+        # Create a minimal results.json matching StudyReport.save format
+        results_data = {
+            "default": {
+                "W8A8": {
+                    "accuracy": 0.90,
+                    "fp32_accuracy": 0.92,
+                    "qsnr_per_layer": {"fc1": 30.5, "fc2": 28.1},
+                    "mse_per_layer": {"fc1": 0.001, "fc2": 0.003},
+                },
+                "W4A4": {
+                    "accuracy": 0.75,
+                    "fp32_accuracy": 0.92,
+                    "qsnr_per_layer": {"fc1": 22.0, "fc2": 15.3},
+                    "mse_per_layer": {"fc1": 0.01, "fc2": 0.05},
+                },
+            }
+        }
+        with open(f"{tmp_path}/results.json", "w") as f:
+            json.dump(results_data, f)
+
+        diag_dir = run_diagnostic_pipeline(str(tmp_path))
+
+        assert os.path.isdir(diag_dir)
+        assert os.path.isfile(f"{diag_dir}/index.json")
+        assert os.path.isfile(f"{diag_dir}/coarse/gaps.json")
+        assert os.path.isfile(f"{diag_dir}/deep_dive/index.json")
+        assert os.path.isfile(f"{diag_dir}/prescription/strategies.json")
+
+    def test_empty_results_raises(self, tmp_path):
+        """run_diagnostic_pipeline raises on empty results."""
+        from src.api.diagnostic_api import run_diagnostic_pipeline
+
+        with open(f"{tmp_path}/results.json", "w") as f:
+            json.dump({}, f)
+
+        with pytest.raises(ValueError, match="No SessionResult"):
+            run_diagnostic_pipeline(str(tmp_path))
+
+    def test_missing_file_raises(self, tmp_path):
+        """run_diagnostic_pipeline raises on missing results.json."""
+        from src.api.diagnostic_api import run_diagnostic_pipeline
+
+        with pytest.raises(FileNotFoundError):
+            run_diagnostic_pipeline(str(tmp_path))

@@ -47,6 +47,8 @@ __all__ = [
     "detect_wxa_bottleneck",
     # Save
     "save_diagnostic_data",
+    # Convenience
+    "run_diagnostic_pipeline",
 ]
 
 
@@ -329,8 +331,11 @@ def coarse_pass(
 
     if fp32_accuracy is None:
         first = next(iter(results.values()))
-        fp32_metrics = first.fp32_metrics or {}
-        fp32_accuracy = fp32_metrics.get("accuracy")
+        fm = first.fp32_metrics
+        if isinstance(fm, (int, float)):
+            fp32_accuracy = float(fm)
+        elif isinstance(fm, dict):
+            fp32_accuracy = fm.get("accuracy")
 
     gaps = _build_gaps(results, fp32_accuracy)
     bottleneck = (bottleneck_fn or detect_wxa_bottleneck)(gaps)
@@ -481,10 +486,14 @@ def prescribe(
 # =====================================================================
 
 def _extract_accuracy(result: "SessionResult") -> Optional[float]:
-    if result.quant_metrics:
-        for key in ("accuracy", "acc", "eval_accuracy"):
-            if key in result.quant_metrics:
-                return result.quant_metrics[key]
+    qm = result.quant_metrics
+    if qm is None:
+        return None
+    if isinstance(qm, (int, float)):
+        return float(qm)
+    for key in ("accuracy", "acc", "eval_accuracy"):
+        if key in qm:
+            return qm[key]
     return None
 
 
@@ -608,8 +617,12 @@ def _transform_effects(
         trans_acc = _extract_accuracy(trans_result)
         fp32_acc = None
         for r in (base_result, trans_result):
-            if r.fp32_metrics:
-                fp32_acc = r.fp32_metrics.get("accuracy")
+            fm = r.fp32_metrics
+            if isinstance(fm, (int, float)):
+                fp32_acc = float(fm)
+                break
+            elif isinstance(fm, dict):
+                fp32_acc = fm.get("accuracy")
                 if fp32_acc is not None:
                     break
 
@@ -1245,3 +1258,74 @@ def _json_default(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return obj.__dict__
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+# ── Convenience ────────────────────────────────────────────────────
+
+def run_diagnostic_pipeline(output_dir: str) -> str:
+    """Load StudyReport, run all three stages, and save diagnostic data.
+
+    Convenience entry point for the ``diagnostic_saver`` harness agent.
+    A single bash call replaces three separate agent calls:
+
+    .. code-block:: bash
+
+        python -c "from src.api.diagnostic_api import run_diagnostic_pipeline; \\
+                   print(run_diagnostic_pipeline('$OUTPUT_DIR'))"
+
+    Args:
+        output_dir: Directory containing ``results.json`` from
+            :meth:`StudyReport.save`.
+
+    Returns:
+        Path to the ``diagnostic/`` directory containing the incremental
+        JSON files.
+    """
+    from src.report._study_report import StudyReport
+
+    report = StudyReport.from_file(output_dir)
+
+    # Flatten {part_name: [SessionResult, ...]} → {config_name: SessionResult}
+    # If same config name appears in multiple parts, keep the one with worse QSNR
+    flat: Dict[str, "SessionResult"] = {}
+    for part_results in report._results.values():
+        for r in part_results:
+            existing = flat.get(r.name)
+            if existing is None:
+                flat[r.name] = r
+            else:
+                # Keep the one with worse avg QSNR (more informative for diagnosis)
+                old_q = _avg_qsnr(existing) or float("inf")
+                new_q = _avg_qsnr(r) or float("inf")
+                if new_q < old_q:
+                    flat[r.name] = r
+
+    if not flat:
+        raise ValueError(f"No SessionResult entries found in {output_dir}/results.json")
+
+    coarse = coarse_pass(flat)
+
+    # Pick worst config for deep_dive (by QSNR, fallback to accuracy delta)
+    worst_name: Optional[str] = None
+    worst_score = float("inf")
+    for g in coarse.gaps:
+        q = g.avg_qsnr_db
+        if q is not None and q < worst_score:
+            worst_score = q
+            worst_name = g.config
+    if worst_name is None:
+        # Fallback: pick the config with largest accuracy gap
+        worst_delta = 0.0
+        for g in coarse.gaps:
+            d = g.delta_from_fp32
+            if d is not None and abs(d) > abs(worst_delta):
+                worst_delta = d
+                worst_name = g.config
+    if worst_name is None:
+        worst_name = next(iter(flat.keys()))
+    worst_result = flat[worst_name]
+
+    dd = deep_dive(worst_result)
+    pr = prescribe(worst_result)
+
+    return save_diagnostic_data(coarse, dd, pr, output_dir)
