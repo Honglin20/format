@@ -98,7 +98,8 @@ def _chart(data, chart_type, *, x, y, label="MXInt8", title="", hue=None):
     render_chart(data, chart_type, x=x, y=y, label=label, title=title, hue=hue)
 
 
-def charts_from_result(result, label: str = "MXInt8"):
+def charts_from_result(result, label: str = "MXInt8", *,
+                       model=None, block_size: int = 16):
     """Generate charts from SessionResult via render_chart.
 
     Uses accumulated QSNR as primary metric (linear-only).
@@ -109,17 +110,14 @@ def charts_from_result(result, label: str = "MXInt8"):
         accum_vs_local_line,
         per_role_local_qsnr,
         error_attribution_waterfall,
-        extreme_layer_table,
         compare_extreme_layers,
-        distribution_table,
-        diagnosis_report,
     )
 
     # ── Phase 2: Global overview ─────────────────────────────────────
-    # ① Accum QSNR bar (linear-only) — replaces old ① local QSNR + ② MSE
-    accum_qsnr_bar(result, label=label)
+    # P1: Accum QSNR bar — use model layer order (not sorted by QSNR)
+    accum_qsnr_bar(result, label=label, sort_by_model_order=True)
 
-    # ② Accuracy summary table
+    # P2: Accuracy summary table
     summary_rows = []
     if result.fp32_metrics:
         for k, v in result.fp32_metrics.items():
@@ -135,29 +133,19 @@ def charts_from_result(result, label: str = "MXInt8"):
         _chart(summary_rows, "table", x="metric", y="fp32",
                label=label, title="Accuracy Summary (Precision Comparison)")
 
-    # ③ Accum vs Local — the ONE chart showing local QSNR
+    # P3: Accum vs Local
     accum_vs_local_line(result, label=label)
 
-    # ④ Per-role local QSNR grouped bar
+    # P4: Per-role local QSNR grouped bar (QSNR ≤ 100 dB only)
     per_role_local_qsnr(result, label=label)
 
-    # ── Phase 3: Error attribution + Cost ────────────────────────────
-    # ⑤ Error attribution waterfall (accum-based, linear-only)
+    # ── Phase 3: Error attribution ───────────────────────────────────
+    # P5: Error attribution waterfall (positive error only)
     error_attribution_waterfall(result, k=10, label=label)
 
-    # ⑥ Cost decomposition
-    if result.cost:
-        cost_rows = result.cost.to_dataframe()
-        if cost_rows:
-            _chart(cost_rows, "bar", x="op_name", y="flops_math",
-                   label=label, title="Math FLOPs per Layer")
-
-    # ── Phase 4: Extreme layer analysis ──────────────────────────────
-    # ⑦ Extreme layer summary table (accum QSNR)
-    extreme_layer_table(result, k=3)
-
-    # ⑧ Extreme layers comparison + deep dive (accum, dist_overlay)
-    compare_extreme_layers(result, top_k=3, linear_only=True)
+    # ── Phase 4: Extreme layer deep dive ─────────────────────────────
+    compare_extreme_layers(result, top_k=1, linear_only=True,
+                           model=model, block_size=block_size)
 
 
 def _worst_layers_with_dominant(result, k: int = 10):
@@ -313,24 +301,18 @@ def charts_precision_recovery(
     if not recovery_data:
         return
 
-    # ⑨ Per-layer recovery bar
-    _chart(recovery_data, "bar", x="layer", y="recovery_pct",
-           hue="dominant_error",
-           label=label,
-           title=f"Precision Recovery: Restoring Each Layer to FP32 (% of gap recovered)")
-
-    # ⑩ Recovery accuracy bar: show actual accuracy per boost
-    acc_data = [{"layer": "baseline_quant", "accuracy": quant_acc, "config": "MXInt8 (all)"}]
-    acc_data.append({"layer": "baseline_fp32", "accuracy": fp32_acc, "config": "FP32"})
+    # ⑨ Precision recovery: grouped bar (baseline quant + restored + FP32)
+    acc_data = [{"layer": "quant_baseline", "accuracy": quant_acc, "config": "Quantized"}]
+    acc_data.append({"layer": "fp32_baseline", "accuracy": fp32_acc, "config": "FP32"})
     for r in recovery_data:
         acc_data.append({
             "layer": r["layer"],
             "accuracy": r["accuracy"],
-            "config": f"FP32 restore ({r['dominant_error']})",
+            "config": "FP32 restore",
         })
     _chart(acc_data, "bar", x="layer", y="accuracy", hue="config",
            label=label,
-           title="Actual Accuracy: Per-Layer FP32 Restore")
+           title="Precision Recovery (single-layer restore: each bar restores 1 layer to FP32)")
 
 
 # =====================================================================
@@ -420,13 +402,10 @@ def main():
     # ── Render basic charts ──────────────────────────────────────────
     label = f"MXInt{args.w_bits}"
     print("\n[bitx] Generating charts...")
-    charts_from_result(result, label=label)
+    charts_from_result(result, label=label,
+                       model=model, block_size=args.block_size)
 
-    # ── Error attribution (⑧) ───────────────────────────────────────
-    print("[bitx] Error attribution analysis...")
-    charts_error_attribution(result, label=label)
-
-    # ── Precision recovery (⑨⑩) ─────────────────────────────────────
+    # ── Precision recovery (⑨) ──────────────────────────────────────
     if not args.skip_recovery:
         charts_precision_recovery(
             model, config, calib_data, eval_data, eval_fn,
@@ -444,17 +423,16 @@ def main():
 
     # ── Layer-level diagnostics ─────────────────────────────────────
     from src.api.layer_diagnostic import (
-        compare_extreme_layers, distribution_table, diagnosis_report,
+        distribution_table, diagnosis_report,
     )
 
     print("\n[bitx] Running layer-level diagnostics...")
     distribution_table(result)
     diagnosis_report(result)
-    compare_extreme_layers(result, top_k=3)
 
-    # ── Harness charts (U1–U6 + block/provenance) ──────────────────
+    # ── Harness charts (U2 + U6) ────────────────────────────────────
     from src.api.harness_charts import all_harness_charts
-    print("\n[bitx] Generating harness charts (U1–U6)...")
+    print("\n[bitx] Generating harness charts (U2 + U6)...")
     all_harness_charts(result, label=label)
 
     print("\n[bitx] Analysis complete.")

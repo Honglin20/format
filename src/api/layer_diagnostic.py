@@ -46,11 +46,20 @@ def _sorted_layers(result: "SessionResult") -> List[Tuple[str, float]]:
 # Primitive plotting functions (P1–P5)
 # =====================================================================
 
-def accum_qsnr_bar(result: "SessionResult", *, linear_only: bool = True, label: str = ""):
+def accum_qsnr_bar(result: "SessionResult", *, linear_only: bool = True,
+                   label: str = "", sort_by_model_order: bool = False):
     """P1: Accumulated QSNR bar chart (primary QSNR visualization)."""
     data_dict = _filter_qsnr(result.accum_qsnr_per_layer, linear_only, result.observers_data)
     if not data_dict:
         return
+    if sort_by_model_order:
+        # Use observers_data key order (= model forward order)
+        ordered = {k: data_dict[k] for k in result.observers_data if k in data_dict}
+        # Add any remaining layers not in observers_data
+        for k in data_dict:
+            if k not in ordered:
+                ordered[k] = data_dict[k]
+        data_dict = ordered
     data = [{"layer": k, "qsnr_db": v} for k, v in data_dict.items()]
     _chart(data, "bar", x="layer", y="qsnr_db",
            label=label, title="Per-Layer Accumulated QSNR (dB)")
@@ -75,7 +84,7 @@ def accum_vs_local_line(result: "SessionResult", *, linear_only: bool = True, la
 
 
 def per_role_local_qsnr(result: "SessionResult", *, linear_only: bool = True, label: str = ""):
-    """P3: Per-role local QSNR grouped bar (input / weight / output)."""
+    """P3: Per-role local QSNR grouped bar (QSNR ≤ 100 dB only)."""
     qsnr_by_role = result.qsnr_by_role or {}
     if not qsnr_by_role:
         return
@@ -85,10 +94,12 @@ def per_role_local_qsnr(result: "SessionResult", *, linear_only: bool = True, la
         for layer, qsnr in layer_map.items():
             if allowed is not None and layer not in allowed:
                 continue
+            if qsnr > 100:
+                continue
             data.append({"layer": layer, "role": role, "qsnr_db": qsnr})
     if data:
         _chart(data, "bar", x="layer", y="qsnr_db", hue="role",
-               label=label, title="Per-Role Local QSNR (dB)")
+               label=label, title="Per-Role Local QSNR (dB, QSNR ≤ 100)")
 
 
 def error_attribution_waterfall(
@@ -130,14 +141,17 @@ def error_attribution_waterfall(
         weight_q = role_qsnrs.get("weight")
         act_loss = QSNR_REF - input_q if input_q is not None else 0.0
         w_loss = QSNR_REF - weight_q if weight_q is not None else 0.0
-        bar_data.append({"layer": layer, "error_contribution": round(act_loss, 2),
-                         "source": "activation", "dominant": dominant})
-        bar_data.append({"layer": layer, "error_contribution": round(w_loss, 2),
-                         "source": "weight", "dominant": dominant})
+        # Filter negative error (numerical noise)
+        if act_loss > 0:
+            bar_data.append({"layer": layer, "error_contribution": round(act_loss, 2),
+                             "source": "activation", "dominant": dominant})
+        if w_loss > 0:
+            bar_data.append({"layer": layer, "error_contribution": round(w_loss, 2),
+                             "source": "weight", "dominant": dominant})
 
     if bar_data:
         _chart(bar_data, "bar", x="layer", y="error_contribution", hue="source",
-               label=label, title="Error Attribution: Activation vs Weight")
+               label=label, title="Error Attribution: Activation vs Weight (positive error only)")
 
     table_data = []
     for layer, output_qsnr, dominant, role_qsnrs in worst:
@@ -191,55 +205,28 @@ def _to_list(x):
 # 1. layer_deep_dive
 # =====================================================================
 
-def layer_deep_dive(result: "SessionResult", layer: str, label: str = ""):
-    """Full 3-role diagnostic for a single layer.
+def layer_deep_dive(result: "SessionResult", layer: str, *,
+                    model=None, block_size: int = 16, label: str = ""):
+    """Focused diagnostic for a single layer.
 
-    For each role (input, weight, output), outputs:
-    - Distribution fingerprint table
-    - Distribution overlay (area: fp32 vs quant vs error)
-    - Per-block QSNR statistics table
-    - Top-5 worst blocks
-    - Failure mode classification
+    Per role (input, weight, output):
+    1. Distribution overlay (dist_overlay)
+    2. Block QSNR heatmap (2D, requires model for shape inference)
     """
     obs = result.observers_data
-    qsnr_by_role = result.qsnr_by_role or {}
-    mse_by_role = result.mse_by_role or {}
     tag = f"{label} " if label else ""
 
     print(f"\n{'='*60}")
     print(f"  {tag}Layer Deep Dive: {layer}")
     print(f"{'='*60}")
 
-    # ── Per-role analysis ──────────────────────────────────────────
     roles_with_data = set()
     for role in ("input", "weight", "output"):
         if obs.get(layer, {}).get(role):
             roles_with_data.add(role)
 
     for role in sorted(roles_with_data):
-        qsnr = qsnr_by_role.get(role, {}).get(layer)
-        mse = mse_by_role.get(role, {}).get(layer)
-
-        print(f"\n  [{role.upper()}] QSNR: {qsnr:.1f} dB" if qsnr is not None else f"\n  [{role.upper()}] QSNR: N/A")
-
-        # ── Distribution fingerprint table ─────────────────────────
-        dist = _get_dist_metrics(obs, layer, role)
-        if dist:
-            dist_rows = []
-            for key, short in _DIST_KEYS:
-                v = dist.get(key)
-                if v is not None:
-                    if key in ("outlier_ratio", "sparse_ratio"):
-                        dist_rows.append({"metric": short, "value": f"{v:.2%}"})
-                    elif key == "dynamic_range_bits":
-                        dist_rows.append({"metric": short, "value": f"{v:.1f} bits"})
-                    else:
-                        dist_rows.append({"metric": short, "value": round(v, 3)})
-            if dist_rows:
-                _chart(dist_rows, "table", x="metric", y="value",
-                       label=label, title=f"{tag}{layer} ({role}) Distribution Fingerprint")
-
-        # ── Distribution overlay: fp32 vs quant vs error (dist_overlay) ─
+        # ── Distribution overlay ─────────────────────────────────────
         hist = _get_hist_data(obs, layer, role)
         if hist and "fp32_hist" in hist:
             fp32_hist = _to_list(hist["fp32_hist"])
@@ -279,53 +266,13 @@ def layer_deep_dive(result: "SessionResult", layer: str, label: str = ""):
                        label=label, title=f"{tag}{layer} ({role}) Distribution",
                        series=series)
 
-        # ── Per-block QSNR stats ───────────────────────────────────
-        blocks = _get_per_block_qsnr(obs, layer, role)
-        if blocks:
-            stats = _block_stats(blocks)
-            worst_idx = min(blocks, key=blocks.get)
-
-            block_table = [{
-                "layer": layer, "role": role,
-                "qsnr_mean": stats["mean"], "qsnr_std": stats["std"],
-                "qsnr_min": stats["min"], "qsnr_max": stats["max"],
-                "n_blocks": stats["n_blocks"],
-                "worst_block": worst_idx, "worst_qsnr": round(blocks[worst_idx], 1),
-            }]
-            _chart(block_table, "table", x="layer", y="qsnr_mean",
-                   label=label, title=f"{tag}{layer} ({role}) Per-Block QSNR Statistics")
-
-            # Top-5 worst blocks bar
-            sorted_blocks = sorted(blocks.items(), key=lambda x: x[1])[:5]
-            if sorted_blocks:
-                bar_data = [{"block_idx": idx, "qsnr_db": round(q, 1)}
-                            for idx, q in sorted_blocks]
-                _chart(bar_data, "bar", x="block_idx", y="qsnr_db",
-                       label=label, title=f"{tag}{layer} ({role}) Top-5 Worst Blocks")
-
-        # ── Classification ─────────────────────────────────────────
-        if dist:
-            cls_label, desc, suggestion = classify_distribution(dist)
-            print(f"    Classification: {cls_label}")
-            print(f"    Suggestion: {suggestion}")
-
-    # ── Role attribution summary ───────────────────────────────────
-    role_qsnrs = {}
-    for role in ("input", "weight", "output"):
-        v = qsnr_by_role.get(role, {}).get(layer)
-        if v is not None and math.isfinite(v):
-            role_qsnrs[role] = v
-
-    if role_qsnrs:
-        dominant = min(role_qsnrs, key=role_qsnrs.get)
-        attr_row = {
-            "layer": layer,
-            **{f"{r}_qsnr": round(v, 1) for r, v in role_qsnrs.items()},
-            "dominant_error": dominant,
-        }
-        _chart([attr_row], "table", x="layer", y="dominant_error",
-               label=label, title=f"{tag}{layer} Role Attribution: Dominant Error Source")
-        print(f"\n  Dominant error source: {dominant} (QSNR={role_qsnrs[dominant]:.1f} dB)")
+        # ── Block QSNR heatmap ───────────────────────────────────────
+        if model is not None:
+            blocks = _get_per_block_qsnr(obs, layer, role)
+            if blocks:
+                from src.api._chart_helpers import block_qsnr_heatmap
+                block_qsnr_heatmap(blocks, layer, role, block_size, model,
+                                   label=label)
 
 
 # =====================================================================
@@ -337,6 +284,8 @@ def compare_extreme_layers(
     *,
     top_k: int = 3,
     linear_only: bool = True,
+    model=None,
+    block_size: int = 16,
 ):
     """Compare Top-K worst + Top-K best layers by accumulated QSNR.
 
@@ -398,7 +347,8 @@ def compare_extreme_layers(
         if name in seen:
             continue
         seen.add(name)
-        layer_deep_dive(result, name, label=rank_label)
+        layer_deep_dive(result, name, model=model, block_size=block_size,
+                        label=rank_label)
 
 
 # =====================================================================

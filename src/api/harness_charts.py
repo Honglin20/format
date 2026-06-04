@@ -130,9 +130,7 @@ def intervention_chart(result: "SessionResult", *, k: int = 5, label: str = ""):
         _chart(rows, "table", x="layer", y="current_qsnr",
                label=label, title=f"Intervention Plan: Top-{k} Layers to Boost")
 
-    if bar_data:
-        _chart(bar_data, "bar", x="layer", y="qsnr_db",
-               label=label, title=f"Intervention Target Layers (current QSNR)")
+    # U2b bar removed: duplicates P1 Accum QSNR bar
 
 
 # =====================================================================
@@ -320,9 +318,8 @@ def block_qsnr_box_chart(result: "SessionResult", *, linear_only: bool = True,
         _chart(box_data, "box", x="group", y="value",
                label=label, title="Per-Block QSNR Distribution by Layer (Box Plot)")
 
-    if stats_rows:
-        _chart(stats_rows, "table", x="layer", y="mean",
-               label=label, title="Per-Block QSNR Statistics: All Layers × Roles")
+
+# U6b stats table removed: redundant with heatmap in layer_deep_dive
 
 
 # =====================================================================
@@ -592,29 +589,9 @@ def multi_config_block_chart(study_report: "StudyReport", layer: str,
 
 def all_harness_charts(result: "SessionResult", *, label: str = "",
                        output_dir: Optional[str] = None):
-    """Emit all U1–U6 + block/provenance harness charts for a SessionResult.
-
-    Args:
-        result: SessionResult with observers data.
-        label: Group label for harness chart grouping.
-        output_dir: If provided, also save matplotlib figures via viz/.
-    """
-    distribution_fit_chart(result, label=label)
+    """Emit U2a + U6 harness charts for a SessionResult."""
     intervention_chart(result, label=label)
-    depth_decay_chart(result, label=label)
-    error_propagation_chart(result, label=label)
     block_qsnr_box_chart(result, label=label)
-    error_provenance_chart(result, label=label)
-
-    # U3 + channel/block charts for extreme layers
-    obs = result.observers_data
-    accum = result.accum_qsnr_per_layer
-    if accum:
-        sorted_layers = sorted(accum.items(), key=lambda x: x[1])
-        for layer, _ in sorted_layers[:3]:
-            channel_heterogeneity_chart(result, layer, role="weight", label=label)
-            block_error_chart(result, layer, role="weight", label=label)
-            channel_error_chart(result, layer, role="input", label=label)
 
     if output_dir:
         _save_matplotlib_figures(result, output_dir)

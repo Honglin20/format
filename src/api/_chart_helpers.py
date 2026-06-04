@@ -6,7 +6,10 @@ Internal module — not part of the public API.
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch.nn as nn
 
 # ── Optional: harness render_chart ───────────────────────────────────
 
@@ -187,6 +190,94 @@ def _filter_qsnr(qsnr_dict: dict, linear_only: bool, observers_data: dict) -> di
         return qsnr_dict
     allowed = _linear_layer_names(observers_data)
     return {k: v for k, v in qsnr_dict.items() if k in allowed}
+
+
+# =====================================================================
+# Block QSNR Heatmap
+# =====================================================================
+
+def _infer_heatmap_shape(
+    blocks: Dict[int, float],
+    layer_name: str,
+    role: str,
+    block_size: int,
+    model: "nn.Module",
+) -> Optional[tuple]:
+    """Infer 2D heatmap shape from model parameters and block count.
+
+    Weight: (out_features, in_features) → (out_features, in_features // block_size)
+    Input:  avg across all leading dims → (D[-2], D[-1] // block_size)
+    Output: same as input.
+
+    Returns (n_rows, n_cols) or None if shape cannot be inferred.
+    """
+    module_map = dict(model.named_modules())
+    module = module_map.get(layer_name)
+
+    if module is None or not hasattr(module, "weight") or module.weight is None:
+        return None
+
+    last_dim = module.weight.shape[-1]  # in_features for Linear, kW for Conv
+    n_blocks_per_row = last_dim // block_size
+    if n_blocks_per_row == 0:
+        return None
+
+    total_blocks = len(blocks)
+    n_rows = total_blocks // n_blocks_per_row
+
+    if n_rows * n_blocks_per_row != total_blocks:
+        return None
+
+    return (n_rows, n_blocks_per_row)
+
+
+def block_qsnr_heatmap(
+    blocks: Dict[int, float],
+    layer_name: str,
+    role: str,
+    block_size: int,
+    model: "nn.Module",
+    *,
+    label: str = "",
+):
+    """Render per-block QSNR as a 2D heatmap.
+
+    For weight: rows = output channels, cols = blocks along input dim.
+    For input/output: averaged across all leading dims (batch, channels, etc.),
+    keeping only the last 2 dims before block reshape.
+
+    Harness heatmap format: [{x: col, y: row, value: qsnr_db}, ...]
+    """
+    if not blocks:
+        return
+
+    shape = _infer_heatmap_shape(blocks, layer_name, role, block_size, model)
+    if shape is None:
+        return
+
+    n_rows, n_cols = shape
+
+    # Harness heatmap: max 50 per axis
+    if n_rows > 50 or n_cols > 50:
+        return
+
+    # Build heatmap data: flat block index → (row, col)
+    data = []
+    for flat_idx, qsnr in sorted(blocks.items()):
+        row = flat_idx // n_cols
+        col = flat_idx % n_cols
+        if row < n_rows and col < n_cols:
+            data.append({
+                "row": row,
+                "col": col,
+                "value": round(qsnr, 1),
+            })
+
+    if data:
+        _chart(data, "heatmap", x="col", y="row",
+               label=label,
+               title=f"{layer_name} ({role}) Block QSNR Heatmap "
+                     f"[{n_rows}×{n_cols}]")
 
 
 # =====================================================================
