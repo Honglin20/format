@@ -15,6 +15,40 @@ from src.session._config import QuantConfig
 from src.session._result import SessionResult
 
 
+def _jsonify_keys(obj):
+    """Recursively convert non-string dict keys (tuples) to strings for JSON."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            key = str(k) if not isinstance(k, str) else k
+            out[key] = _jsonify_keys(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_jsonify_keys(item) for item in obj]
+    return obj
+
+
+def _dejsonify_keys(obj):
+    """Recursively convert stringified tuple keys back to tuples."""
+    import ast
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if isinstance(k, str) and k.startswith('(') and k.endswith(')'):
+                try:
+                    parsed = ast.literal_eval(k)
+                    if isinstance(parsed, tuple):
+                        out[parsed] = _dejsonify_keys(v)
+                        continue
+                except (ValueError, SyntaxError):
+                    pass
+            out[k] = _dejsonify_keys(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_dejsonify_keys(item) for item in obj]
+    return obj
+
+
 class StudyReport:
     """Aggregated report across multiple format study parts.
 
@@ -331,6 +365,12 @@ class StudyReport:
                     entry["accum_qsnr_per_layer"] = r.accum_qsnr_per_layer
                 if r.accum_mse_per_layer:
                     entry["accum_mse_per_layer"] = r.accum_mse_per_layer
+                if r.observers_data:
+                    entry["observers_data"] = _jsonify_keys(r.observers_data)
+                if r.qsnr_by_role:
+                    entry["qsnr_by_role"] = r.qsnr_by_role
+                if r.mse_by_role:
+                    entry["mse_by_role"] = r.mse_by_role
                 serializable[part_name][r.name] = entry
         return serializable
 
@@ -585,6 +625,9 @@ class StudyReport:
                     mse_per_layer=entry.get("mse_per_layer", {}),
                     accum_qsnr_per_layer=entry.get("accum_qsnr_per_layer", {}),
                     accum_mse_per_layer=entry.get("accum_mse_per_layer", {}),
+                    observers_data=_dejsonify_keys(entry.get("observers_data", {})),
+                    qsnr_by_role=entry.get("qsnr_by_role", {}),
+                    mse_by_role=entry.get("mse_by_role", {}),
                 )
                 part_results.append(result)
             results[part_name] = part_results

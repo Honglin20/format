@@ -12,6 +12,7 @@
 | [reviews/](reviews/INDEX.md) | Review 报告 + Defect 修复记录 | 排查历史缺陷时 |
 | [reference/](reference/INDEX.md) | 公式 / 外部参考 | 需要权威公式时 |
 | [verification/](verification/README.md) | 数学验证文档 | 写量化测试推导前 |
+| [harness/](harness/INDEX.md) | AgentHarness 工作流集成 — adapter、工作流模式、图表、result_type | bitx 与 AgentHarness 联合开发时 |
 | [status/CURRENT.md](status/CURRENT.md) | 当前 task 断点 | **每次新终端启动必读** |
 
 ## 快速导航

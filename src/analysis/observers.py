@@ -3,6 +3,7 @@ from typing import List
 import torch
 
 from src.observer import SliceAwareObserver
+from src.scheme.granularity import GranularityMode
 
 
 class DistributionObserver(SliceAwareObserver):
@@ -165,19 +166,27 @@ class DistributionObserver(SliceAwareObserver):
     # ------------------------------------------------------------------
 
     def _measure_batch(self, fp32_2d, quant_2d, valid_counts=None):
-        """Per-block aggregate: mean/std/min/max of key distribution stats."""
+        """Per-block aggregate: MSE stats + distribution fingerprint from flattened view."""
         err_sq = (fp32_2d - quant_2d).pow(2)
         if valid_counts is not None:
             n_valid = valid_counts.clamp_min(1)
             mse = err_sq.sum(dim=1) / n_valid
         else:
             mse = err_sq.mean(dim=1)
-        return {
+        result = {
             "mse": mse.mean().item(),
             "mse_std": mse.std(unbiased=False).item() if mse.numel() > 1 else 0.0,
             "mse_min": mse.min().item(),
             "mse_max": mse.max().item(),
         }
+        # Merge distribution fingerprint from flattened data
+        if valid_counts is not None:
+            mask = torch.arange(fp32_2d.shape[1], device=fp32_2d.device) < valid_counts.unsqueeze(1)
+            flat_metrics = self._measure(None, fp32_2d[mask], quant_2d[mask])
+        else:
+            flat_metrics = self._measure(None, fp32_2d.reshape(-1), quant_2d.reshape(-1))
+        result.update(flat_metrics)
+        return result
 
 
 class QSNRObserver(SliceAwareObserver):
@@ -243,6 +252,163 @@ class MSEObserver(SliceAwareObserver):
             "mse_min": mse.min().item(),
             "mse_max": mse.max().item(),
         }
+
+
+class PerBlockQSNRObserver(SliceAwareObserver):
+    """Per-block / per-channel QSNR for fine-grained error localization.
+
+    Unlike QSNRObserver which aggregates across all blocks into one metric,
+    this observer records QSNR for each block individually, preserving
+    spatial distribution of quantization error.
+
+    Output keys:
+      PER_BLOCK:  ``("block", i)    → {"qsnr_db": float, "mse": float}``
+      PER_CHANNEL: ``("channel", i) → {"qsnr_db": float, "mse": float}``
+      BANK:       ``("bank", i)     → {"qsnr_db": float, "mse": float}``
+      PER_TENSOR: ``("tensor",)     → {"qsnr_db": float, "mse": float}``
+    """
+
+    def _measure(self, key, fp32, quant):
+        err = fp32 - quant
+        num = fp32.pow(2).mean().clamp_min(1e-30)
+        den = err.pow(2).mean().clamp_min(1e-30)
+        return {"qsnr_db": (10 * torch.log10(num / den)).item(),
+                "mse": err.pow(2).mean().item()}
+
+    def _measure_per_unit(self, fp32_2d, quant_2d):
+        err = fp32_2d - quant_2d
+        num = fp32_2d.pow(2).mean(dim=1).clamp_min(1e-30)
+        den = err.pow(2).mean(dim=1).clamp_min(1e-30)
+        qsnr = 10 * torch.log10(num / den)
+        mse = err.pow(2).mean(dim=1)
+        return [{"qsnr_db": v, "mse": m}
+                for v, m in zip(qsnr.tolist(), mse.tolist())]
+
+    def on_event(self, event):
+        mode = event.scheme.granularity.mode
+        if mode in (GranularityMode.PER_BLOCK, GranularityMode.PER_CHANNEL,
+                    GranularityMode.BANK):
+            self._on_event_per_unit(event)
+        else:
+            super().on_event(event)
+
+    def _on_event_per_unit(self, event):
+        fp32 = event.fp32_tensor
+        quant = event.quant_tensor
+        g = event.scheme.granularity
+        mode = g.mode
+
+        from src.quantize.elemwise import _enter_quantize, _exit_quantize
+        _enter_quantize()
+        try:
+            dst = (self._buffer
+                   .setdefault(event.layer_name, {})
+                   .setdefault(event.role, {})
+                   .setdefault(f"{event.stage}[{event.pipeline_index}]", {}))
+
+            if mode == GranularityMode.PER_BLOCK:
+                self._store_per_block(event, dst)
+            elif mode == GranularityMode.PER_CHANNEL:
+                self._store_per_channel(event, dst)
+            elif mode == GranularityMode.BANK:
+                self._store_per_bank(event, dst)
+        finally:
+            _exit_quantize()
+
+    def _store_per_block(self, event, dst):
+        fp32 = event.fp32_tensor
+        quant = event.quant_tensor
+        g = event.scheme.granularity
+        bs = g.block_size
+        axis = g.block_axis
+        if axis < 0:
+            axis = fp32.ndim + axis
+        dim_size = fp32.shape[axis]
+        n_blocks = (dim_size + bs - 1) // bs
+
+        fp32_moved = fp32.movedim(axis, -1)
+        quant_moved = quant.movedim(axis, -1)
+
+        if dim_size % bs != 0:
+            pad = n_blocks * bs - dim_size
+            fp32_moved = torch.nn.functional.pad(fp32_moved, (0, pad))
+            quant_moved = torch.nn.functional.pad(quant_moved, (0, pad))
+
+        fp32_2d = fp32_moved.reshape(-1, bs)
+        quant_2d = quant_moved.reshape(-1, bs)
+
+        has_partial = dim_size % bs != 0
+
+        if has_partial:
+            # Identify partial blocks (last block in each n_blocks group)
+            valid_counts = torch.full((fp32_2d.shape[0],), bs,
+                                       dtype=torch.float32, device=fp32.device)
+            valid_counts[n_blocks - 1::n_blocks] = dim_size % bs
+
+            # Full blocks: vectorized via _measure_per_unit
+            full_mask = valid_counts == bs
+            if full_mask.any():
+                full_fp32 = fp32_2d[full_mask]
+                full_quant = quant_2d[full_mask]
+                full_indices = full_mask.nonzero(as_tuple=True)[0].tolist()
+                for i, m in zip(full_indices, self._measure_per_unit(full_fp32, full_quant)):
+                    dst[("block", i)] = m
+
+            # Partial blocks: individual _measure calls
+            partial_mask = ~full_mask
+            if partial_mask.any():
+                partial_indices = partial_mask.nonzero(as_tuple=True)[0].tolist()
+                for i in partial_indices:
+                    vc = int(valid_counts[i].item())
+                    dst[("block", i)] = self._measure(("block", i),
+                                                      fp32_2d[i, :vc], quant_2d[i, :vc])
+        else:
+            # All blocks full: fully vectorized
+            for i, m in enumerate(self._measure_per_unit(fp32_2d, quant_2d)):
+                dst[("block", i)] = m
+
+    def _store_per_channel(self, event, dst):
+        fp32 = event.fp32_tensor
+        quant = event.quant_tensor
+        g = event.scheme.granularity
+        axis = g.channel_axis
+        if axis < 0:
+            axis = fp32.ndim + axis
+        n_ch = fp32.shape[axis]
+        fp32_2d = fp32.movedim(axis, 0).reshape(n_ch, -1)
+        quant_2d = quant.movedim(axis, 0).reshape(n_ch, -1)
+        for i, m in enumerate(self._measure_per_unit(fp32_2d, quant_2d)):
+            dst[("channel", i)] = m
+
+    def _store_per_bank(self, event, dst):
+        fp32 = event.fp32_tensor
+        quant = event.quant_tensor
+        g = event.scheme.granularity
+        axis = g.bank_axis
+        if axis < 0:
+            axis = fp32.ndim + axis
+        bank_size = g.bank_size
+        dim_size = fp32.shape[axis]
+        if dim_size % bank_size != 0:
+            dst[("tensor",)] = self._measure(("tensor",), fp32, quant)
+            return
+        num_banks = dim_size // bank_size
+        new_shape = list(fp32.shape)
+        new_shape[axis] = num_banks
+        new_shape.insert(axis + 1, bank_size)
+        fp32_r = fp32.reshape(new_shape)
+        quant_r = quant.reshape(new_shape)
+        ndim = fp32_r.ndim
+        perm = list(range(ndim))
+        perm.pop(axis)
+        perm = [axis] + perm
+        fp32_b = fp32_r.permute(perm)
+        quant_b = quant_r.permute(perm)
+        group_size = fp32_b[0].numel()
+        fp32_2d = fp32_b.reshape(num_banks, group_size)
+        quant_2d = quant_b.reshape(num_banks, group_size)
+        for i, m in enumerate(self._measure_per_unit(fp32_2d, quant_2d)):
+            dst[("bank", i)] = m
 
 
 class HistogramObserver(SliceAwareObserver):

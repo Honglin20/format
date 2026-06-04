@@ -123,6 +123,7 @@ x_q = quantize(x, scheme)
 | 排查历史缺陷 | `docs/reviews/INDEX.md` |
 | 查公式定义 | `docs/reference/INDEX.md` |
 | 了解整体进度 | `docs/workflow/phase-plan.md` |
+| Harness (AgentHarness) 工作流集成 | `docs/harness/INDEX.md` — adapter 合约 + 工作流模式 + 图表 + result_type |
 | 文档读写规范 | `docs/principles/documentation-rules.md` |
 
 ---

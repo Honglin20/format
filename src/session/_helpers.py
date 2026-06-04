@@ -14,6 +14,7 @@ from src.analysis.observers import (
     DistributionObserver,
     HistogramObserver,
     MSEObserver,
+    PerBlockQSNRObserver,
     QSNRObserver,
 )
 from src.calibration.strategies import (
@@ -32,7 +33,12 @@ from src.calibration.strategies import (
 def _extract_all_roles_qsnr_mse(
     observers_data: dict,
 ) -> tuple:
-    """Extract per-layer QSNR and MSE for ALL roles in a single pass."""
+    """Extract per-layer QSNR and MSE for ALL roles in a single pass.
+
+    Only considers aggregate-level slices (``("tensor",)``, ``("block_agg", i)``).
+    Per-block / per-channel entries from PerBlockQSNRObserver are skipped —
+    they contain fine-grained data, not layer-level summaries.
+    """
     qsnr_by_role: Dict[str, Dict[str, float]] = {}
     mse_by_role: Dict[str, Dict[str, float]] = {}
 
@@ -41,7 +47,12 @@ def _extract_all_roles_qsnr_mse(
             qsnr_map = qsnr_by_role.setdefault(role, {})
             mse_map = mse_by_role.setdefault(role, {})
             for _stage, slices in stages.items():
-                for _slice_key, metrics in slices.items():
+                for slice_key, metrics in slices.items():
+                    # Skip fine-grained per-block/per-channel entries
+                    if isinstance(slice_key, tuple) and len(slice_key) >= 1:
+                        tag = slice_key[0]
+                        if tag in ("block", "channel", "bank"):
+                            continue
                     if "qsnr_db" in metrics:
                         v = metrics["qsnr_db"]
                         if v == v and v != float("-inf"):
@@ -72,6 +83,7 @@ _OBSERVER_MAP: Dict[str, type] = {
     "histogram": HistogramObserver,
     "distribution": DistributionObserver,
     "fit": DistributionFitObserver,
+    "per_block_qsnr": PerBlockQSNRObserver,
 }
 
 _SMOOTH_INPUT_ROLES = frozenset({"input", "grad_input", "input_gw"})

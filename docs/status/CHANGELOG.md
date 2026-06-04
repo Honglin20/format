@@ -5,6 +5,24 @@
 
 ---
 
+## Example 19: MXInt Full Precision Diagnostic Chain ✅ (2026-06-02)
+
+**4 Phases 完成**, 2 commits: `c82ebed` (Phase A+B), `1bf8ab1` (Phase C+D)
+
+| Phase | 交付物 |
+|-------|--------|
+| A | 4 新 bitx API: PerBlockQSNRObserver, block_error_analysis, CrossConfigLayerRanking, TransformEffectReport |
+| B | 3 可视化: block_error_heatmap, channel_error_bar, multi_config_block_comparison |
+| C | 8-Agent Pipeline: Pydantic result types + workflow.json + 8 md files + 4 API docs |
+| D | E2E pipeline test: Study(observers) → save/load → ranking → block analysis → 13 charts |
+
+关键修改：
+- `Study.run()` 新增 `observers` 参数
+- `StudyReport` 序列化新增 `observers_data`/`qsnr_by_role`/`mse_by_role` (tuple key roundtrip via ast.literal_eval)
+- `CrossConfigLayerRanking` 新增 `get_layer_qsnr()` 公共方法
+
+---
+
 ## GPTQ 幂等修复 ✅ (2026-05-17)
 
 **问题：** GPTQ 量化不幂等 — GPTQ 用 `_precompute_scale()` 从原始 FP32 权重算出 per-channel amax 并写入 FP32 值到 `module.weight.data`，但 forward pass 中 `quantize(w, cfg.weight)` 不传 `scale`，重新从修改后权重算 amax，导致 re-quant 产出不同结果。GPTQ 不仅不提升精度，反而降低（int4-pc 从 -0.0050 降至 -0.0054）。

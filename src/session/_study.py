@@ -45,6 +45,7 @@ class Study:
         eval_fn: Optional[Callable] = None,
         outputs: Union[str, List[str]] = "default",
         model_factory: Optional[Callable[[QuantConfig], nn.Module]] = None,
+        observers: Optional[list] = None,
     ) -> "StudyReport":
         """Run all configs and return a StudyReport.
 
@@ -55,6 +56,8 @@ class Study:
             outputs: Output keys (``"default"`` / ``"all"`` / list).
             model_factory: Optional per-config model factory. When provided,
                 called with each config to produce a fresh model.
+            observers: Optional list of ObserverBase instances to attach
+                to each config's Session.
 
         Returns:
             ``StudyReport`` from ``src.report``.
@@ -79,6 +82,7 @@ class Study:
                 eval_data=eval_data,
                 eval_fn=eval_fn,
                 outputs=outputs,
+                observers=observers,
             )
             results.setdefault(cfg.name, []).append(result)
 

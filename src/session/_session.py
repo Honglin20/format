@@ -259,12 +259,19 @@ def run_quantization(
             _observers_data, _accum_qsnr_per_layer, _accum_mse_per_layer, _qsnr_by_role, \
                 _mse_by_role, _qsnr_per_layer, _mse_per_layer = _run_hook_analysis(
                     qmodel, fp32_model, calib_data, observer_keys, eval_fn,
+                    extra_observers=observers,
                 )
         elif observer_keys:
             _obs_list = [
                 _OBSERVER_MAP[k]() for k in sorted(observer_keys)
                 if k in _OBSERVER_MAP
             ]
+            # Merge any user-provided observers (e.g. PerBlockQSNRObserver)
+            if observers:
+                _existing_types = {type(o) for o in _obs_list}
+                for o in observers:
+                    if type(o) not in _existing_types:
+                        _obs_list.append(o)
             if _obs_list:
                 with AnalysisContext(qmodel, _obs_list) as ctx:
                     _run_model(qmodel, calib_data, eval_fn)
@@ -360,6 +367,7 @@ def _run_hook_analysis(
     calib_data,
     observer_keys: set,
     eval_fn: Optional[Callable] = None,
+    extra_observers: Optional[List] = None,
 ):
     """Run hook-based analysis: compare fp32 vs quant outputs with optional observers."""
     from src.session._helpers import _OBSERVER_MAP, _extract_all_roles_qsnr_mse, _run_model
@@ -382,6 +390,13 @@ def _run_hook_analysis(
         _OBSERVER_MAP[k]() for k in sorted(observer_keys)
         if k in _OBSERVER_MAP
     ] if observer_keys else []
+
+    # Merge extra observers (e.g. PerBlockQSNRObserver) without duplication
+    if extra_observers:
+        _existing_types = {type(o) for o in observers}
+        for o in extra_observers:
+            if type(o) not in _existing_types:
+                observers.append(o)
 
     obs_ctx = AnalysisContext(qmodel, observers) if observers else None
     if obs_ctx is not None:

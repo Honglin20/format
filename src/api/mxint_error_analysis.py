@@ -29,8 +29,12 @@ import torch
 import torch.nn as nn
 
 from src.session import Session, QuantConfig
-from src.analysis.observers import QSNRObserver, MSEObserver
+from src.analysis.observers import (
+    QSNRObserver, MSEObserver,
+    DistributionObserver, HistogramObserver, PerBlockQSNRObserver,
+)
 from src.cost.model_cost import analyze_model_cost
+from src.api._chart_helpers import QSNR_REF
 
 # ── MXInt8 defaults (constants) ──────────────────────────────────────
 W_BITS = 8
@@ -95,77 +99,65 @@ def _chart(data, chart_type, *, x, y, label="MXInt8", title="", hue=None):
 
 
 def charts_from_result(result, label: str = "MXInt8"):
-    """Generate charts from SessionResult via render_chart."""
+    """Generate charts from SessionResult via render_chart.
 
-    # ① Per-layer QSNR (bar)
-    if result.qsnr_per_layer:
-        data = [
-            {"layer": k, "qsnr_db": v}
-            for k, v in result.qsnr_per_layer.items()
-        ]
-        _chart(data, "bar", x="layer", y="qsnr_db",
-               label=label, title="Per-Layer QSNR (dB)")
+    Uses accumulated QSNR as primary metric (linear-only).
+    Only one chart shows local vs accum comparison.
+    """
+    from src.api.layer_diagnostic import (
+        accum_qsnr_bar,
+        accum_vs_local_line,
+        per_role_local_qsnr,
+        error_attribution_waterfall,
+        extreme_layer_table,
+        compare_extreme_layers,
+        distribution_table,
+        diagnosis_report,
+    )
 
-    # ② Per-layer MSE (bar)
-    if result.mse_per_layer:
-        data = [
-            {"layer": k, "mse": v}
-            for k, v in result.mse_per_layer.items()
-        ]
-        _chart(data, "bar", x="layer", y="mse",
-               label=label, title="Per-Layer MSE")
+    # ── Phase 2: Global overview ─────────────────────────────────────
+    # ① Accum QSNR bar (linear-only) — replaces old ① local QSNR + ② MSE
+    accum_qsnr_bar(result, label=label)
 
-    # ③ Error propagation: local vs accumulated (line)
-    if result.qsnr_per_layer:
-        layers = list(result.qsnr_per_layer.keys())
-        data = []
-        for i, layer in enumerate(layers):
-            local = result.qsnr_per_layer[layer]
-            accum = result.accum_qsnr_per_layer.get(layer, 0)
-            data.append({"layer_idx": i, "layer": layer, "qsnr_db": local, "type": "local"})
-            data.append({"layer_idx": i, "layer": layer, "qsnr_db": accum, "type": "accumulated"})
-        if data:
-            _chart(data, "line", x="layer_idx", y="qsnr_db", hue="type",
-                   label=label, title="Error Propagation: Local vs Accumulated QSNR")
+    # ② Accuracy summary table
+    summary_rows = []
+    if result.fp32_metrics:
+        for k, v in result.fp32_metrics.items():
+            q = result.quant_metrics.get(k, "")
+            d = result.delta.get(k, "")
+            row = {"metric": k, "fp32": v, "quant": q, "delta": d}
+            if isinstance(d, (int, float)) and isinstance(v, (int, float)) and v != 0:
+                row["relative_delta_pct"] = round(d / v * 100, 4)
+            if isinstance(v, (int, float)) and isinstance(q, (int, float)):
+                row["quant_pct_of_fp32"] = round(q / v * 100, 4) if v != 0 else ""
+            summary_rows.append(row)
+    if summary_rows:
+        _chart(summary_rows, "table", x="metric", y="fp32",
+               label=label, title="Accuracy Summary (Precision Comparison)")
 
-    # ④ Per-role QSNR grouped bar (input / weight / output)
-    if result.qsnr_by_role:
-        data = []
-        for role, layer_map in result.qsnr_by_role.items():
-            for layer, qsnr in layer_map.items():
-                data.append({"layer": layer, "role": role, "qsnr_db": qsnr})
-        if data:
-            _chart(data, "bar", x="layer", y="qsnr_db", hue="role",
-                   label=label, title="Per-Layer Per-Role QSNR (dB)")
+    # ③ Accum vs Local — the ONE chart showing local QSNR
+    accum_vs_local_line(result, label=label)
 
-    # ⑤ Cost decomposition (FLOPs per layer)
+    # ④ Per-role local QSNR grouped bar
+    per_role_local_qsnr(result, label=label)
+
+    # ── Phase 3: Error attribution + Cost ────────────────────────────
+    # ⑤ Error attribution waterfall (accum-based, linear-only)
+    error_attribution_waterfall(result, k=10, label=label)
+
+    # ⑥ Cost decomposition
     if result.cost:
         cost_rows = result.cost.to_dataframe()
         if cost_rows:
             _chart(cost_rows, "bar", x="op_name", y="flops_math",
                    label=label, title="Math FLOPs per Layer")
 
-    # ⑥ Top-K worst layers
-    try:
-        top_k = result.diagnose.top_k(10, role="output")
-        if top_k:
-            data = [{"layer": n, "qsnr_db": v} for n, v in top_k]
-            _chart(data, "bar", x="layer", y="qsnr_db",
-                   label=label, title="Top-10 Worst Layers by QSNR (dB)")
-    except Exception:
-        pass
+    # ── Phase 4: Extreme layer analysis ──────────────────────────────
+    # ⑦ Extreme layer summary table (accum QSNR)
+    extreme_layer_table(result, k=3)
 
-    # ⑦ Summary table
-    summary_rows = []
-    if result.fp32_metrics:
-        for k, v in result.fp32_metrics.items():
-            summary_rows.append({"metric": k, "fp32": v,
-                                 "quant": result.quant_metrics.get(k, ""),
-                                 "delta": result.delta.get(k, "")})
-    if summary_rows:
-        _chart(summary_rows, "table",
-               x="metric", y="fp32",
-               label=label, title="Accuracy Summary")
+    # ⑧ Extreme layers comparison + deep dive (accum, dist_overlay)
+    compare_extreme_layers(result, top_k=3, linear_only=True)
 
 
 def _worst_layers_with_dominant(result, k: int = 10):
@@ -212,10 +204,9 @@ def charts_error_attribution(result, label: str = "MXInt8"):
         input_q = role_qsnrs.get("input")
         weight_q = role_qsnrs.get("weight")
 
-        # Higher QSNR = less error.  Use inverse (max - qsnr) as "error contribution".
-        ref = 60.0
-        act_loss = ref - input_q if input_q is not None else 0.0
-        w_loss = ref - weight_q if weight_q is not None else 0.0
+        # Higher QSNR = less error.  Use inverse (ref - qsnr) as "error contribution".
+        act_loss = QSNR_REF - input_q if input_q is not None else 0.0
+        w_loss = QSNR_REF - weight_q if weight_q is not None else 0.0
 
         data.append({
             "layer": layer,
@@ -387,7 +378,10 @@ def main():
     session = Session(
         model,
         config,
-        observers=[QSNRObserver(), MSEObserver()],
+        observers=[
+            QSNRObserver(), MSEObserver(),
+            DistributionObserver(), HistogramObserver(), PerBlockQSNRObserver(),
+        ],
         keep_fp32=True,
     )
     result = session.run(
@@ -447,6 +441,21 @@ def main():
         cost_report.print_summary()
     except Exception:
         pass
+
+    # ── Layer-level diagnostics ─────────────────────────────────────
+    from src.api.layer_diagnostic import (
+        compare_extreme_layers, distribution_table, diagnosis_report,
+    )
+
+    print("\n[bitx] Running layer-level diagnostics...")
+    distribution_table(result)
+    diagnosis_report(result)
+    compare_extreme_layers(result, top_k=3)
+
+    # ── Harness charts (U1–U6 + block/provenance) ──────────────────
+    from src.api.harness_charts import all_harness_charts
+    print("\n[bitx] Generating harness charts (U1–U6)...")
+    all_harness_charts(result, label=label)
 
     print("\n[bitx] Analysis complete.")
     return result
