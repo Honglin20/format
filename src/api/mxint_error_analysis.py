@@ -16,7 +16,21 @@ eval_fn handles two modes:
 MXInt8 defaults: w_bits=8, a_bits=8, block_size=16.
 All configurable via CLI flags.
 
-Charts ①–⑦: basic analysis.  Charts ⑧–⑩: error attribution + precision recovery.
+Charts after prune (~40, was ~205):
+  P1  Accum QSNR bar
+  P2  Accuracy Summary table
+  P3  Accum vs Local line
+  P4  Per-Role Local QSNR bar
+  P5  Error Attribution waterfall (bar + table)
+  —   Extreme Layers table + Block Std bar  (compare_extreme_layers, top_k=1)
+  —   Deep dive: top-1 worst + top-1 best   (layer_deep_dive × 2)
+  ⑨⑩ Precision Recovery (2 charts)
+  —   Distribution Fingerprint table
+  —   Causal Analysis table + 2 scatters
+  U2  Intervention Plan table
+  U6  Per-Block QSNR Box Plot
+
+[CHART-PRUNE] Removed charts are marked with this tag. Search to restore.
 """
 
 from __future__ import annotations
@@ -109,10 +123,9 @@ def charts_from_result(result, label: str = "MXInt8"):
         accum_vs_local_line,
         per_role_local_qsnr,
         error_attribution_waterfall,
-        extreme_layer_table,
+        # [CHART-PRUNE] removed: extreme_layer_table (merged into compare_extreme_layers)
         compare_extreme_layers,
-        distribution_table,
-        diagnosis_report,
+        # [CHART-PRUNE] removed: distribution_table, diagnosis_report (called in main)
     )
 
     # ── Phase 2: Global overview ─────────────────────────────────────
@@ -145,19 +158,19 @@ def charts_from_result(result, label: str = "MXInt8"):
     # ⑤ Error attribution waterfall (accum-based, linear-only)
     error_attribution_waterfall(result, k=10, label=label)
 
-    # ⑥ Cost decomposition
-    if result.cost:
-        cost_rows = result.cost.to_dataframe()
-        if cost_rows:
-            _chart(cost_rows, "bar", x="op_name", y="flops_math",
-                   label=label, title="Math FLOPs per Layer")
+    # [CHART-PRUNE] removed: cost bar chart (not error analysis; restore if needed)
+    # if result.cost:
+    #     cost_rows = result.cost.to_dataframe()
+    #     if cost_rows:
+    #         _chart(cost_rows, "bar", x="op_name", y="flops_math",
+    #                label=label, title="Math FLOPs per Layer")
 
     # ── Phase 4: Extreme layer analysis ──────────────────────────────
-    # ⑦ Extreme layer summary table (accum QSNR)
-    extreme_layer_table(result, k=3)
+    # [CHART-PRUNE] removed: extreme_layer_table (duplicate of compare_extreme_layers table)
+    # extreme_layer_table(result, k=3)
 
-    # ⑧ Extreme layers comparison + deep dive (accum, dist_overlay)
-    compare_extreme_layers(result, top_k=3, linear_only=True)
+    # ⑧ Extreme layers comparison + deep dive (top-1 worst + top-1 best)
+    compare_extreme_layers(result, top_k=1, linear_only=True)
 
 
 def _worst_layers_with_dominant(result, k: int = 10):
@@ -422,9 +435,8 @@ def main():
     print("\n[bitx] Generating charts...")
     charts_from_result(result, label=label)
 
-    # ── Error attribution (⑧) ───────────────────────────────────────
-    print("[bitx] Error attribution analysis...")
-    charts_error_attribution(result, label=label)
+    # [CHART-PRUNE] removed: charts_error_attribution (duplicate of P4 waterfall)
+    # charts_error_attribution(result, label=label)
 
     # ── Precision recovery (⑨⑩) ─────────────────────────────────────
     if not args.skip_recovery:
@@ -444,17 +456,18 @@ def main():
 
     # ── Layer-level diagnostics ─────────────────────────────────────
     from src.api.layer_diagnostic import (
-        compare_extreme_layers, distribution_table, diagnosis_report,
+        distribution_table, diagnosis_report,
     )
 
     print("\n[bitx] Running layer-level diagnostics...")
     distribution_table(result)
     diagnosis_report(result)
-    compare_extreme_layers(result, top_k=3)
+    # [CHART-PRUNE] removed: duplicate compare_extreme_layers call (already in charts_from_result)
+    # compare_extreme_layers(result, top_k=3)
 
-    # ── Harness charts (U1–U6 + block/provenance) ──────────────────
+    # ── Harness charts (U2 + U6 only) ──────────────────────────────
     from src.api.harness_charts import all_harness_charts
-    print("\n[bitx] Generating harness charts (U1–U6)...")
+    print("\n[bitx] Generating harness charts (U2 + U6)...")
     all_harness_charts(result, label=label)
 
     print("\n[bitx] Analysis complete.")

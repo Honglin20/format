@@ -1,9 +1,14 @@
-"""Harness chart bridge — render_chart versions of all analysis capabilities.
+"""Harness chart bridge — render_chart versions of analysis capabilities.
 
-Provides U1–U6 + block/provenance harness visualisations alongside existing
-matplotlib path.  Each function emits ``render_chart()`` when harness is
-available and *optionally* saves a matplotlib figure when ``output_dir`` is
-provided.  Existing ``src/viz/`` code is never modified.
+Provides harness visualisations alongside existing matplotlib path.
+Each function emits ``render_chart()`` when harness is available and
+*optionally* saves a matplotlib figure when ``output_dir`` is provided.
+Existing ``src/viz/`` code is never modified.
+
+[CHART-PRUNE] all_harness_charts() now only emits U2a + U6a.
+Individual functions remain available for direct import.  Removed from
+all_harness_charts: U1, U3, U4, U5, U6b, provenance, per-layer charts.
+Search [CHART-PRUNE] to restore.
 
 Observer requirements (must be attached during ``Session.run()``):
   - U1 (distribution_fit_chart): DistributionFitObserver
@@ -19,10 +24,10 @@ Usage::
 
     from src.api.harness_charts import all_harness_charts
 
-    # Single-config (SessionResult)
+    # Single-config (SessionResult) — only U2a + U6a
     all_harness_charts(result, label="MXInt8")
 
-    # Individual charts
+    # Individual charts (still available)
     from src.api.harness_charts import depth_decay_chart
     depth_decay_chart(result)
 """
@@ -130,9 +135,10 @@ def intervention_chart(result: "SessionResult", *, k: int = 5, label: str = ""):
         _chart(rows, "table", x="layer", y="current_qsnr",
                label=label, title=f"Intervention Plan: Top-{k} Layers to Boost")
 
-    if bar_data:
-        _chart(bar_data, "bar", x="layer", y="qsnr_db",
-               label=label, title=f"Intervention Target Layers (current QSNR)")
+    # [CHART-PRUNE] removed: U2b bar (duplicate of P1 Accum QSNR bar)
+    # if bar_data:
+    #     _chart(bar_data, "bar", x="layer", y="qsnr_db",
+    #            label=label, title=f"Intervention Target Layers (current QSNR)")
 
 
 # =====================================================================
@@ -320,9 +326,10 @@ def block_qsnr_box_chart(result: "SessionResult", *, linear_only: bool = True,
         _chart(box_data, "box", x="group", y="value",
                label=label, title="Per-Block QSNR Distribution by Layer (Box Plot)")
 
-    if stats_rows:
-        _chart(stats_rows, "table", x="layer", y="mean",
-               label=label, title="Per-Block QSNR Statistics: All Layers × Roles")
+    # [CHART-PRUNE] removed: U6b stats table (duplicate of layer_deep_dive block stats)
+    # if stats_rows:
+    #     _chart(stats_rows, "table", x="layer", y="mean",
+    #            label=label, title="Per-Block QSNR Statistics: All Layers × Roles")
 
 
 # =====================================================================
@@ -592,29 +599,30 @@ def multi_config_block_chart(study_report: "StudyReport", layer: str,
 
 def all_harness_charts(result: "SessionResult", *, label: str = "",
                        output_dir: Optional[str] = None):
-    """Emit all U1–U6 + block/provenance harness charts for a SessionResult.
+    """Emit U2 + U6 harness charts for a SessionResult.
 
-    Args:
-        result: SessionResult with observers data.
-        label: Group label for harness chart grouping.
-        output_dir: If provided, also save matplotlib figures via viz/.
+    [CHART-PRUNE] Removed: U1 (distribution_fit_chart), U3 (channel_heterogeneity),
+    U4 (depth_decay_chart), U5 (error_propagation_chart), error_provenance_chart,
+    and all per-layer charts (block_error_chart, channel_error_chart).
+    These overlapped with charts_from_result() + layer_deep_dive().
+    Search [CHART-PRUNE] to restore.
     """
-    distribution_fit_chart(result, label=label)
     intervention_chart(result, label=label)
-    depth_decay_chart(result, label=label)
-    error_propagation_chart(result, label=label)
     block_qsnr_box_chart(result, label=label)
-    error_provenance_chart(result, label=label)
 
-    # U3 + channel/block charts for extreme layers
-    obs = result.observers_data
-    accum = result.accum_qsnr_per_layer
-    if accum:
-        sorted_layers = sorted(accum.items(), key=lambda x: x[1])
-        for layer, _ in sorted_layers[:3]:
-            channel_heterogeneity_chart(result, layer, role="weight", label=label)
-            block_error_chart(result, layer, role="weight", label=label)
-            channel_error_chart(result, layer, role="input", label=label)
+    # [CHART-PRUNE] removed: U1, U3, U4, U5, provenance, per-layer
+    # distribution_fit_chart(result, label=label)
+    # depth_decay_chart(result, label=label)
+    # error_propagation_chart(result, label=label)
+    # error_provenance_chart(result, label=label)
+    # obs = result.observers_data
+    # accum = result.accum_qsnr_per_layer
+    # if accum:
+    #     sorted_layers = sorted(accum.items(), key=lambda x: x[1])
+    #     for layer, _ in sorted_layers[:3]:
+    #         channel_heterogeneity_chart(result, layer, role="weight", label=label)
+    #         block_error_chart(result, layer, role="weight", label=label)
+    #         channel_error_chart(result, layer, role="input", label=label)
 
     if output_dir:
         _save_matplotlib_figures(result, output_dir)
