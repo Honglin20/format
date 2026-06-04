@@ -192,7 +192,7 @@ Step 4: 综合输出学术报告
 1. ~~`src/api/diagnostic_api.py` — 三阶段分析函数~~ ✅ 已完成
 2. ~~`report_painter` agent MD — 分析指令 + 数据目录 + render_chart 调用~~ ✅ 已完成 (`docs/harness/agents/report_painter.md`)
 3. ~~上游 agent 改造 + `run_diagnostic_pipeline`~~ ✅ 已完成 (`docs/harness/agents/diagnostic_saver.md`)
-4. **更新三个示例** — Ex18/19/20 集成 diagnostic_saver + report_painter（需修改 AgentHarness，见下方方案）
+4. ~~更新三个示例 — Ex18/19/20 集成 diagnostic_saver + report_painter~~ ✅ 已完成（AgentHarness 示例 + agent MD 已更新）
 5. **Layer B E2E 测试**
 
 ---
