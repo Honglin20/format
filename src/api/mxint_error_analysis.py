@@ -16,7 +16,12 @@ eval_fn handles two modes:
 MXInt8 defaults: w_bits=8, a_bits=8, block_size=16.
 All configurable via CLI flags.
 
-Charts ①–⑦: basic analysis.  Charts ⑧–⑩: error attribution + precision recovery.
+Charts: P1 Accum QSNR bar (model layer order) → P2 Accuracy table →
+P3 Accum vs Local line → P4 Per-Role QSNR bar (≤100 dB) →
+P5 Error Attribution waterfall (positive error) →
+compare_extreme_layers (top-1 worst + best, dist_overlay + block heatmap) →
+⑨ Precision Recovery grouped bar → Distribution table → Causal analysis →
+U2 Intervention table + U6 Box plot.
 """
 
 from __future__ import annotations
@@ -179,62 +184,11 @@ def _worst_layers_with_dominant(result, k: int = 10):
     return scored[:k]
 
 
-def charts_error_attribution(result, label: str = "MXInt8"):
-    """⑧ Error attribution waterfall — per-layer activation vs weight breakdown."""
-
-    worst = _worst_layers_with_dominant(result, k=10)
-    if not worst:
-        return
-
-    # Waterfall: for each worst layer, show activation QSNR loss + weight QSNR loss
-    data = []
-    for layer, output_qsnr, dominant, role_qsnrs in worst:
-        input_q = role_qsnrs.get("input")
-        weight_q = role_qsnrs.get("weight")
-
-        # Higher QSNR = less error.  Use inverse (ref - qsnr) as "error contribution".
-        act_loss = QSNR_REF - input_q if input_q is not None else 0.0
-        w_loss = QSNR_REF - weight_q if weight_q is not None else 0.0
-
-        data.append({
-            "layer": layer,
-            "error_contribution": round(act_loss, 2),
-            "source": "activation",
-            "dominant": dominant,
-        })
-        data.append({
-            "layer": layer,
-            "error_contribution": round(w_loss, 2),
-            "source": "weight",
-            "dominant": dominant,
-        })
-
-    if data:
-        _chart(data, "bar", x="layer", y="error_contribution", hue="source",
-               label=label,
-               title="Error Attribution: Activation vs Weight (higher = more error)")
-
-    # Attribution summary table
-    table_data = []
-    for layer, output_qsnr, dominant, role_qsnrs in worst:
-        table_data.append({
-            "layer": layer,
-            "output_qsnr": round(output_qsnr, 1),
-            "activation_qsnr": round(role_qsnrs.get("input", 0), 1) if "input" in role_qsnrs else "N/A",
-            "weight_qsnr": round(role_qsnrs.get("weight", 0), 1) if "weight" in role_qsnrs else "N/A",
-            "dominant_error": dominant,
-        })
-    if table_data:
-        _chart(table_data, "table", x="layer", y="output_qsnr",
-               label=label,
-               title="Error Attribution: Worst Layers — Dominant Error Source")
-
-
 def charts_precision_recovery(
     model, config, calib_data, eval_data, eval_fn,
     baseline_result, label: str = "MXInt8", top_k: int = 5,
 ):
-    """⑨⑩ Precision recovery: restore each worst layer to FP32 and measure recovery."""
+    """⑨ Precision recovery: grouped bar showing baseline + restored + FP32 accuracy."""
 
     from src.scheme.op_config import OpQuantConfig
 

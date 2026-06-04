@@ -206,8 +206,9 @@ def _infer_heatmap_shape(
     """Infer 2D heatmap shape from model parameters and block count.
 
     Weight: (out_features, in_features) → (out_features, in_features // block_size)
-    Input:  avg across all leading dims → (D[-2], D[-1] // block_size)
-    Output: same as input.
+    Input:  quantized along in_features → last_dim = weight.shape[-1]
+    Output: quantized along out_features → last_dim = weight.shape[0] (Linear)
+            or weight.shape[-2] (Conv — out_channels dim before spatial dims)
 
     Returns (n_rows, n_cols) or None if shape cannot be inferred.
     """
@@ -217,7 +218,16 @@ def _infer_heatmap_shape(
     if module is None or not hasattr(module, "weight") or module.weight is None:
         return None
 
-    last_dim = module.weight.shape[-1]  # in_features for Linear, kW for Conv
+    # Pick the correct dimension based on role
+    if role == "output":
+        # Output activation shape: (batch, out_features) for Linear
+        # For Conv: out_channels = weight.shape[0], but also has spatial dims.
+        # Use weight.shape[0] as the "per-row" dimension count.
+        last_dim = module.weight.shape[0]  # out_features for Linear, out_ch for Conv
+    else:
+        # Weight and input: quantized along the last axis of weight
+        last_dim = module.weight.shape[-1]  # in_features for Linear, kW for Conv
+
     n_blocks_per_row = last_dim // block_size
     if n_blocks_per_row == 0:
         return None

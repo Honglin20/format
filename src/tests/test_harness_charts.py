@@ -231,8 +231,8 @@ class TestAllHarnessCharts:
     def test_runs_all(self, mock_render, sample_result):
         from src.api.harness_charts import all_harness_charts
         all_harness_charts(sample_result, label="Test")
-        # Should emit many charts (U1-U6 + block + provenance + per-layer)
-        assert mock_render.call_count >= 3
+        # Pruned to U2a (intervention table) + U6 (box plot) only
+        assert mock_render.call_count >= 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

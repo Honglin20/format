@@ -1,21 +1,20 @@
-"""Layer-level diagnostic atomic functions for harness integration.
+"""Layer-level diagnostic functions for harness integration.
 
 Primitive plotting functions:
-  accum_qsnr_bar           — Accumulated QSNR bar chart (linear-only)
-  accum_vs_local_line      — Accum vs local QSNR comparison (the one local reference)
-  per_role_local_qsnr      — Per-role local QSNR grouped bar
-  error_attribution_waterfall — Activation vs weight error contribution
+  accum_qsnr_bar           — Accumulated QSNR bar (optional model layer order)
+  accum_vs_local_line      — Accum vs local QSNR comparison
+  per_role_local_qsnr      — Per-role local QSNR (QSNR ≤ 100 dB only)
+  error_attribution_waterfall — Activation vs weight error (positive error only)
   extreme_layer_table      — Top-K worst + best layers summary
 
 Deep-dive functions:
-  layer_deep_dive          — Full 3-role diagnostic for one layer (dist_overlay)
-  compare_extreme_layers   — Top-K worst + best layers with distributions
-  block_heatmap            — Per-block QSNR distribution
+  layer_deep_dive          — dist_overlay + block QSNR heatmap per role (3+3)
+  compare_extreme_layers   — Top-K worst + best with deep dive
   distribution_table       — All-layer distribution fingerprint
   diagnosis_report         — All-layer causal analysis + scatter
 
 Requires: DistributionObserver, HistogramObserver, PerBlockQSNRObserver
-          attached during Session.run().
+          attached during Session.run(). block_qsnr_heatmap also needs model.
 """
 
 from __future__ import annotations
@@ -351,53 +350,9 @@ def compare_extreme_layers(
                         label=rank_label)
 
 
+
 # =====================================================================
-# 3. block_heatmap
-# =====================================================================
-
-def block_heatmap(result: "SessionResult", layer: str, role: str = "weight"):
-    """Per-block QSNR distribution for one (layer, role).
-
-    Since per-block QSNR is 1D data, uses bar chart (not 2D heatmap)
-    to show all blocks sorted by QSNR — reveals the distribution shape.
-    """
-    obs = result.observers_data
-    blocks = _get_per_block_qsnr(obs, layer, role)
-
-    if not blocks:
-        print(f"[bitx] No per-block QSNR data for {layer}/{role}. "
-              f"(Need PerBlockQSNRObserver attached during Session.run)")
-        return
-
-    # All blocks sorted by QSNR (bar) — shows distribution of block-level quality
-    sorted_all = sorted(blocks.items(), key=lambda x: x[1])
-    # Downsample if too many blocks for readable bar chart
-    if len(sorted_all) > 100:
-        step = len(sorted_all) // 100
-        sampled = sorted_all[::step]
-    else:
-        sampled = sorted_all
-    bar_all = [{"block_idx": idx, "qsnr_db": round(q, 1)} for idx, q in sampled]
-    _chart(bar_all, "bar", x="block_idx", y="qsnr_db",
-           label="", title=f"{layer} ({role}) All Blocks QSNR Distribution (sorted)")
-
-    # Top-10 worst blocks bar
-    top10 = sorted_all[:10]
-    bar_worst = [{"block_idx": idx, "qsnr_db": round(q, 1)} for idx, q in top10]
-    _chart(bar_worst, "bar", x="block_idx", y="qsnr_db",
-           label="", title=f"{layer} ({role}) Top-10 Worst Blocks by QSNR")
-
-    # Stats table
-    stats = _block_stats(blocks)
-    _chart([{"layer": layer, "role": role, **stats}], "table",
-           x="layer", y="mean",
-           label="", title=f"{layer} ({role}) Block QSNR Statistics")
-
-    print(f"[bitx] {layer}/{role}: {stats['n_blocks']} blocks, "
-          f"QSNR mean={stats['mean']:.1f} std={stats['std']:.1f} "
-          f"min={stats['min']:.1f} max={stats['max']:.1f}")
-
-
+# 3. distribution_table
 # =====================================================================
 # 4. distribution_table
 # =====================================================================

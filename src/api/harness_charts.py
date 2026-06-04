@@ -1,28 +1,19 @@
-"""Harness chart bridge — render_chart versions of all analysis capabilities.
+"""Harness chart bridge — render_chart versions of analysis capabilities.
 
-Provides U1–U6 + block/provenance harness visualisations alongside existing
-matplotlib path.  Each function emits ``render_chart()`` when harness is
-available and *optionally* saves a matplotlib figure when ``output_dir`` is
-provided.  Existing ``src/viz/`` code is never modified.
+``all_harness_charts()`` emits only U2a + U6. Individual chart functions
+remain available for direct import.
 
-Observer requirements (must be attached during ``Session.run()``):
-  - U1 (distribution_fit_chart): DistributionFitObserver
-  - U2 (intervention_chart): QSNRObserver (via qsnr_by_role)
-  - U3 (channel_heterogeneity_chart): PerBlockQSNRObserver
-  - U4 (depth_decay_chart): QSNRObserver (via qsnr_by_role)
-  - U5 (error_propagation_chart): QSNRObserver (via qsnr_by_role)
-  - U6 (block_qsnr_box_chart): PerBlockQSNRObserver
-  - block_error_chart / channel_error_chart: PerBlockQSNRObserver
-  - error_provenance_chart: QSNRObserver (via qsnr_by_role)
+Each function emits ``render_chart()`` when harness is available and
+*optionally* saves a matplotlib figure when ``output_dir`` is provided.
 
 Usage::
 
     from src.api.harness_charts import all_harness_charts
 
-    # Single-config (SessionResult)
+    # Single-config — U2a intervention table + U6 box plot
     all_harness_charts(result, label="MXInt8")
 
-    # Individual charts
+    # Individual charts (still available for direct import)
     from src.api.harness_charts import depth_decay_chart
     depth_decay_chart(result)
 """
