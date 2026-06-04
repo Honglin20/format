@@ -1141,7 +1141,10 @@ def save_diagnostic_data(
         if layer_overlays:
             overlay_data = {}
             for role, od in layer_overlays.items():
-                overlay_data[role] = asdict(od)
+                overlay_data[role] = {
+                    "chart_data": od.to_chart_data(),
+                    "n_bins": len(od.bins),
+                }
             layer_data["dist_overlay"] = overlay_data
 
         fname = f"layer_{safe}.json"

@@ -16,6 +16,7 @@ from src.scheme.quant_scheme import QuantScheme
 from src.formats.base import FormatBase
 from src.session import QuantConfig
 from src.session._result import SessionResult
+from src.api.diagnostic_api import _safe_layer_name
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -532,7 +533,7 @@ class TestSaveDiagnosticData:
         assert "layers" in dd_index
         # Each layer mentioned in index should have a file
         for layer, desc in dd_index["layers"].items():
-            safe = layer.replace(".", "_")
+            safe = _safe_layer_name(layer)
             path = f"{diag_dir}/deep_dive/layer_{safe}.json"
             assert os.path.isfile(path), f"Missing per-layer file for {layer}"
             with open(path) as f:
@@ -559,19 +560,20 @@ class TestSaveDiagnosticData:
 
     def test_dist_overlay_extracted(self, full_pipeline_reports):
         _, deep, _, diag_dir = full_pipeline_reports
-        # If dist_overlays exist in report, they should be in per-layer files
         if not deep.dist_overlays:
             pytest.skip("No dist_overlay data (HistogramObserver not attached)")
         for layer, roles in deep.dist_overlays.items():
-            safe = layer.replace(".", "_")
+            safe = _safe_layer_name(layer)
             path = f"{diag_dir}/deep_dive/layer_{safe}.json"
             with open(path) as f:
                 data = json.load(f)
             assert "dist_overlay" in data
-            for role, overlay in roles.items():
+            for role in roles:
                 assert role in data["dist_overlay"]
-                assert "bins" in data["dist_overlay"][role]
-                assert len(data["dist_overlay"][role]["bins"]) > 0
+                stored = data["dist_overlay"][role]
+                assert "chart_data" in stored
+                assert len(stored["chart_data"]) > 0
+                assert "bin" in stored["chart_data"][0]
 
     def test_dist_overlay_to_chart_data(self):
         """DistOverlayData.to_chart_data() produces render_chart-compatible data."""
@@ -609,7 +611,7 @@ class TestSaveDiagnosticData:
         assert len(layers) > 0
 
         # Step 4: Agent reads one specific layer file
-        safe = layers[0].replace(".", "_")
+        safe = _safe_layer_name(layers[0])
         with open(f"{diag_dir}/deep_dive/layer_{safe}.json") as f:
             layer_data = json.load(f)
         assert isinstance(layer_data, dict)
